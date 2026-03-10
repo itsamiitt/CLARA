@@ -1,9 +1,9 @@
-<![CDATA[<!-- Badges -->
+<!-- Badges -->
 <p align="center">
   <a href="https://pypi.org/project/clara-memory/"><img src="https://img.shields.io/pypi/v/clara-memory?color=blue&label=PyPI" alt="PyPI version"></a>
   <a href="https://pypi.org/project/clara-memory/"><img src="https://img.shields.io/pypi/pyversions/clara-memory?label=Python" alt="Python 3.10+"></a>
-  <a href="https://github.com/your-org/clara/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
-  <a href="https://clara-memory.readthedocs.io"><img src="https://img.shields.io/badge/docs-readthedocs-blue" alt="Documentation"></a>
+  <a href="https://github.com/itsamiitt/CLARA/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
+  <a href="https://github.com/itsamiitt/CLARA"><img src="https://img.shields.io/badge/docs-github-blue" alt="Documentation"></a>
 </p>
 
 <h1 align="center">CLARA</h1>
@@ -188,8 +188,8 @@ pip install clara-memory
 Or from source:
 
 ```bash
-git clone https://github.com/your-org/clara.git
-cd clara
+git clone https://github.com/itsamiitt/CLARA.git
+cd CLARA
 pip install -e ".[dev]"
 ```
 
@@ -240,14 +240,9 @@ asyncio.run(check())
 
 ## Documentation
 
-Full documentation is available at **[clara-memory.readthedocs.io](https://clara-memory.readthedocs.io)**.
-
-- [Getting Started Guide](https://clara-memory.readthedocs.io/en/latest/getting-started/)
-- [API Reference](https://clara-memory.readthedocs.io/en/latest/api/)
-- [Architecture Deep Dive](https://clara-memory.readthedocs.io/en/latest/architecture/)
-- [Configuration & Tuning](https://clara-memory.readthedocs.io/en/latest/configuration/)
+See the codebase for full details and examples.
 
 ## License
 
 CLARA is released under the [MIT License](LICENSE).
-]]>
+

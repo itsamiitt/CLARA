@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [
-    { name = "CLARA Contributors" },
+    { name = "Amit", email = "itsamiitt@github.local" },
 ]
 keywords = [
     "ai",
@@ -63,11 +63,9 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/clara"
-Documentation = "https://clara-memory.readthedocs.io"
-Repository = "https://github.com/your-org/clara"
-Issues = "https://github.com/your-org/clara/issues"
-Changelog = "https://github.com/your-org/clara/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/itsamiitt/CLARA"
+Repository = "https://github.com/itsamiitt/CLARA.git"
+Issues = "https://github.com/itsamiitt/CLARA/issues"
 
 [tool.setuptools.packages.find]
 include = ["clara*"]
