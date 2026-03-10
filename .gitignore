@@ -30,6 +30,12 @@ htmlcov/
 .coverage
 .coverage.*
 test_output.txt
+test_result*.txt
+test_results/
+test-results/
+junit*.xml
+pytest*.xml
+test_int.txt
 
 # OS
 .DS_Store
@@ -51,3 +57,7 @@ Thumbs.db
 .env
 .env.local
 .env.*
+
+# Local docs / notes not intended for GitHub
+CONTEXT.md
+context.md
