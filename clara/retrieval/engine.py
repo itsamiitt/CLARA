@@ -18,6 +18,7 @@ language query.  The pipeline:
 from __future__ import annotations
 
 import math
+from ast import literal_eval
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Sequence
@@ -25,8 +26,8 @@ from typing import Any, Sequence
 from sqlalchemy import select, text as sa_text, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clara.db.models import Memory, MemoryStatus, MemoryType
-from clara.retrieval.embeddings import EmbeddingEngine
+from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
+from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +174,10 @@ class RetrievalEngine:
             A :class:`RetrievalResult` with results grouped by memory type.
         """
         # 1. Embed the query
-        query_vector = self._embedder.embed(query)
+        query_vector = normalize_embedding_dimensions(
+            self._embedder.embed(query),
+            target_dimensions=VECTOR_DIMENSIONS,
+        )
 
         # 2. Vector similarity search (ANN) — pull more candidates than
         #    top_k so the re-ranking stage has room to reshuffle.
@@ -257,6 +261,13 @@ class RetrievalEngine:
         Uses pgvector's ``<=>`` (cosine distance) operator. Similarity is
         calculated as ``1 − distance``.
         """
+        if self._dialect_name() == "sqlite":
+            return await self._fetch_candidates_sqlite(
+                query_vector,
+                n_candidates=n_candidates,
+                memory_types=memory_types,
+            )
+
         # cosine_distance column expression
         distance_expr = Memory.embedding.cosine_distance(query_vector).label(
             "cosine_distance"
@@ -281,6 +292,69 @@ class RetrievalEngine:
 
         # Convert distance → similarity
         return [(mem, 1.0 - dist) for mem, dist in rows]
+
+    def _dialect_name(self) -> str | None:
+        bind = getattr(self._session, "bind", None)
+        dialect = getattr(bind, "dialect", None)
+        name = getattr(dialect, "name", None)
+        return name if isinstance(name, str) else None
+
+    @staticmethod
+    def _embedding_to_list(value: Any) -> list[float] | None:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [float(v) for v in value]
+        if isinstance(value, tuple):
+            return [float(v) for v in value]
+        if isinstance(value, str):
+            try:
+                parsed = literal_eval(value)
+            except (SyntaxError, ValueError):
+                return None
+            if isinstance(parsed, (list, tuple)):
+                return [float(v) for v in parsed]
+            return None
+        tolist = getattr(value, "tolist", None)
+        if callable(tolist):
+            parsed = tolist()
+            if isinstance(parsed, list):
+                return [float(v) for v in parsed]
+        return None
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        mag_a = math.sqrt(sum(x * x for x in a))
+        mag_b = math.sqrt(sum(x * x for x in b))
+        if mag_a == 0.0 or mag_b == 0.0:
+            return 0.0
+        return dot / (mag_a * mag_b)
+
+    async def _fetch_candidates_sqlite(
+        self,
+        query_vector: list[float],
+        *,
+        n_candidates: int,
+        memory_types: Sequence[MemoryType] | None = None,
+    ) -> list[tuple[Memory, float]]:
+        filters = [Memory.status == MemoryStatus.active]
+        if memory_types:
+            filters.append(Memory.memory_type.in_(memory_types))
+
+        stmt = select(Memory).where(and_(*filters))
+        result = await self._session.execute(stmt)
+        rows = result.scalars().all()
+
+        pairs: list[tuple[Memory, float]] = []
+        for mem in rows:
+            mem_vector = self._embedding_to_list(mem.embedding)
+            if mem_vector is None:
+                continue
+            pairs.append((mem, self._cosine_similarity(query_vector, mem_vector)))
+
+        pairs.sort(key=lambda pair: pair[1], reverse=True)
+        return pairs[:n_candidates]
 
     # ------------------------------------------------------------------
     # Internal: access tracking

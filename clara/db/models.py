@@ -11,17 +11,53 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    JSON,
+    Text,
     DateTime,
     Enum,
     Float,
     Index,
     MetaData,
+    Uuid,
+    cast,
+    literal,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import UserDefinedType
+
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:
+    def _vector_literal(value: list[float] | tuple[float, ...]) -> str:
+        return "[" + ",".join(f"{float(v):.12g}" for v in value) + "]"
+
+    class Vector(UserDefinedType):
+        """Lightweight pgvector fallback used when the dependency is absent.
+
+        This keeps the package importable for SQLite-backed tests and local
+        development environments that do not have ``pgvector`` installed.
+        """
+
+        cache_ok = True
+
+        def __init__(self, dimensions: int) -> None:
+            self.dimensions = dimensions
+
+        def get_col_spec(self, **kw: object) -> str:
+            return f"VECTOR({self.dimensions})"
+
+        def load_dialect_impl(self, dialect):
+            if dialect.name == "sqlite":
+                return dialect.type_descriptor(Text())
+            return self
+
+        class comparator_factory(UserDefinedType.Comparator):
+            def cosine_distance(self, other: list[float] | tuple[float, ...]):
+                rhs = cast(literal(_vector_literal(other)), self.type)
+                return self.expr.op("<=>")(rhs)
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +108,7 @@ class Base(DeclarativeBase):
 # ---------------------------------------------------------------------------
 
 VECTOR_DIMENSIONS = 1536  # OpenAI text-embedding-3-small / compatible models
+JSON_STORAGE_TYPE = JSON().with_variant(JSONB, "postgresql")
 
 
 class Memory(Base):
@@ -94,7 +131,7 @@ class Memory(Base):
 
     # --- Primary key ---
     memory_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
         comment="Unique identifier for the memory record.",
@@ -109,7 +146,7 @@ class Memory(Base):
 
     # --- Payload ---
     content: Mapped[dict] = mapped_column(
-        JSONB,
+        JSON_STORAGE_TYPE,
         nullable=False,
         comment="Type-specific structured content (subject/relation/object, steps, properties, etc.).",
     )
@@ -169,7 +206,7 @@ class Memory(Base):
     # --- Auxiliary metadata ---
     metadata_: Mapped[dict | None] = mapped_column(
         "metadata",
-        JSONB,
+        JSON_STORAGE_TYPE,
         nullable=True,
         default=dict,
         comment="Auxiliary metadata: superseded_by, tags, source, related IDs, etc.",

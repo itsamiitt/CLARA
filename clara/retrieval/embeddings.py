@@ -54,6 +54,23 @@ OPENAI_BATCH_LIMIT = 2048  # Max texts per single API call
 
 
 # ---------------------------------------------------------------------------
+# Vector helpers
+# ---------------------------------------------------------------------------
+
+def normalize_embedding_dimensions(
+    vector: list[float],
+    *,
+    target_dimensions: int,
+) -> list[float]:
+    """Pad or truncate a vector so it fits the storage schema."""
+    if len(vector) == target_dimensions:
+        return vector
+    if len(vector) > target_dimensions:
+        return vector[:target_dimensions]
+    return vector + ([0.0] * (target_dimensions - len(vector)))
+
+
+# ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
 

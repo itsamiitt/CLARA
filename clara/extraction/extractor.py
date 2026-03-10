@@ -113,8 +113,9 @@ Implicit or contextual inferences get 0.5-0.7.
 "system", "agent_inference".
 
 OUTPUT FORMAT:
-Return ONLY a valid JSON array. No markdown, no code fences, no explanation.
-Each element must have these exact keys:
+Return ONLY a valid JSON object with a top-level "facts" array.
+No markdown, no code fences, no explanation.
+Each element inside "facts" must have these exact keys:
 - "subject" (string)
 - "relation" (string)
 - "object" (string)
@@ -124,10 +125,11 @@ Each element must have these exact keys:
 - "is_negation" (boolean)
 
 Example output:
-[{"subject": "user", "relation": "uses", "object": "Rust", "domain": "systems", \
-"source_type": "user_direct", "confidence": 0.9, "is_negation": false}]
+{"facts": [{"subject": "user", "relation": "uses", "object": "Rust", \
+"domain": "systems", "source_type": "user_direct", "confidence": 0.9, \
+"is_negation": false}]}
 
-If no facts can be extracted, return an empty array: []
+If no facts can be extracted, return: {"facts": []}
 """
 
 

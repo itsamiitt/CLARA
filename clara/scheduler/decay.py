@@ -56,6 +56,24 @@ SKILL_UNUSED_DAYS: int = 60
 # Pure helpers (stateless, easy to test)
 # ---------------------------------------------------------------------------
 
+def _ensure_aware(dt: datetime) -> datetime:
+    """Normalize naive datetimes to UTC for SQLite-backed test environments."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _decay_anchor(record: Memory) -> datetime:
+    """Use the last decay timestamp when present, else fall back to updated_at."""
+    meta = dict(record.metadata_) if record.metadata_ else {}
+    last_decay_raw = meta.get("last_decay_at")
+    if isinstance(last_decay_raw, str):
+        try:
+            return _ensure_aware(datetime.fromisoformat(last_decay_raw))
+        except ValueError:
+            pass
+    return _ensure_aware(record.updated_at)
+
 def compute_decayed_confidence(
     confidence_0: float,
     decay_rate: float,
@@ -153,15 +171,20 @@ class DecayScheduler:
                 records: Sequence[Memory] = result.scalars().all()
 
                 for record in records:
-                    days_elapsed = (now - record.updated_at).total_seconds() / 86_400.0
+                    decay_anchor = _decay_anchor(record)
+                    days_elapsed = (now - decay_anchor).total_seconds() / 86_400.0
                     if days_elapsed <= 0:
                         continue
 
+                    old_confidence = record.confidence
                     new_confidence = compute_decayed_confidence(
-                        record.confidence,
+                        old_confidence,
                         record.decay_rate,
                         days_elapsed,
                     )
+                    meta = dict(record.metadata_) if record.metadata_ else {}
+                    meta["last_decay_at"] = now.isoformat()
+                    record.metadata_ = meta
 
                     if should_archive(new_confidence):
                         record.status = MemoryStatus.archived
@@ -169,10 +192,10 @@ class DecayScheduler:
                         record.updated_at = now
                         archived_count += 1
                         logger.info(
-                            "Archived memory %s (type=%s, confidence=%.4f → %.4f)",
+                            "Archived memory %s (type=%s, confidence=%.4f -> %.4f)",
                             record.memory_id,
                             record.memory_type.value,
-                            record.confidence,
+                            old_confidence,
                             new_confidence,
                         )
                     else:

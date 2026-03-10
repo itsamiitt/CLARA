@@ -57,6 +57,12 @@ DEFAULT_OBSERVATION_STRENGTH = 1.0
 # Confidence scoring
 # ---------------------------------------------------------------------------
 
+def _ensure_aware(dt: datetime) -> datetime:
+    """Normalize naive datetimes to UTC for SQLite-backed test environments."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
 def compute_confidence(
     *,
     prior_confidence: float,
@@ -126,6 +132,7 @@ class BeliefMemory:
         raw_text: str | None = None,
         decay_rate: float = DEFAULT_DECAY_RATE,
         observation_strength: float = DEFAULT_OBSERVATION_STRENGTH,
+        embedding: list[float] | None = None,
     ) -> Memory:
         """Create a new belief record in the Unified Memory Store.
 
@@ -176,6 +183,7 @@ class BeliefMemory:
         record = Memory(
             memory_type=MemoryType.belief,
             content=content,
+            embedding=embedding,
             confidence=initial_confidence,
             status=MemoryStatus.active,
             decay_rate=decay_rate,
@@ -226,11 +234,11 @@ class BeliefMemory:
             Memory.status == MemoryStatus.active,
         ]
         if subject is not None:
-            filters.append(Memory.content["subject"].astext == subject)
+            filters.append(Memory.content["subject"].as_string() == subject)
         if relation is not None:
-            filters.append(Memory.content["relation"].astext == relation)
+            filters.append(Memory.content["relation"].as_string() == relation)
         if domain is not None:
-            filters.append(Memory.content["domain"].astext == domain)
+            filters.append(Memory.content["domain"].as_string() == domain)
 
         stmt = (
             select(Memory)
@@ -252,6 +260,7 @@ class BeliefMemory:
         source: SourceType,
         raw_text: str | None = None,
         observation_strength: float = DEFAULT_OBSERVATION_STRENGTH,
+        embedding: list[float] | None = None,
     ) -> Memory:
         """Reinforce an existing belief with a new observation.
 
@@ -283,7 +292,8 @@ class BeliefMemory:
         source_weight = SOURCE_WEIGHTS[source]
 
         # Compute days since last update
-        days_elapsed = (now - record.updated_at).total_seconds() / 86_400.0
+        updated_at = _ensure_aware(record.updated_at)
+        days_elapsed = max(0.0, (now - updated_at).total_seconds() / 86_400.0)
 
         meta = dict(record.metadata_) if record.metadata_ else {}
         prior_weight = meta.get("prior_weight", 1.0)
@@ -310,6 +320,8 @@ class BeliefMemory:
         meta["prior_weight"] = prior_weight + 1.0
 
         record.confidence = new_confidence
+        if embedding is not None:
+            record.embedding = embedding
         record.updated_at = now
         record.metadata_ = meta
 
@@ -331,6 +343,7 @@ class BeliefMemory:
         source: SourceType = SourceType.user_direct,
         raw_text: str | None = None,
         decay_rate: float = DEFAULT_DECAY_RATE,
+        embedding: list[float] | None = None,
     ) -> tuple[Memory, Memory]:
         """Replace an existing belief with a new one.
 
@@ -368,6 +381,7 @@ class BeliefMemory:
             source=source,
             raw_text=raw_text,
             decay_rate=decay_rate,
+            embedding=embedding,
         )
 
         # Mark old record as superseded

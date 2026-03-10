@@ -25,10 +25,10 @@ from typing import Any, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clara.db.models import Memory, MemoryStatus, MemoryType
+from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
 from clara.extraction.extractor import ExtractedFact
 from clara.memory.belief import BeliefMemory, SourceType
-from clara.retrieval.embeddings import EmbeddingEngine
+from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
 from clara.retrieval.engine import RetrievalEngine, ScoredMemory
 
 logger = logging.getLogger(__name__)
@@ -247,16 +247,25 @@ class MemoryUpdateEngine:
         self, fact: ExtractedFact,
     ) -> list[ScoredMemory]:
         """Embed the fact and search for similar memories."""
-        # Build a search string from the fact
-        search_text = f"{fact.subject} {fact.relation} {fact.object}"
-        if fact.domain:
-            search_text += f" ({fact.domain})"
-
         result = await self._retriever.search(
-            search_text,
+            self._fact_text(fact),
             top_k=SEARCH_TOP_K,
         )
         return result.all
+
+    @staticmethod
+    def _fact_text(fact: ExtractedFact) -> str:
+        """Canonical text form used for both retrieval and stored embeddings."""
+        text = f"{fact.subject} {fact.relation} {fact.object}"
+        if fact.domain:
+            text += f" ({fact.domain})"
+        return text
+
+    def _fact_embedding(self, fact: ExtractedFact) -> list[float]:
+        return normalize_embedding_dimensions(
+            self._embedder.embed(self._fact_text(fact)),
+            target_dimensions=VECTOR_DIMENSIONS,
+        )
 
     async def _resolve_conflict(
         self,
@@ -299,6 +308,7 @@ class MemoryUpdateEngine:
                     domain=fact.domain,
                     source=_map_source_type(fact.source_type),
                     raw_text=fact.raw_text,
+                    embedding=self._fact_embedding(fact),
                 )
                 return UpdateResult(
                     action_taken=ActionTaken.superseded,
@@ -344,6 +354,7 @@ class MemoryUpdateEngine:
                 best.memory.memory_id,
                 source=_map_source_type(fact.source_type),
                 raw_text=fact.raw_text,
+                embedding=self._fact_embedding(fact),
             )
             return UpdateResult(
                 action_taken=ActionTaken.reinforced,
@@ -381,6 +392,8 @@ class MemoryUpdateEngine:
         Uses :class:`BeliefMemory.store` for beliefs; for other types,
         creates the record directly.
         """
+        embedding = self._fact_embedding(fact)
+
         if memory_type == MemoryType.belief:
             return await self._belief_memory.store(
                 subject=fact.subject,
@@ -389,6 +402,7 @@ class MemoryUpdateEngine:
                 domain=fact.domain,
                 source=_map_source_type(fact.source_type),
                 raw_text=fact.raw_text,
+                embedding=embedding,
             )
 
         # Non-belief types: create directly
@@ -404,6 +418,7 @@ class MemoryUpdateEngine:
         record = Memory(
             memory_type=memory_type,
             content=content,
+            embedding=embedding,
             confidence=fact.confidence,
             status=MemoryStatus.active,
             decay_rate=0.0 if memory_type == MemoryType.event else 0.02,
