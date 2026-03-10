@@ -6,6 +6,11 @@ __pycache__/
 dist/
 build/
 *.egg
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
 
 # Virtual environments
 .venv/
@@ -20,14 +25,29 @@ env/
 
 # Testing
 .pytest_cache/
+pytest-cache-files-*/
 htmlcov/
 .coverage
+.coverage.*
 test_output.txt
 
 # OS
 .DS_Store
 Thumbs.db
 
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
 # Environment
 .env
 .env.local
+.env.*
