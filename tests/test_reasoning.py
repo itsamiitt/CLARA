@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+import hashlib
+import math
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from clara.db.models import Base, VECTOR_DIMENSIONS
+from clara.extraction.extractor import ExtractedFact
+from clara.memory.belief import BeliefMemory, SourceType
+from clara.reasoning import ContextAssembler, ReasoningEngine
+from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
+from clara.retrieval.engine import RetrievalResult, ScoredMemory
+
+
+FAKE_DIM = 8
+
+
+class _FakeBackend:
+    @property
+    def dimensions(self) -> int:
+        return FAKE_DIM
+
+    def embed(self, text: str) -> list[float]:
+        digest = hashlib.blake2b(text.encode("utf-8"), digest_size=FAKE_DIM).digest()
+        raw = [byte / 255.0 for byte in digest]
+        mag = math.sqrt(sum(x * x for x in raw)) or 1.0
+        return [x / mag for x in raw]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(text) for text in texts]
+
+
+class _ResponseExtractor:
+    def extract(self, text: str) -> list[ExtractedFact]:
+        if "Rust" not in text:
+            return []
+        return [
+            ExtractedFact(
+                subject="assistant",
+                relation="mentioned",
+                object="Rust",
+                domain=None,
+                source_type="system",
+                confidence=0.8,
+                is_negation=False,
+                raw_text=text,
+            )
+        ]
+
+
+@pytest_asyncio.fixture
+async def session() -> AsyncSession:
+    from sqlalchemy.dialects.postgresql import JSONB
+    from sqlalchemy.ext.compiler import compiles
+
+    @compiles(JSONB, "sqlite")
+    def _compile_jsonb_sqlite(type_, compiler, **kw):
+        return "TEXT"
+
+    try:
+        from pgvector.sqlalchemy import Vector
+
+        @compiles(Vector, "sqlite")
+        def _compile_vector_sqlite(type_, compiler, **kw):
+            return "TEXT"
+    except Exception:
+        pass
+
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as sess:
+        yield sess
+
+    await engine.dispose()
+
+
+class TestContextAssembler:
+    @pytest.mark.asyncio
+    async def test_build_formats_retrieval_result(self):
+        retriever = AsyncMock()
+        mem = AsyncMock()
+        mem.content = {
+            "subject": "user",
+            "relation": "uses",
+            "object": "Rust",
+            "domain": "systems",
+        }
+        mem.confidence = 0.9
+        mem.created_at = datetime(2026, 3, 11, tzinfo=timezone.utc)
+        mem.memory_type = "belief"
+        scored = ScoredMemory(
+            memory=mem,
+            score=0.9,
+            similarity=0.95,
+            confidence=0.9,
+            recency_score=1.0,
+            usage_frequency=0.0,
+        )
+        retriever.search.return_value = RetrievalResult(beliefs=[scored])
+
+        assembler = ContextAssembler(retriever)
+        context = await assembler.build("systems", user_id="alice", top_k=4)
+
+        assert "=== MEMORY CONTEXT ===" in context
+        assert "user uses Rust" in context
+        assert retriever.search.await_args.kwargs["user_id"] == "alice"
+
+
+class TestReasoningEngine:
+    @pytest.mark.asyncio
+    async def test_respond_builds_context_and_stores_response_facts(self, session: AsyncSession):
+        embedder = EmbeddingEngine(_FakeBackend())
+        beliefs = BeliefMemory(session)
+        await beliefs.store(
+            subject="user",
+            relation="uses",
+            object_="Rust",
+            domain="systems",
+            source=SourceType.user_direct,
+            raw_text="I use Rust for systems work.",
+            user_id="alice",
+            embedding=normalize_embedding_dimensions(
+                embedder.embed("user uses Rust (systems)"),
+                target_dimensions=VECTOR_DIMENSIONS,
+            ),
+        )
+        await session.commit()
+
+        async def _respond(system_prompt: str, query: str, model: str) -> str:
+            return "The user uses Rust for systems work."
+
+        engine = ReasoningEngine(
+            session,
+            embedder,
+            _ResponseExtractor(),  # type: ignore[arg-type]
+            llm_provider="openai",
+            response_generator=_respond,
+        )
+
+        response = await engine.respond(
+            "What language does the user use?",
+            user_id="alice",
+            top_k=4,
+        )
+
+        assert "Rust" in response.text
+        assert "=== MEMORY CONTEXT ===" in response.memory_context
+        assert response.memories_used
+        assert len(response.facts_stored) == 1
+        assert response.facts_stored[0].memory_id is not None

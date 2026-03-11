@@ -11,6 +11,7 @@ time decay, as described in CONTEXT.md §4 (Belief Memory → Confidence Scoring
 from __future__ import annotations
 
 import enum
+import inspect
 import math
 import uuid
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ class SourceType(str, enum.Enum):
     tool_api = "tool_api"
     system = "system"
     agent_inference = "agent_inference"
+    agent_reflection = "agent_reflection"
 
 
 SOURCE_WEIGHTS: dict[SourceType, float] = {
@@ -42,6 +44,7 @@ SOURCE_WEIGHTS: dict[SourceType, float] = {
     SourceType.tool_api: 0.85,
     SourceType.system: 0.75,
     SourceType.agent_inference: 0.5,
+    SourceType.agent_reflection: 0.5,
 }
 
 # Default decay rates for belief sub-types (per day)
@@ -128,8 +131,10 @@ class BeliefMemory:
         relation: str,
         object_: str,
         domain: str | None = None,
+        is_negation: bool = False,
         source: SourceType = SourceType.user_direct,
         raw_text: str | None = None,
+        user_id: str | None = None,
         decay_rate: float = DEFAULT_DECAY_RATE,
         observation_strength: float = DEFAULT_OBSERVATION_STRENGTH,
         embedding: list[float] | None = None,
@@ -173,6 +178,8 @@ class BeliefMemory:
         }
         if domain is not None:
             content["domain"] = domain
+        if is_negation:
+            content["is_negation"] = True
 
         metadata: dict[str, Any] = {
             "evidence": [evidence_entry],
@@ -182,6 +189,7 @@ class BeliefMemory:
 
         record = Memory(
             memory_type=MemoryType.belief,
+            user_id=user_id,
             content=content,
             embedding=embedding,
             confidence=initial_confidence,
@@ -226,6 +234,7 @@ class BeliefMemory:
         subject: str | None = None,
         relation: str | None = None,
         domain: str | None = None,
+        user_id: str | None = None,
         limit: int = 50,
     ) -> Sequence[Memory]:
         """Return active beliefs, optionally filtered by subject / relation / domain."""
@@ -233,6 +242,8 @@ class BeliefMemory:
             Memory.memory_type == MemoryType.belief,
             Memory.status == MemoryStatus.active,
         ]
+        if user_id is not None:
+            filters.append(Memory.user_id == user_id)
         if subject is not None:
             filters.append(Memory.content["subject"].as_string() == subject)
         if relation is not None:
@@ -247,7 +258,15 @@ class BeliefMemory:
             .limit(limit)
         )
         result = await self._session.execute(stmt)
-        return result.scalars().all()
+        scalars = result.scalars()
+        if inspect.isawaitable(scalars):
+            scalars = await scalars
+
+        rows = scalars.all()
+        if inspect.isawaitable(rows):
+            rows = await rows
+
+        return rows if isinstance(rows, list) else []
 
     # ------------------------------------------------------------------
     # update
@@ -340,8 +359,10 @@ class BeliefMemory:
         relation: str,
         object_: str,
         domain: str | None = None,
+        is_negation: bool = False,
         source: SourceType = SourceType.user_direct,
         raw_text: str | None = None,
+        user_id: str | None = None,
         decay_rate: float = DEFAULT_DECAY_RATE,
         embedding: list[float] | None = None,
     ) -> tuple[Memory, Memory]:
@@ -378,8 +399,10 @@ class BeliefMemory:
             relation=relation,
             object_=object_,
             domain=domain,
+            is_negation=is_negation,
             source=source,
             raw_text=raw_text,
+            user_id=old_record.user_id if user_id is None else user_id,
             decay_rate=decay_rate,
             embedding=embedding,
         )

@@ -20,7 +20,7 @@ from typing import Any, Sequence
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -237,10 +237,13 @@ def _make_fetch_candidates_mock(embedder: EmbeddingEngine):
         *,
         n_candidates: int,
         memory_types: Sequence[MemoryType] | None = None,
+        user_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
         from sqlalchemy import select, and_
 
         filters = [Memory.status == MemoryStatus.active]
+        if user_id is not None:
+            filters.append(Memory.user_id == user_id)
         if memory_types:
             filters.append(Memory.memory_type.in_(memory_types))
 
@@ -307,6 +310,53 @@ class TestRemember:
         assert results == []
 
     @pytest.mark.asyncio
+    async def test_remember_normalizes_whitespace(
+        self, db_parts, fake_embedder, fake_extractor,
+    ):
+        engine, factory = db_parts
+        agent = await _build_agent(engine, factory, fake_embedder, fake_extractor)
+
+        seen: list[str] = []
+        original_extract = fake_extractor.extract
+
+        def _extract(text: str) -> list[ExtractedFact]:
+            seen.append(text)
+            return original_extract(text)
+
+        agent._extractor.extract = _extract
+
+        with patch.object(
+            RetrievalEngine,
+            "_fetch_candidates",
+            _make_fetch_candidates_mock(fake_embedder),
+        ):
+            await agent.remember("  I   use   Rust   for systems   work. ")
+
+        assert seen == ["I use Rust for systems work."]
+
+    @pytest.mark.asyncio
+    async def test_remember_sets_user_id_on_records(
+        self, db_parts, fake_embedder, fake_extractor,
+    ):
+        engine, factory = db_parts
+        agent = await _build_agent(engine, factory, fake_embedder, fake_extractor)
+
+        with patch.object(
+            RetrievalEngine,
+            "_fetch_candidates",
+            _make_fetch_candidates_mock(fake_embedder),
+        ):
+            await agent.remember("I use Rust for systems work.", user_id="alice")
+
+        async with factory() as session:
+            rows = (
+                await session.execute(select(Memory).where(Memory.user_id == "alice"))
+            ).scalars().all()
+
+        assert rows
+        assert all(row.user_id == "alice" for row in rows)
+
+    @pytest.mark.asyncio
     async def test_remember_multiple_facts(self, db_parts, fake_embedder, fake_extractor):
         engine, factory = db_parts
         agent = await _build_agent(engine, factory, fake_embedder, fake_extractor)
@@ -367,6 +417,36 @@ class TestRecall:
             result = await agent.recall("anything")
 
         assert result.total == 0
+
+    @pytest.mark.asyncio
+    async def test_recall_filters_by_user_id(
+        self, db_parts, fake_embedder, fake_extractor,
+    ):
+        engine, factory = db_parts
+        agent = await _build_agent(engine, factory, fake_embedder, fake_extractor)
+
+        with patch.object(
+            RetrievalEngine,
+            "_fetch_candidates",
+            _make_fetch_candidates_mock(fake_embedder),
+        ):
+            await agent.remember("I use Rust for systems work.", user_id="alice")
+            await agent.remember("I use Rust for systems work.", user_id="bob")
+
+        with patch.object(
+            RetrievalEngine,
+            "_fetch_candidates",
+            _make_fetch_candidates_mock(fake_embedder),
+        ):
+            alice = await agent.recall("What language for systems?", user_id="alice")
+            bob = await agent.recall("What language for systems?", user_id="bob")
+            all_rows = await agent.recall("What language for systems?")
+
+        assert alice.total >= 1
+        assert bob.total >= 1
+        assert all_rows.total >= 2
+        assert all(sm.memory.user_id == "alice" for sm in alice.all)
+        assert all(sm.memory.user_id == "bob" for sm in bob.all)
 
 
 class TestContextFor:
@@ -555,6 +635,28 @@ class TestFormatContext:
 
         assert "2026-03-10" in ctx
         assert "deployed" in ctx
+
+    def test_with_negated_belief(self):
+        mem = MagicMock()
+        mem.content = {
+            "subject": "user",
+            "relation": "uses",
+            "object": "Python",
+            "domain": "systems",
+            "is_negation": True,
+        }
+        mem.confidence = 0.85
+        mem.created_at = datetime(2026, 3, 10, tzinfo=timezone.utc)
+        mem.memory_type = MemoryType.belief
+
+        sm = ScoredMemory(
+            memory=mem, score=0.9, similarity=0.95,
+            confidence=0.85, recency_score=1.0, usage_frequency=0.0,
+        )
+        result = RetrievalResult(beliefs=[sm])
+        ctx = format_context(result)
+
+        assert "not (user uses Python)" in ctx
 
     def test_with_skill(self):
         mem = MagicMock()

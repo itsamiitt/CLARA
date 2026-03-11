@@ -18,6 +18,7 @@ language query.  The pipeline:
 from __future__ import annotations
 
 import math
+import uuid
 from ast import literal_eval
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from sqlalchemy import select, text as sa_text, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
+from clara.retrieval.cache import CachedScoredMemory, MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
 
 
@@ -146,10 +148,12 @@ class RetrievalEngine:
         embedding_engine: EmbeddingEngine,
         *,
         candidate_multiplier: int = DEFAULT_CANDIDATE_MULTIPLIER,
+        cache: MemoryCache | None = None,
     ) -> None:
         self._session = session
         self._embedder = embedding_engine
         self._candidate_multiplier = candidate_multiplier
+        self._cache = cache
 
     # ------------------------------------------------------------------
     # search
@@ -161,6 +165,8 @@ class RetrievalEngine:
         *,
         top_k: int = 8,
         memory_types: Sequence[MemoryType] | None = None,
+        user_id: str | None = None,
+        track_access: bool = True,
     ) -> RetrievalResult:
         """Search the memory store and return ranked, grouped results.
 
@@ -169,10 +175,29 @@ class RetrievalEngine:
             top_k: Maximum number of results to return (across all types).
             memory_types: Optional filter — restrict search to specific
                 memory types.  ``None`` means search all types.
+            user_id: Optional tenant partition key. When provided, search is
+                restricted to rows for that user only.
+            track_access: Whether to bump access counters for returned
+                memories in this session.
 
         Returns:
             A :class:`RetrievalResult` with results grouped by memory type.
         """
+        cache_key: str | None = None
+        if self._cache is not None:
+            cache_key = self._cache.make_query_hash(
+                query,
+                top_k=top_k,
+                memory_types=memory_types,
+            )
+            cached = await self._cache.get(user_id, cache_key)
+            if cached is not None:
+                cached_result = await self._hydrate_cached_hits(cached, user_id=user_id)
+                if cached_result is not None:
+                    if track_access:
+                        await self._increment_access_counts([sm.memory for sm in cached_result.all])
+                    return cached_result
+
         # 1. Embed the query
         query_vector = normalize_embedding_dimensions(
             self._embedder.embed(query),
@@ -187,6 +212,7 @@ class RetrievalEngine:
             query_vector,
             n_candidates=n_candidates,
             memory_types=memory_types,
+            user_id=user_id,
         )
 
         if not candidates:
@@ -228,22 +254,27 @@ class RetrievalEngine:
         scored = scored[:top_k]
 
         # 5. Increment access_count on retrieved records
-        await self._increment_access_counts([s.memory for s in scored])
+        if track_access:
+            await self._increment_access_counts([s.memory for s in scored])
 
         # 6. Group by memory type
-        result = RetrievalResult()
-        for sm in scored:
-            match sm.memory.memory_type:
-                case MemoryType.belief:
-                    result.beliefs.append(sm)
-                case MemoryType.event:
-                    result.events.append(sm)
-                case MemoryType.skill:
-                    result.skills.append(sm)
-                case MemoryType.world_model:
-                    result.world_model.append(sm)
+        result = self._group_scored(scored)
+
+        if self._cache is not None and cache_key is not None:
+            await self._cache.set(user_id, cache_key, self._to_cached_hits(scored))
 
         return result
+
+    async def record_accesses(self, memory_ids: Sequence[Any]) -> None:
+        """Fetch memories by ID and bump their access metadata."""
+        if not memory_ids:
+            return
+
+        stmt = select(Memory).where(Memory.memory_id.in_(list(memory_ids)))
+        result = await self._session.execute(stmt)
+        memories = result.scalars().all()
+        if memories:
+            await self._increment_access_counts(list(memories))
 
     # ------------------------------------------------------------------
     # Internal: fetch candidates via pgvector
@@ -255,6 +286,7 @@ class RetrievalEngine:
         *,
         n_candidates: int,
         memory_types: Sequence[MemoryType] | None = None,
+        user_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
         """Run an ANN search and return ``(Memory, cosine_similarity)`` pairs.
 
@@ -266,6 +298,7 @@ class RetrievalEngine:
                 query_vector,
                 n_candidates=n_candidates,
                 memory_types=memory_types,
+                user_id=user_id,
             )
 
         # cosine_distance column expression
@@ -277,6 +310,8 @@ class RetrievalEngine:
             Memory.status == MemoryStatus.active,
             Memory.embedding.is_not(None),
         ]
+        if user_id is not None:
+            filters.append(Memory.user_id == user_id)
         if memory_types:
             filters.append(Memory.memory_type.in_(memory_types))
 
@@ -337,8 +372,11 @@ class RetrievalEngine:
         *,
         n_candidates: int,
         memory_types: Sequence[MemoryType] | None = None,
+        user_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
         filters = [Memory.status == MemoryStatus.active]
+        if user_id is not None:
+            filters.append(Memory.user_id == user_id)
         if memory_types:
             filters.append(Memory.memory_type.in_(memory_types))
 
@@ -380,3 +418,73 @@ class RetrievalEngine:
             mem.metadata_ = meta
 
         await self._session.flush()
+
+    @staticmethod
+    def _group_scored(scored: Sequence[ScoredMemory]) -> RetrievalResult:
+        result = RetrievalResult()
+        for sm in scored:
+            match sm.memory.memory_type:
+                case MemoryType.belief:
+                    result.beliefs.append(sm)
+                case MemoryType.event:
+                    result.events.append(sm)
+                case MemoryType.skill:
+                    result.skills.append(sm)
+                case MemoryType.world_model:
+                    result.world_model.append(sm)
+        return result
+
+    @staticmethod
+    def _to_cached_hits(scored: Sequence[ScoredMemory]) -> list[CachedScoredMemory]:
+        return [
+            CachedScoredMemory(
+                memory_id=str(sm.memory.memory_id),
+                score=sm.score,
+                similarity=sm.similarity,
+                confidence=sm.confidence,
+                recency_score=sm.recency_score,
+                usage_frequency=sm.usage_frequency,
+            )
+            for sm in scored
+        ]
+
+    async def _hydrate_cached_hits(
+        self,
+        hits: Sequence[CachedScoredMemory],
+        *,
+        user_id: str | None,
+    ) -> RetrievalResult | None:
+        if not hits:
+            return RetrievalResult()
+
+        memory_ids = [uuid.UUID(hit.memory_id) for hit in hits]
+        stmt = select(Memory).where(Memory.memory_id.in_(memory_ids))
+        if user_id is not None:
+            stmt = stmt.where(Memory.user_id == user_id)
+
+        result = await self._session.execute(stmt)
+        rows = {
+            str(memory.memory_id): memory
+            for memory in result.scalars().all()
+            if memory.status == MemoryStatus.active
+        }
+        if len(rows) != len(hits):
+            return None
+
+        scored: list[ScoredMemory] = []
+        for hit in hits:
+            memory = rows.get(hit.memory_id)
+            if memory is None:
+                return None
+            scored.append(
+                ScoredMemory(
+                    memory=memory,
+                    score=hit.score,
+                    similarity=hit.similarity,
+                    confidence=hit.confidence,
+                    recency_score=hit.recency_score,
+                    usage_frequency=hit.usage_frequency,
+                )
+            )
+
+        return self._group_scored(scored)

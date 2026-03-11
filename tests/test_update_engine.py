@@ -23,6 +23,7 @@ from clara.update.engine import (
     ActionTaken,
     MemoryUpdateEngine,
     UpdateResult,
+    _same_belief,
     classify_memory_type,
     _is_conflicting,
     _domains_differ,
@@ -200,6 +201,23 @@ class TestIsConflicting:
         sm = _make_scored(mem)
         assert _is_conflicting(fact, sm) is True
 
+    def test_opposite_polarity_same_object_conflicts(self):
+        fact = _make_fact(subject="user", relation="uses", object="Python")
+        mem = FakeMemory(content={
+            "subject": "user", "relation": "uses", "object": "Python",
+            "is_negation": True,
+        })
+        sm = _make_scored(mem)
+        assert _is_conflicting(fact, sm) is True
+
+    def test_negation_different_object_not_conflict(self):
+        fact = _make_fact(subject="user", relation="uses", object="Python", is_negation=True)
+        mem = FakeMemory(content={
+            "subject": "user", "relation": "uses", "object": "Rust",
+        })
+        sm = _make_scored(mem)
+        assert _is_conflicting(fact, sm) is False
+
 
 # ---------------------------------------------------------------------------
 # _domains_differ
@@ -223,6 +241,24 @@ class TestDomainsDiffer:
         })
         sm = _make_scored(mem)
         assert _domains_differ(fact, sm) is False
+
+
+class TestSameBelief:
+    def test_same_positive_belief(self):
+        fact = _make_fact(subject="user", relation="uses", object="Rust", domain="systems")
+        mem = FakeMemory(content={
+            "subject": "user", "relation": "uses", "object": "Rust", "domain": "systems",
+        })
+        sm = _make_scored(mem)
+        assert _same_belief(fact, sm) is True
+
+    def test_negation_mismatch_not_same(self):
+        fact = _make_fact(subject="user", relation="uses", object="Rust", is_negation=True)
+        mem = FakeMemory(content={
+            "subject": "user", "relation": "uses", "object": "Rust",
+        })
+        sm = _make_scored(mem)
+        assert _same_belief(fact, sm) is False
 
     def test_fact_no_domain(self):
         fact = _make_fact(domain=None)
@@ -328,7 +364,7 @@ class TestProcessReinforce:
 
         # Existing memory with same content (not conflicting)
         existing = FakeMemory(
-            content={"subject": "user", "relation": "uses", "object": "Rust"},
+            content={"subject": "user", "relation": "uses", "object": "Rust", "domain": "systems"},
             confidence=0.7,
         )
         scored = _make_scored(existing, similarity=0.90)
@@ -398,6 +434,97 @@ class TestProcessConflictSupersede:
         assert result.memory_id == new_id
         assert result.superseded_id == old_id
         assert result.conflict_detected is True
+
+    @pytest.mark.asyncio
+    async def test_exact_match_conflict_without_similarity_search(self):
+        session = AsyncMock()
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * 1536
+
+        retriever = AsyncMock()
+        retriever.search = AsyncMock(return_value=_empty_retrieval_result())
+
+        engine = MemoryUpdateEngine(session, embedder, retriever)
+
+        old_id = uuid.uuid4()
+        existing = FakeMemory(
+            memory_id=old_id,
+            content={"subject": "user", "relation": "uses", "object": "Python", "domain": "systems"},
+            confidence=0.85,
+        )
+        exact_candidate = _make_scored(existing, similarity=1.0)
+
+        new_id = uuid.uuid4()
+        old_record = FakeMemory(memory_id=old_id, status=MemoryStatus.superseded)
+        new_record = FakeMemory(memory_id=new_id, content={
+            "subject": "user", "relation": "uses", "object": "Rust", "domain": "systems",
+        })
+
+        with patch.object(
+            engine, "_find_exact_belief_candidates",
+            new_callable=AsyncMock, return_value=[exact_candidate],
+        ), patch.object(
+            engine._belief_memory, "supersede",
+            new_callable=AsyncMock, return_value=(old_record, new_record),
+        ):
+            result = await engine.process(_make_fact(
+                subject="user", relation="uses", object="Rust", domain="systems", confidence=0.95,
+            ))
+
+        assert result.action_taken == ActionTaken.superseded
+        assert result.superseded_id == old_id
+
+    @pytest.mark.asyncio
+    async def test_same_object_polarity_conflict_beats_other_object_conflict(self):
+        session = AsyncMock()
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * 1536
+
+        retriever = AsyncMock()
+        retriever.search = AsyncMock(return_value=_empty_retrieval_result())
+
+        engine = MemoryUpdateEngine(session, embedder, retriever)
+
+        negated_id = uuid.uuid4()
+        rust_id = uuid.uuid4()
+        negated_python = FakeMemory(
+            memory_id=negated_id,
+            content={
+                "subject": "user", "relation": "uses", "object": "Python",
+                "domain": "systems", "is_negation": True,
+            },
+            confidence=0.9,
+        )
+        active_rust = FakeMemory(
+            memory_id=rust_id,
+            content={
+                "subject": "user", "relation": "uses", "object": "Rust",
+                "domain": "systems",
+            },
+            confidence=0.9,
+        )
+
+        new_id = uuid.uuid4()
+        old_record = FakeMemory(memory_id=negated_id, status=MemoryStatus.superseded)
+        new_record = FakeMemory(memory_id=new_id, content={
+            "subject": "user", "relation": "uses", "object": "Python", "domain": "systems",
+        })
+
+        with patch.object(
+            engine, "_find_exact_belief_candidates",
+            new_callable=AsyncMock,
+            return_value=[_make_scored(negated_python, 1.0), _make_scored(active_rust, 1.0)],
+        ), patch.object(
+            engine._belief_memory, "supersede",
+            new_callable=AsyncMock, return_value=(old_record, new_record),
+        ) as mock_supersede:
+            result = await engine.process(_make_fact(
+                subject="user", relation="uses", object="Python", domain="systems", confidence=0.95,
+            ))
+
+        assert result.action_taken == ActionTaken.superseded
+        assert result.superseded_id == negated_id
+        assert mock_supersede.await_args.args[0] == negated_id
 
 
 class TestProcessConflictAmbiguous:
@@ -507,7 +634,7 @@ class TestProcessNegation:
             engine._belief_memory, "supersede",
             new_callable=AsyncMock,
             return_value=(old_record, new_record),
-        ):
+        ) as mock_supersede:
             fact = _make_fact(
                 subject="user", relation="uses", object="Python",
                 is_negation=True,
@@ -517,6 +644,7 @@ class TestProcessNegation:
 
         assert result.action_taken == ActionTaken.superseded
         assert result.conflict_detected is True
+        assert mock_supersede.await_args.kwargs["is_negation"] is True
 
 
 class TestProcessEventType:
@@ -585,6 +713,28 @@ class TestProcessSearchIntegration:
         assert "user" in search_text
         assert "uses" in search_text
         assert "Rust" in search_text
+
+    @pytest.mark.asyncio
+    async def test_process_passes_user_id_to_search_and_store(self):
+        session = AsyncMock()
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * 1536
+
+        retriever = AsyncMock()
+        retriever.search = AsyncMock(return_value=_empty_retrieval_result())
+
+        engine = MemoryUpdateEngine(session, embedder, retriever)
+
+        new_id = uuid.uuid4()
+        fake_record = FakeMemory(memory_id=new_id)
+        with patch.object(
+            engine._belief_memory, "store",
+            new_callable=AsyncMock, return_value=fake_record,
+        ) as mock_store:
+            await engine.process(_make_fact(), user_id="alice")
+
+        assert retriever.search.await_args.kwargs["user_id"] == "alice"
+        assert mock_store.await_args.kwargs["user_id"] == "alice"
 
 
 class TestProcessBelowThreshold:

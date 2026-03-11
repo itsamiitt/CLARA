@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
 from clara.extraction.extractor import ExtractedFact
 from clara.memory.belief import BeliefMemory, SourceType
+from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
 from clara.retrieval.engine import RetrievalEngine, ScoredMemory
 
@@ -132,19 +133,57 @@ def _is_conflicting(fact: ExtractedFact, candidate: ScoredMemory) -> bool:
     same_relation = (
         content.get("relation", "").lower() == fact.relation.lower()
     )
+    candidate_negation = bool(content.get("is_negation", False))
+    same_object = (
+        content.get("object", "").lower() == fact.object.lower()
+    )
     different_object = (
-        content.get("object", "").lower() != fact.object.lower()
+        not same_object
     )
 
-    # Direct contradiction: same subject + relation, different object
-    if same_subject and same_relation and different_object:
+    if not (same_subject and same_relation):
+        return False
+
+    # Same proposition, opposite polarity.
+    if same_object and candidate_negation != fact.is_negation:
         return True
 
-    # Explicit negation targeting this candidate
-    if fact.is_negation and same_subject and same_relation:
+    # Direct contradiction between competing positive beliefs.
+    if not candidate_negation and not fact.is_negation and different_object:
         return True
 
     return False
+
+
+def _same_belief(fact: ExtractedFact, candidate: ScoredMemory) -> bool:
+    """Return True when the candidate represents the same belief proposition."""
+    content = candidate.memory.content
+    if not isinstance(content, dict):
+        return False
+
+    fact_domain = (fact.domain or "").strip().lower()
+    candidate_domain = (content.get("domain", "") or "").strip().lower()
+
+    return (
+        content.get("subject", "").lower() == fact.subject.lower()
+        and content.get("relation", "").lower() == fact.relation.lower()
+        and content.get("object", "").lower() == fact.object.lower()
+        and bool(content.get("is_negation", False)) == fact.is_negation
+        and fact_domain == candidate_domain
+    )
+
+
+def _conflict_priority(fact: ExtractedFact, candidate: ScoredMemory) -> tuple[int, float, float]:
+    """Rank conflicts so polarity conflicts beat generic object conflicts."""
+    content = candidate.memory.content if isinstance(candidate.memory.content, dict) else {}
+    candidate_negation = bool(content.get("is_negation", False))
+    same_object = content.get("object", "").lower() == fact.object.lower()
+
+    if same_object and candidate_negation != fact.is_negation:
+        return (2, candidate.similarity, candidate.memory.confidence)
+    if not candidate_negation and not fact.is_negation and not same_object:
+        return (1, candidate.similarity, candidate.memory.confidence)
+    return (0, candidate.similarity, candidate.memory.confidence)
 
 
 def _domains_differ(fact: ExtractedFact, candidate: ScoredMemory) -> bool:
@@ -188,17 +227,24 @@ class MemoryUpdateEngine:
         session: AsyncSession,
         embedding_engine: EmbeddingEngine,
         retrieval_engine: RetrievalEngine,
+        cache: MemoryCache | None = None,
     ) -> None:
         self._session = session
         self._embedder = embedding_engine
         self._retriever = retrieval_engine
         self._belief_memory = BeliefMemory(session)
+        self._cache = cache
 
     # ------------------------------------------------------------------
     # process — main entry point
     # ------------------------------------------------------------------
 
-    async def process(self, fact: ExtractedFact) -> UpdateResult:
+    async def process(
+        self,
+        fact: ExtractedFact,
+        *,
+        user_id: str | None = None,
+    ) -> UpdateResult:
         """Process a single extracted fact through the full update pipeline.
 
         Args:
@@ -208,10 +254,16 @@ class MemoryUpdateEngine:
             An :class:`UpdateResult` describing the action taken.
         """
         # [1] Similarity search
-        candidates = await self._find_similar(fact)
-
         # [2] Classify memory type
         memory_type = classify_memory_type(fact)
+
+        # [1] Similarity search
+        candidates = await self._find_similar(fact, user_id=user_id)
+        if memory_type == MemoryType.belief:
+            candidates = self._merge_candidates(
+                candidates,
+                await self._find_exact_belief_candidates(fact, user_id=user_id),
+            )
 
         # [3] Filter candidates to same memory type and above threshold
         typed_candidates = [
@@ -228,28 +280,46 @@ class MemoryUpdateEngine:
 
         # [5] Resolve
         if conflicts:
-            return await self._resolve_conflict(fact, conflicts, memory_type)
+            result = await self._resolve_conflict(
+                fact,
+                conflicts,
+                memory_type,
+                user_id=user_id,
+            )
+            await self._invalidate_cache(user_id)
+            return result
 
         # [6] No conflict — check if this reinforces an existing memory
         if typed_candidates:
-            return await self._reinforce_or_create(
-                fact, typed_candidates, memory_type,
+            result = await self._reinforce_or_create(
+                fact,
+                typed_candidates,
+                memory_type,
+                user_id=user_id,
             )
+            await self._invalidate_cache(user_id)
+            return result
 
         # Novel fact — create new
-        return await self._create_new(fact, memory_type)
+        result = await self._create_new(fact, memory_type, user_id=user_id)
+        await self._invalidate_cache(user_id)
+        return result
 
     # ------------------------------------------------------------------
     # Pipeline step helpers
     # ------------------------------------------------------------------
 
     async def _find_similar(
-        self, fact: ExtractedFact,
+        self,
+        fact: ExtractedFact,
+        *,
+        user_id: str | None = None,
     ) -> list[ScoredMemory]:
         """Embed the fact and search for similar memories."""
         result = await self._retriever.search(
             self._fact_text(fact),
             top_k=SEARCH_TOP_K,
+            user_id=user_id,
         )
         return result.all
 
@@ -259,6 +329,8 @@ class MemoryUpdateEngine:
         text = f"{fact.subject} {fact.relation} {fact.object}"
         if fact.domain:
             text += f" ({fact.domain})"
+        if fact.is_negation:
+            text = f"not {text}"
         return text
 
     def _fact_embedding(self, fact: ExtractedFact) -> list[float]:
@@ -267,15 +339,60 @@ class MemoryUpdateEngine:
             target_dimensions=VECTOR_DIMENSIONS,
         )
 
+    async def _find_exact_belief_candidates(
+        self,
+        fact: ExtractedFact,
+        *,
+        user_id: str | None = None,
+    ) -> list[ScoredMemory]:
+        """Fetch active beliefs with the same subject + relation exactly."""
+        try:
+            records = await self._belief_memory.get_active_beliefs(
+                subject=fact.subject,
+                relation=fact.relation,
+                user_id=user_id,
+                limit=100,
+            )
+        except Exception:
+            logger.debug(
+                "Exact belief candidate lookup failed; falling back to similarity-only search",
+                exc_info=True,
+            )
+            return []
+        return [
+            ScoredMemory(
+                memory=record,
+                score=1.0,
+                similarity=1.0,
+                confidence=record.confidence,
+                recency_score=1.0,
+                usage_frequency=0.0,
+            )
+            for record in records
+        ]
+
+    @staticmethod
+    def _merge_candidates(
+        *candidate_lists: list[ScoredMemory],
+    ) -> list[ScoredMemory]:
+        merged: dict[uuid.UUID, ScoredMemory] = {}
+        for candidates in candidate_lists:
+            for candidate in candidates:
+                existing = merged.get(candidate.memory.memory_id)
+                if existing is None or candidate.similarity > existing.similarity:
+                    merged[candidate.memory.memory_id] = candidate
+        return list(merged.values())
+
     async def _resolve_conflict(
         self,
         fact: ExtractedFact,
         conflicts: list[ScoredMemory],
         memory_type: MemoryType,
+        *,
+        user_id: str | None = None,
     ) -> UpdateResult:
         """Apply the CONTEXT.md conflict resolution protocol."""
-        # Pick the highest-similarity conflicting candidate
-        primary_conflict = max(conflicts, key=lambda c: c.similarity)
+        primary_conflict = max(conflicts, key=lambda c: _conflict_priority(fact, c))
         old_memory = primary_conflict.memory
 
         # Case 1: Domain-scoped — retain both with domain tags
@@ -286,7 +403,7 @@ class MemoryUpdateEngine:
                 fact.domain,
                 old_memory.content.get("domain"),
             )
-            new_record = await self._store_fact(fact, memory_type)
+            new_record = await self._store_fact(fact, memory_type, user_id=user_id)
             return UpdateResult(
                 action_taken=ActionTaken.retained_both,
                 memory_id=new_record.memory_id,
@@ -306,8 +423,10 @@ class MemoryUpdateEngine:
                     relation=fact.relation,
                     object_=fact.object,
                     domain=fact.domain,
+                    is_negation=fact.is_negation,
                     source=_map_source_type(fact.source_type),
                     raw_text=fact.raw_text,
+                    user_id=user_id,
                     embedding=self._fact_embedding(fact),
                 )
                 return UpdateResult(
@@ -318,7 +437,7 @@ class MemoryUpdateEngine:
                 )
             else:
                 # For non-belief types, create new and mark old as superseded
-                new_record = await self._store_fact(fact, memory_type)
+                new_record = await self._store_fact(fact, memory_type, user_id=user_id)
                 await self._mark_superseded(old_memory, new_record.memory_id)
                 return UpdateResult(
                     action_taken=ActionTaken.superseded,
@@ -332,7 +451,7 @@ class MemoryUpdateEngine:
             "Ambiguous conflict (confidence=%.2f ≤ %.2f): storing both",
             fact.confidence, CONFLICT_CONFIDENCE_THRESHOLD,
         )
-        new_record = await self._store_fact(fact, memory_type)
+        new_record = await self._store_fact(fact, memory_type, user_id=user_id)
         return UpdateResult(
             action_taken=ActionTaken.retained_both,
             memory_id=new_record.memory_id,
@@ -344,12 +463,18 @@ class MemoryUpdateEngine:
         fact: ExtractedFact,
         candidates: list[ScoredMemory],
         memory_type: MemoryType,
+        *,
+        user_id: str | None = None,
     ) -> UpdateResult:
         """When a similar non-conflicting memory exists, reinforce it."""
         best = max(candidates, key=lambda c: c.similarity)
 
         # Only reinforce beliefs — events, skills, etc. are always new entries
-        if memory_type == MemoryType.belief and best.similarity >= SIMILARITY_THRESHOLD:
+        if (
+            memory_type == MemoryType.belief
+            and best.similarity >= SIMILARITY_THRESHOLD
+            and _same_belief(fact, best)
+        ):
             updated = await self._belief_memory.update(
                 best.memory.memory_id,
                 source=_map_source_type(fact.source_type),
@@ -363,15 +488,17 @@ class MemoryUpdateEngine:
             )
 
         # Non-belief or below threshold → create new
-        return await self._create_new(fact, memory_type)
+        return await self._create_new(fact, memory_type, user_id=user_id)
 
     async def _create_new(
         self,
         fact: ExtractedFact,
         memory_type: MemoryType,
+        *,
+        user_id: str | None = None,
     ) -> UpdateResult:
         """Create a brand-new memory record."""
-        record = await self._store_fact(fact, memory_type)
+        record = await self._store_fact(fact, memory_type, user_id=user_id)
         return UpdateResult(
             action_taken=ActionTaken.created,
             memory_id=record.memory_id,
@@ -386,6 +513,8 @@ class MemoryUpdateEngine:
         self,
         fact: ExtractedFact,
         memory_type: MemoryType,
+        *,
+        user_id: str | None = None,
     ) -> Memory:
         """Persist a fact as a new Memory record.
 
@@ -400,8 +529,10 @@ class MemoryUpdateEngine:
                 relation=fact.relation,
                 object_=fact.object,
                 domain=fact.domain,
+                is_negation=fact.is_negation,
                 source=_map_source_type(fact.source_type),
                 raw_text=fact.raw_text,
+                user_id=user_id,
                 embedding=embedding,
             )
 
@@ -414,9 +545,12 @@ class MemoryUpdateEngine:
         }
         if fact.domain:
             content["domain"] = fact.domain
+        if fact.is_negation:
+            content["is_negation"] = True
 
         record = Memory(
             memory_type=memory_type,
+            user_id=user_id,
             content=content,
             embedding=embedding,
             confidence=fact.confidence,
@@ -447,3 +581,7 @@ class MemoryUpdateEngine:
         old_memory.metadata_ = meta
 
         await self._session.flush()
+
+    async def _invalidate_cache(self, user_id: str | None) -> None:
+        if self._cache is not None:
+            await self._cache.invalidate(user_id)

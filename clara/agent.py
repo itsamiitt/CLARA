@@ -24,18 +24,24 @@ Usage::
 from __future__ import annotations
 
 import logging
+from sqlalchemy.exc import OperationalError
 from typing import Any, Sequence
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool, StaticPool
 
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import ExtractedFact, FactExtractor
+from clara.interaction import InteractionLayer
 from clara.memory.belief import BeliefMemory
+from clara.reasoning.engine import ReasoningEngine
+from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import (
     EmbeddingEngine,
     _EmbeddingBackend,
@@ -45,9 +51,48 @@ from clara.retrieval.embeddings import (
 )
 from clara.retrieval.engine import RetrievalEngine, RetrievalResult, ScoredMemory
 from clara.scheduler.decay import DecayScheduler
+from clara.update.background import BackgroundWriter
 from clara.update.engine import MemoryUpdateEngine
 
 logger = logging.getLogger(__name__)
+
+SQLITE_BUSY_TIMEOUT_MS = 30_000
+
+
+def _is_in_memory_sqlite(db_url: str) -> bool:
+    return db_url in {"sqlite://", "sqlite+aiosqlite://"} or ":memory:" in db_url
+
+
+def _make_engine(db_url: str) -> AsyncEngine:
+    """Create a database engine with SQLite-specific concurrency tuning."""
+    connect_args: dict[str, Any] = {}
+    engine_kwargs: dict[str, Any] = {"echo": False}
+    if db_url.startswith("sqlite"):
+        connect_args["timeout"] = SQLITE_BUSY_TIMEOUT_MS / 1000
+        if _is_in_memory_sqlite(db_url):
+            engine_kwargs["poolclass"] = StaticPool
+        else:
+            # File-backed SQLite handles bursty concurrent reads better when
+            # sessions don't block on a small QueuePool.
+            engine_kwargs["poolclass"] = NullPool
+
+    if connect_args:
+        engine_kwargs["connect_args"] = connect_args
+
+    engine = create_async_engine(db_url, **engine_kwargs)
+
+    if db_url.startswith("sqlite"):
+        @event.listens_for(engine.sync_engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA busy_timeout = 30000")
+                cursor.execute("PRAGMA journal_mode = WAL")
+                cursor.execute("PRAGMA synchronous = NORMAL")
+            finally:
+                cursor.close()
+
+    return engine
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +103,10 @@ def _format_belief(sm: ScoredMemory) -> str:
     """One-line summary of a belief for the context block."""
     c = sm.memory.content
     domain = c.get("domain")
-    line = f"- {c.get('subject', '?')} {c.get('relation', '?')} {c.get('object', '?')}"
+    core = f"{c.get('subject', '?')} {c.get('relation', '?')} {c.get('object', '?')}"
+    if c.get("is_negation"):
+        core = f"not ({core})"
+    line = f"- {core}"
     line += f" (confidence: {sm.memory.confidence:.2f}"
     if domain:
         line += f", domain: {domain}"
@@ -189,12 +237,20 @@ class ClaraMemory:
         embedding_engine: EmbeddingEngine,
         extractor: FactExtractor,
         decay_scheduler: DecayScheduler | None,
+        interaction_layer: InteractionLayer | None = None,
+        cache: MemoryCache | None = None,
+        background_writer: BackgroundWriter | None = None,
     ) -> None:
         self._engine = engine
         self._session_factory = session_factory
         self._embedding_engine = embedding_engine
         self._extractor = extractor
         self._decay_scheduler = decay_scheduler
+        self._interaction_layer = interaction_layer or InteractionLayer()
+        self._llm_provider = getattr(extractor, "_provider", "openai")
+        self._llm_model = getattr(extractor, "_model", None)
+        self._cache = cache
+        self._background_writer = background_writer
 
     @classmethod
     async def create(
@@ -204,6 +260,7 @@ class ClaraMemory:
         llm_provider: str = "openai",
         *,
         start_scheduler: bool = True,
+        cache_url: str | None = None,
     ) -> ClaraMemory:
         """Async factory — creates the engine, tables, and all subsystems.
 
@@ -217,7 +274,7 @@ class ClaraMemory:
             A fully-initialised :class:`ClaraMemory` instance.
         """
         # --- Database ---
-        engine = create_async_engine(db_url, echo=False)
+        engine = _make_engine(db_url)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
@@ -229,11 +286,17 @@ class ClaraMemory:
 
         # --- Extraction ---
         extractor = FactExtractor(provider=llm_provider)
+        cache = MemoryCache(cache_url) if cache_url else None
 
         # --- Decay Scheduler ---
         decay_scheduler: DecayScheduler | None = None
         if start_scheduler:
-            decay_scheduler = DecayScheduler(session_factory)
+            decay_scheduler = DecayScheduler(
+                session_factory,
+                embedding_engine=embedding_engine,
+                llm_provider=llm_provider,
+                llm_model=getattr(extractor, "_model", None),
+            )
             decay_scheduler.start()
 
         instance = cls(
@@ -242,6 +305,13 @@ class ClaraMemory:
             embedding_engine=embedding_engine,
             extractor=extractor,
             decay_scheduler=decay_scheduler,
+            interaction_layer=InteractionLayer(),
+            cache=cache,
+            background_writer=BackgroundWriter(
+                session_factory,
+                embedding_engine,
+                cache=cache,
+            ),
         )
         logger.info(
             "ClaraMemory initialised (db=%s, embeddings=%s, llm=%s, scheduler=%s)",
@@ -256,7 +326,12 @@ class ClaraMemory:
     # Public API
     # ------------------------------------------------------------------
 
-    async def remember(self, text: str) -> list[dict[str, Any]]:
+    async def remember(
+        self,
+        text: str,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Extract facts from *text* and store them in the memory store.
 
         Args:
@@ -270,7 +345,9 @@ class ClaraMemory:
         if not text or not text.strip():
             return []
 
-        facts = self._extractor.extract(text)
+        interaction = self._interaction_layer.receive(text, user_id=user_id)
+
+        facts = self._extractor.extract(interaction.raw_text)
         if not facts:
             logger.debug("No facts extracted from text: %r", text[:120])
             return []
@@ -282,11 +359,15 @@ class ClaraMemory:
                 update_engine = MemoryUpdateEngine(
                     session,
                     self._embedding_engine,
-                    RetrievalEngine(session, self._embedding_engine),
+                    RetrievalEngine(session, self._embedding_engine, cache=self._cache),
+                    cache=self._cache,
                 )
 
                 for fact in facts:
-                    outcome = await update_engine.process(fact)
+                    outcome = await update_engine.process(
+                        fact,
+                        user_id=interaction.user_id,
+                    )
                     results.append({
                         "action": outcome.action_taken.value,
                         "memory_id": str(outcome.memory_id) if outcome.memory_id else None,
@@ -303,6 +384,8 @@ class ClaraMemory:
         self,
         query: str,
         top_k: int = 8,
+        *,
+        user_id: str | None = None,
     ) -> RetrievalResult:
         """Retrieve the most relevant memories for *query*.
 
@@ -314,12 +397,24 @@ class ClaraMemory:
             A :class:`RetrievalResult` grouped by memory type.
         """
         async with self._session_factory() as session:
-            retriever = RetrievalEngine(session, self._embedding_engine)
-            result = await retriever.search(query, top_k=top_k)
-            await session.commit()
+            retriever = RetrievalEngine(session, self._embedding_engine, cache=self._cache)
+            result = await retriever.search(
+                query,
+                top_k=top_k,
+                user_id=user_id,
+                track_access=False,
+            )
+
+        await self._record_accesses_best_effort(result.all)
         return result
 
-    async def context_for(self, query: str, *, top_k: int = 8) -> str:
+    async def context_for(
+        self,
+        query: str,
+        *,
+        top_k: int = 8,
+        user_id: str | None = None,
+    ) -> str:
         """Build a formatted context string for LLM injection.
 
         Performs a :meth:`recall`, then formats the results into the
@@ -332,8 +427,61 @@ class ClaraMemory:
         Returns:
             A multi-line string ready for inclusion in an LLM system prompt.
         """
-        result = await self.recall(query, top_k=top_k)
+        result = await self.recall(query, top_k=top_k, user_id=user_id)
         return format_context(result)
+
+    async def interact(
+        self,
+        message: str,
+        *,
+        user_id: str | None = None,
+        system_prompt: str | None = None,
+        top_k: int = 8,
+    ) -> dict[str, Any]:
+        """Run the full reasoning loop over memory context and return a response."""
+        interaction = self._interaction_layer.receive(message, user_id=user_id)
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                reasoning = ReasoningEngine(
+                    session,
+                    self._embedding_engine,
+                    self._extractor,
+                    llm_provider=self._llm_provider,
+                    llm_model=self._llm_model,
+                    cache=self._cache,
+                )
+                response = await reasoning.respond(
+                    interaction.raw_text,
+                    user_id=interaction.user_id,
+                    system_prompt=system_prompt,
+                    top_k=top_k,
+                )
+
+        return {
+            "response": response.text,
+            "memory_context": response.memory_context,
+            "facts_stored": [
+                {
+                    "action": item.action_taken.value,
+                    "memory_id": str(item.memory_id) if item.memory_id else None,
+                    "conflict": item.conflict_detected,
+                    "superseded_id": (
+                        str(item.superseded_id) if item.superseded_id else None
+                    ),
+                }
+                for item in response.facts_stored
+            ],
+            "memories_used": [
+                {
+                    "memory_id": str(sm.memory.memory_id),
+                    "memory_type": sm.memory.memory_type.value,
+                    "score": sm.score,
+                    "confidence": sm.confidence,
+                }
+                for sm in response.memories_used
+            ],
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -343,5 +491,37 @@ class ClaraMemory:
         """Shut down the scheduler and dispose of the database engine."""
         if self._decay_scheduler is not None:
             self._decay_scheduler.shutdown(wait=False)
+        if self._background_writer is not None:
+            await self._background_writer.stop()
+        if self._cache is not None:
+            await self._cache.close()
         await self._engine.dispose()
         logger.info("ClaraMemory closed")
+
+    async def _record_accesses_best_effort(
+        self,
+        scored_memories: Sequence[ScoredMemory],
+    ) -> None:
+        memory_ids = [sm.memory.memory_id for sm in scored_memories]
+        if not memory_ids:
+            return
+
+        async with self._session_factory() as session:
+            retriever = RetrievalEngine(session, self._embedding_engine, cache=self._cache)
+            try:
+                await retriever.record_accesses(memory_ids)
+                await session.commit()
+            except OperationalError:
+                await session.rollback()
+                if self._engine.dialect.name == "sqlite":
+                    logger.debug(
+                        "Skipping access-count update after SQLite lock contention",
+                        exc_info=True,
+                    )
+                    return
+                raise
+
+    async def cache_health(self) -> dict[str, object]:
+        if self._cache is None:
+            return {"backend": "disabled", "ok": True}
+        return await self._cache.health()

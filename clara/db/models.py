@@ -137,6 +137,14 @@ class Memory(Base):
         comment="Unique identifier for the memory record.",
     )
 
+    # --- Tenant ---
+    user_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+        comment="Tenant partition key. NULL for backwards-compat with pre-tenant data.",
+    )
+
     # --- Classification ---
     memory_type: Mapped[MemoryType] = mapped_column(
         Enum(MemoryType, name="memory_type_enum", native_enum=True),
@@ -222,11 +230,19 @@ class Memory(Base):
             "memory_type",
             "status",
         ),
+        Index("ix_memories_user_id", "user_id"),
+        Index(
+            "ix_memories_user_type_status",
+            "user_id",
+            "memory_type",
+            "status",
+        ),
     )
 
     def __repr__(self) -> str:
         return (
             f"<Memory(memory_id={self.memory_id!s}, "
+            f"user_id={self.user_id!r}, "
             f"type={self.memory_type.value}, "
             f"status={self.status.value}, "
             f"confidence={self.confidence})>"

@@ -16,7 +16,8 @@ Runs two scheduled jobs using APScheduler:
      - world_model     → 0.03
 
    Records whose confidence drops below the archival threshold (0.15)
-   are set to ``status = "archived"``.
+   are set to ``status = "archived"``, except skills, which remain active
+   until the weekly pruning job can mark stale ones as ``deprecated``.
 
 2. **Weekly pruning** (every Sunday at 02:30 UTC)
    - Archive events older than 90 days that have no linked beliefs.
@@ -36,6 +37,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from clara.db.models import Memory, MemoryStatus, MemoryType
+from clara.reflection import ReflectionEngine
+from clara.retrieval.embeddings import EmbeddingEngine
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +117,19 @@ class DecayScheduler:
     execution receives its own session (and therefore its own transaction).
     """
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        embedding_engine: EmbeddingEngine | None = None,
+        llm_provider: str | None = None,
+        llm_model: str | None = None,
+        reflection_generator=None,
+    ) -> None:
         self._session_factory = session_factory
+        self._embedding_engine = embedding_engine
+        self._llm_provider = llm_provider
+        self._llm_model = llm_model
+        self._reflection_generator = reflection_generator
         self._scheduler = AsyncIOScheduler(timezone="UTC")
 
     # ------------------------------------------------------------------
@@ -138,6 +152,16 @@ class DecayScheduler:
             name="Weekly memory pruning",
             replace_existing=True,
         )
+        if self._embedding_engine is not None and (
+            self._llm_provider is not None or self._reflection_generator is not None
+        ):
+            self._scheduler.add_job(
+                self.run_daily_reflection,
+                trigger=CronTrigger(hour=3, minute=0, timezone="UTC"),
+                id="daily_reflection",
+                name="Daily reflection & insight generation",
+                replace_existing=True,
+            )
         self._scheduler.start()
         logger.info("DecayScheduler started (daily decay @ 02:00 UTC, weekly prune @ Sun 02:30 UTC)")
 
@@ -186,7 +210,7 @@ class DecayScheduler:
                     meta["last_decay_at"] = now.isoformat()
                     record.metadata_ = meta
 
-                    if should_archive(new_confidence):
+                    if should_archive(new_confidence) and record.memory_type != MemoryType.skill:
                         record.status = MemoryStatus.archived
                         record.confidence = new_confidence
                         record.updated_at = now
@@ -274,4 +298,44 @@ class DecayScheduler:
             "skills_deprecated": skills_deprecated,
         }
         logger.info("Weekly pruning complete: %s", summary)
+        return summary
+
+    async def run_daily_reflection(self) -> dict[str, int]:
+        """Generate tenant-scoped reflection insights from recent memories."""
+        if self._embedding_engine is None:
+            return {"users_processed": 0, "insights_generated": 0}
+
+        users_processed = 0
+        insights_generated = 0
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(select(Memory.user_id).distinct())
+                user_ids = list(result.scalars().all())
+                concrete_user_ids = sorted({user_id for user_id in user_ids if user_id is not None})
+                has_legacy_rows = any(user_id is None for user_id in user_ids)
+
+                reflection = ReflectionEngine(
+                    session,
+                    self._embedding_engine,
+                    llm_provider=self._llm_provider or "openai",
+                    llm_model=self._llm_model,
+                    insight_generator=self._reflection_generator,
+                )
+
+                for user_id in concrete_user_ids:
+                    results = await reflection.run(user_id=user_id)
+                    users_processed += 1
+                    insights_generated += len(results)
+
+                if not concrete_user_ids and has_legacy_rows:
+                    results = await reflection.run(user_id=None)
+                    users_processed += 1
+                    insights_generated += len(results)
+
+        summary = {
+            "users_processed": users_processed,
+            "insights_generated": insights_generated,
+        }
+        logger.info("Daily reflection complete: %s", summary)
         return summary

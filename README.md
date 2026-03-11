@@ -2,7 +2,7 @@
 <p align="center">
   <a href="https://pypi.org/project/clara-memory/"><img src="https://img.shields.io/pypi/v/clara-memory?color=blue&label=PyPI" alt="PyPI version"></a>
   <a href="https://pypi.org/project/clara-memory/"><img src="https://img.shields.io/pypi/pyversions/clara-memory?label=Python" alt="Python 3.10+"></a>
-  <a href="https://github.com/itsamiitt/CLARA"><img src="https://img.shields.io/badge/tests-207%20passed-success" alt="Test status"></a>
+  <a href="https://github.com/itsamiitt/CLARA"><img src="https://img.shields.io/badge/tests-362%20passed-success" alt="Test status"></a>
 </p>
 
 <h1 align="center">CLARA</h1>
@@ -37,6 +37,7 @@ The public facade is:
 await agent.remember(text)
 await agent.recall(query, top_k=8)
 await agent.context_for(query, top_k=8)
+await agent.interact(message, user_id="alice")
 ```
 
 ## What It Does Well
@@ -55,7 +56,13 @@ Implemented well:
 - belief memory lifecycle
 - event, skill, and world-model typed storage
 - retrieval and context formatting
+- reasoning loop with memory-grounded response generation
+- reflection-driven insight synthesis from recent memories
 - decay and pruning
+- optional retrieval-result caching with in-memory or Redis backends
+- FastAPI service layer for interaction and memory queries
+- admin/reporting endpoints for stats, conflicts, decay, health, and skill ranking
+- tenant-scoped retrieval, updates, and reflection runs
 - SQLite test/dev fallback
 
 Not implemented yet:
@@ -88,6 +95,12 @@ async def main():
 
     ctx = await agent.context_for("Help the user deploy a Rust service.", top_k=5)
     print(ctx)
+
+    reply = await agent.interact(
+        "What language does the user use for systems work?",
+        user_id="alice",
+    )
+    print(reply["response"])
 
     await agent.close()
 
@@ -127,6 +140,26 @@ This means CLARA currently stores distilled memory, not full source documents.
 5. CLARA creates, reinforces, supersedes, or retains both.
 6. `recall()` ranks results across memory types.
 7. `context_for()` renders the retrieval result for prompt injection.
+8. `interact()` runs retrieval, builds memory context, calls the reasoning model, and stores any facts extracted from the response.
+
+## API
+
+CLARA also exposes a FastAPI service layer.
+
+Core routes:
+
+- `POST /interact`
+- `POST /memory/learn`
+- `GET /memory/search`
+- `GET /memory/timeline`
+- `GET /memory/beliefs`
+- `GET /memory/{memory_id}`
+
+Run locally:
+
+```bash
+uvicorn clara.main:app --reload
+```
 
 ## Production and Local Use
 
@@ -224,7 +257,7 @@ Important:
 
 Current verified state in this repo:
 
-- full suite passes: `207 passed`
+- full suite passes: `371 passed`
 - facade-level smoke tests pass for belief, event, skill, and world-model storage and retrieval
 
 Run locally with:

@@ -284,6 +284,7 @@ class TestRunDailyDecay:
         """Record that decays below 0.15 should be archived."""
         long_ago = datetime.now(timezone.utc) - timedelta(days=200)
         record = FakeMemory(
+            memory_type=MemoryType.belief,
             confidence=0.20,
             decay_rate=0.03,
             updated_at=long_ago,
@@ -296,6 +297,26 @@ class TestRunDailyDecay:
         assert record.status == MemoryStatus.archived
         assert summary["archived"] == 1
         assert summary["decayed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_skills_below_threshold_remain_active_for_pruning(self):
+        """Low-confidence skills should decay but stay active until weekly pruning."""
+        long_ago = datetime.now(timezone.utc) - timedelta(days=200)
+        skill = FakeMemory(
+            memory_type=MemoryType.skill,
+            confidence=0.20,
+            decay_rate=0.03,
+            updated_at=long_ago,
+        )
+        factory = _make_session_factory([skill])
+        scheduler = DecayScheduler(factory)
+
+        summary = await scheduler.run_daily_decay()
+
+        assert skill.confidence < ARCHIVAL_THRESHOLD
+        assert skill.status == MemoryStatus.active
+        assert summary["archived"] == 0
+        assert summary["decayed"] == 1
 
     @pytest.mark.asyncio
     async def test_skips_zero_decay_rate(self):
@@ -487,6 +508,26 @@ class TestRunWeeklyPruning:
         assert skill.status == MemoryStatus.deprecated
         assert summary["events_archived"] == 1
         assert summary["skills_deprecated"] == 1
+
+    @pytest.mark.asyncio
+    async def test_old_low_confidence_skill_deprecates_after_daily_decay(self):
+        """Skills should survive daily decay and be deprecated by weekly pruning."""
+        old = datetime.now(timezone.utc) - timedelta(days=SKILL_UNUSED_DAYS + 30)
+        skill = FakeMemory(
+            memory_type=MemoryType.skill,
+            confidence=0.20,
+            decay_rate=0.03,
+            updated_at=old,
+        )
+        factory = _make_session_factory([skill])
+        scheduler = DecayScheduler(factory)
+
+        daily_summary = await scheduler.run_daily_decay()
+        weekly_summary = await scheduler.run_weekly_pruning()
+
+        assert daily_summary == {"decayed": 1, "archived": 0}
+        assert skill.status == MemoryStatus.deprecated
+        assert weekly_summary["skills_deprecated"] == 1
 
 
 # ---------------------------------------------------------------------------

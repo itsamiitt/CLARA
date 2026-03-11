@@ -289,6 +289,34 @@ class TestStore:
         await session.commit()
         assert record.decay_rate == pytest.approx(0.005)
 
+    @pytest.mark.asyncio
+    async def test_store_negation_persists_flag(self, beliefs: BeliefMemory, session: AsyncSession):
+        record = await beliefs.store(
+            subject="user",
+            relation="uses",
+            object_="Python",
+            domain="systems",
+            is_negation=True,
+            source=SourceType.user_direct,
+            raw_text="I no longer use Python.",
+        )
+        await session.commit()
+        assert record.content["is_negation"] is True
+
+    @pytest.mark.asyncio
+    async def test_store_sets_user_id(self, beliefs: BeliefMemory, session: AsyncSession):
+        record = await beliefs.store(
+            subject="user",
+            relation="uses",
+            object_="Rust",
+            source=SourceType.user_direct,
+            raw_text="I use Rust.",
+            user_id="alice",
+        )
+        await session.commit()
+
+        assert record.user_id == "alice"
+
 
 # ---------------------------------------------------------------------------
 # Integration tests — BeliefMemory.get
@@ -573,3 +601,27 @@ class TestGetActiveBeliefs:
         results = await beliefs.get_active_beliefs(subject="user")
         confidences = [r.confidence for r in results]
         assert confidences == sorted(confidences, reverse=True)
+
+    @pytest.mark.asyncio
+    async def test_filter_by_user_id(self, beliefs: BeliefMemory, session: AsyncSession):
+        await beliefs.store(
+            subject="user",
+            relation="uses",
+            object_="Rust",
+            source=SourceType.user_direct,
+            raw_text="test",
+            user_id="alice",
+        )
+        await beliefs.store(
+            subject="user",
+            relation="uses",
+            object_="Python",
+            source=SourceType.user_direct,
+            raw_text="test",
+            user_id="bob",
+        )
+        await session.commit()
+
+        results = await beliefs.get_active_beliefs(subject="user", user_id="alice")
+        assert len(results) == 1
+        assert results[0].user_id == "alice"
