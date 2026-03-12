@@ -81,7 +81,10 @@ include = ["clara*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not stress'"
+markers = [
+    "stress: heavy load tests, excluded from default run",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]

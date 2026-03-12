@@ -264,9 +264,9 @@ class ReflectionEngine:
 
         provider = self._llm_provider.strip().lower()
         if provider == "openai":
-            return self._call_openai(prompt, pattern)
+            return await self._call_openai(prompt, pattern)
         if provider == "anthropic":
-            return self._call_anthropic(prompt, pattern)
+            return await self._call_anthropic(prompt, pattern)
         return fallback_reflection_text(pattern)
 
     def _model_name(self) -> str:
@@ -276,15 +276,15 @@ class ReflectionEngine:
             return DEFAULT_ANTHROPIC_MODEL
         return DEFAULT_OPENAI_MODEL
 
-    def _call_openai(self, prompt: str, pattern: PatternCandidate) -> str:
+    async def _call_openai(self, prompt: str, pattern: PatternCandidate) -> str:
         if _openai is None:
             return fallback_reflection_text(pattern)
         api_key = os.environ.get(ENV_OPENAI_KEY)
         if not api_key:
             return fallback_reflection_text(pattern)
 
-        client = _openai.OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
+        client = _openai.AsyncOpenAI(api_key=api_key)
+        response = await client.chat.completions.create(
             model=self._model_name(),
             messages=[
                 {"role": "system", "content": DEFAULT_REFLECTION_SYSTEM_PROMPT},
@@ -294,15 +294,15 @@ class ReflectionEngine:
         )
         return (response.choices[0].message.content or "").strip()
 
-    def _call_anthropic(self, prompt: str, pattern: PatternCandidate) -> str:
+    async def _call_anthropic(self, prompt: str, pattern: PatternCandidate) -> str:
         if _anthropic is None:
             return fallback_reflection_text(pattern)
         api_key = os.environ.get(ENV_ANTHROPIC_KEY)
         if not api_key:
             return fallback_reflection_text(pattern)
 
-        client = _anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
+        client = _anthropic.AsyncAnthropic(api_key=api_key)
+        response = await client.messages.create(
             model=self._model_name(),
             max_tokens=512,
             system=DEFAULT_REFLECTION_SYSTEM_PROMPT,

@@ -3,14 +3,14 @@ from __future__ import annotations
 import hashlib
 import math
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from clara.db.models import Base, VECTOR_DIMENSIONS
-from clara.extraction.extractor import ExtractedFact
+from clara.extraction.extractor import ENV_OPENAI_KEY, ExtractedFact
 from clara.memory.belief import BeliefMemory, SourceType
 from clara.reasoning import ContextAssembler, ReasoningEngine
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
@@ -156,3 +156,50 @@ class TestReasoningEngine:
         assert response.memories_used
         assert len(response.facts_stored) == 1
         assert response.facts_stored[0].memory_id is not None
+
+    @pytest.mark.asyncio
+    async def test_generate_response_awaits_provider_call(self, session: AsyncSession):
+        embedder = EmbeddingEngine(_FakeBackend())
+        engine = ReasoningEngine(
+            session,
+            embedder,
+            _ResponseExtractor(),  # type: ignore[arg-type]
+            llm_provider="openai",
+        )
+        engine._call_openai = AsyncMock(return_value="Async reply")  # type: ignore[method-assign]
+
+        response = await engine._generate_response("What does the user use?", "context block")
+
+        assert response == "Async reply"
+        engine._call_openai.assert_awaited_once()
+        system_prompt, query = engine._call_openai.await_args.args
+        assert query == "What does the user use?"
+        assert "context block" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_call_openai_uses_async_client(self, session: AsyncSession):
+        embedder = EmbeddingEngine(_FakeBackend())
+        engine = ReasoningEngine(
+            session,
+            embedder,
+            _ResponseExtractor(),  # type: ignore[arg-type]
+            llm_provider="openai",
+        )
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock(message=MagicMock(content="Async answer"))]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        mock_openai_module = MagicMock()
+        mock_openai_module.AsyncOpenAI.return_value = mock_client
+        mock_openai_module.OpenAI.side_effect = AssertionError("sync client should not be used")
+
+        with patch.dict("os.environ", {ENV_OPENAI_KEY: "sk-test"}):
+            with patch("clara.reasoning.engine._openai", mock_openai_module):
+                response = await engine._call_openai("system prompt", "hello")
+
+        assert response == "Async answer"
+        mock_openai_module.AsyncOpenAI.assert_called_once_with(api_key="sk-test")
+        mock_client.chat.completions.create.assert_awaited_once()

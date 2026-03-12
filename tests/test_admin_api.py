@@ -6,11 +6,18 @@ from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
+pytest.importorskip(
+    "fastapi",
+    reason="fastapi not installed - run: pip install 'clara-memory[api]'",
+)
+pytest.importorskip(
+    "httpx",
+    reason="httpx not installed - run: pip install 'clara-memory[api]'",
+)
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from clara.agent import ClaraMemory
-from clara.api import create_app
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine
@@ -41,6 +48,8 @@ class _EmptyExtractor:
 
 @pytest_asyncio.fixture
 async def admin_client():
+    from clara.api import create_app
+
     from sqlalchemy.dialects.postgresql import JSONB
     from sqlalchemy.ext.compiler import compiles
 

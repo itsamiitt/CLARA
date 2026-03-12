@@ -11,8 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
+from clara.extraction.extractor import ENV_ANTHROPIC_KEY
 from clara.reflection import ReflectionEngine
-from clara.reflection.pipeline import detect_patterns
+from clara.reflection.pipeline import PatternCandidate, detect_patterns
 from clara.retrieval.embeddings import EmbeddingEngine
 from clara.scheduler.decay import DecayScheduler
 from clara.update.engine import ActionTaken, UpdateResult
@@ -267,6 +268,70 @@ class TestReflectionEngine:
 
         assert all(result.action_taken == ActionTaken.created for result in first)
         assert all(result.action_taken == ActionTaken.reinforced for result in second)
+
+    @pytest.mark.asyncio
+    async def test_generate_insight_awaits_provider_call(
+        self,
+        session: AsyncSession,
+        embedder: EmbeddingEngine,
+    ):
+        engine = ReflectionEngine(
+            session,
+            embedder,
+            llm_provider="anthropic",
+        )
+        engine._call_anthropic = AsyncMock(return_value="Async insight")  # type: ignore[method-assign]
+        pattern = PatternCandidate(
+            subject="user",
+            relation="repeatedly_deployed",
+            object="service",
+            pattern_type="repeated_event_type",
+            count=3,
+        )
+
+        insight = await engine._generate_insight(pattern, [])
+
+        assert insight == "Async insight"
+        engine._call_anthropic.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_call_anthropic_uses_async_client(
+        self,
+        session: AsyncSession,
+        embedder: EmbeddingEngine,
+    ):
+        engine = ReflectionEngine(
+            session,
+            embedder,
+            llm_provider="anthropic",
+        )
+        pattern = PatternCandidate(
+            subject="user",
+            relation="repeatedly_deployed",
+            object="service",
+            pattern_type="repeated_event_type",
+            count=3,
+        )
+
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="Async reflection")]
+
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        mock_anthropic_module = MagicMock()
+        mock_anthropic_module.AsyncAnthropic.return_value = mock_client
+        mock_anthropic_module.Anthropic.side_effect = AssertionError(
+            "sync client should not be used"
+        )
+
+        with patch.dict("os.environ", {ENV_ANTHROPIC_KEY: "test-key"}):
+            with patch("clara.reflection.pipeline._anthropic", mock_anthropic_module):
+                insight = await engine._call_anthropic("prompt", pattern)
+
+        assert insight == "Async reflection"
+        mock_anthropic_module.AsyncAnthropic.assert_called_once_with(api_key="test-key")
+        mock_client.messages.create.assert_awaited_once()
 
 
 class TestReflectionScheduler:

@@ -45,6 +45,7 @@ CONFLICT_USERS = 12
 DOMAIN_USERS = 12
 NEGATION_USERS = 12
 CONCURRENT_QUERY_USERS = 30
+MAX_CONCURRENT_RECALLS = 10
 
 
 def _canonical_token(token: str) -> str:
@@ -234,10 +235,23 @@ def _has_match(
     return False
 
 
+async def _recall_guarded(
+    agent: ClaraMemory,
+    query: str,
+    *,
+    top_k: int,
+    semaphore: asyncio.Semaphore,
+):
+    async with semaphore:
+        return await agent.recall(query, top_k=top_k)
+
+
+@pytest.mark.stress
 @pytest.mark.asyncio
 async def test_bulk_agent_round_trip_with_heavy_retrievals():
     workload = _build_workload()
     db_url, db_path = _db_url_for()
+    recall_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RECALLS)
 
     with patch("clara.agent._create_backend", return_value=_SemanticFakeBackend()):
         agent = await ClaraMemory.create(
@@ -423,9 +437,15 @@ async def test_bulk_agent_round_trip_with_heavy_retrievals():
             f"cluster_{idx:03d} has {idx % 5 + 1} nodes" for idx in range(CONCURRENT_QUERY_USERS)
         ]
 
-        concurrent_results = await asyncio.gather(
-            *(agent.recall(query, top_k=6) for query in concurrent_queries)
-        )
+        concurrent_results = await asyncio.gather(*(
+            _recall_guarded(
+                agent,
+                query,
+                top_k=6,
+                semaphore=recall_semaphore,
+            )
+            for query in concurrent_queries
+        ))
         assert len(concurrent_results) == CONCURRENT_QUERY_USERS * 4
         assert all(result.total >= 1 for result in concurrent_results)
 

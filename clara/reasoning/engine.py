@@ -135,9 +135,9 @@ class ReasoningEngine:
 
         provider = self._llm_provider.strip().lower()
         if provider == "openai":
-            return self._call_openai(final_system_prompt, query)
+            return await self._call_openai(final_system_prompt, query)
         if provider == "anthropic":
-            return self._call_anthropic(final_system_prompt, query)
+            return await self._call_anthropic(final_system_prompt, query)
         raise ValueError(f"Unknown reasoning provider {self._llm_provider!r}.")
 
     def _model_name(self) -> str:
@@ -147,7 +147,7 @@ class ReasoningEngine:
             return DEFAULT_ANTHROPIC_MODEL
         return DEFAULT_OPENAI_MODEL
 
-    def _call_openai(self, system_prompt: str, query: str) -> str:
+    async def _call_openai(self, system_prompt: str, query: str) -> str:
         if _openai is None:
             raise ImportError(
                 "The 'openai' package is required for the OpenAI reasoning provider."
@@ -158,8 +158,8 @@ class ReasoningEngine:
                 f"Environment variable {ENV_OPENAI_KEY!r} is not set."
             )
 
-        client = _openai.OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
+        client = _openai.AsyncOpenAI(api_key=api_key)
+        response = await client.chat.completions.create(
             model=self._model_name(),
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -169,7 +169,7 @@ class ReasoningEngine:
         )
         return response.choices[0].message.content or ""
 
-    def _call_anthropic(self, system_prompt: str, query: str) -> str:
+    async def _call_anthropic(self, system_prompt: str, query: str) -> str:
         if _anthropic is None:
             raise ImportError(
                 "The 'anthropic' package is required for the Anthropic reasoning provider."
@@ -180,8 +180,8 @@ class ReasoningEngine:
                 f"Environment variable {ENV_ANTHROPIC_KEY!r} is not set."
             )
 
-        client = _anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
+        client = _anthropic.AsyncAnthropic(api_key=api_key)
+        response = await client.messages.create(
             model=self._model_name(),
             max_tokens=2048,
             system=system_prompt,

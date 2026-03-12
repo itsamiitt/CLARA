@@ -6,11 +6,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+pytest.importorskip(
+    "fastapi",
+    reason="fastapi not installed - run: pip install 'clara-memory[api]'",
+)
+pytest.importorskip(
+    "httpx",
+    reason="httpx not installed - run: pip install 'clara-memory[api]'",
+)
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from clara.agent import ClaraMemory
-from clara.api import create_app
 from clara.db.models import Base, Memory
 from clara.extraction.extractor import ExtractedFact
 from clara.retrieval.embeddings import EmbeddingEngine
@@ -99,6 +106,8 @@ async def api_agent() -> ClaraMemory:
 
 @pytest_asyncio.fixture
 async def client(api_agent: ClaraMemory):
+    from clara.api import create_app
+
     app = create_app(agent=api_agent)
     async with app.router.lifespan_context(app):
         async with AsyncClient(
