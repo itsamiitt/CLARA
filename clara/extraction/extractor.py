@@ -31,13 +31,17 @@ logger = logging.getLogger(__name__)
 ENV_LLM_PROVIDER = "CLARA_LLM_PROVIDER"
 ENV_OPENAI_KEY = "OPENAI_API_KEY"
 ENV_ANTHROPIC_KEY = "ANTHROPIC_API_KEY"
+ENV_OLLAMA_BASE_URL = "CLARA_OLLAMA_BASE_URL"
 
 ENV_OPENAI_MODEL = "CLARA_OPENAI_MODEL"
 ENV_ANTHROPIC_MODEL = "CLARA_ANTHROPIC_MODEL"
+ENV_OLLAMA_MODEL = "CLARA_OLLAMA_MODEL"
 
 DEFAULT_PROVIDER = "openai"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-3-5-haiku-20241022"
+DEFAULT_OLLAMA_MODEL = "llama3.2"
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
 CONFIDENCE_FLOOR = 0.4
 
@@ -54,6 +58,13 @@ try:
     import anthropic as _anthropic  # type: ignore[import-untyped]
 except ImportError:
     _anthropic: Any = None  # type: ignore[assignment]
+
+try:
+    import ollama as _ollama_lib  # type: ignore[import-untyped]
+except ImportError:
+    _ollama_lib: Any = None  # type: ignore[assignment]
+
+_OLLAMA_MODELS_READY: set[tuple[str, str]] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +199,63 @@ def _call_anthropic(text: str, model: str) -> str:
     return response.content[0].text or "[]"
 
 
+def _ensure_ollama_model(base_url: str, model: str) -> None:
+    if _ollama_lib is None:
+        raise ImportError(
+            "The 'ollama' package is required for the Ollama extraction provider. "
+            "Install it with: pip install 'clara-memory[ollama]'"
+        )
+
+    key = (base_url, model)
+    if key in _OLLAMA_MODELS_READY:
+        return
+
+    client = _ollama_lib.Client(host=base_url)
+    listing = client.list()
+    models = listing.get("models", []) if isinstance(listing, dict) else getattr(
+        listing, "models", []
+    )
+    names = {
+        str(item.get("name") or item.get("model") or "")
+        for item in models
+        if isinstance(item, dict)
+    }
+    if model not in names:
+        client.pull(model)
+    _OLLAMA_MODELS_READY.add(key)
+
+
+def _call_ollama(text: str, model: str, base_url: str) -> str:
+    if _ollama_lib is None:
+        raise ImportError(
+            "The 'ollama' package is required for the Ollama extraction provider. "
+            "Install it with: pip install 'clara-memory[ollama]'"
+        )
+
+    _ensure_ollama_model(base_url, model)
+    client = _ollama_lib.Client(host=base_url)
+    response = client.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"Input:\n{text}\n\nRespond with valid JSON only.",
+            },
+        ],
+        options={"temperature": 0.1, "num_predict": 2048},
+        format="json",
+    )
+    message = getattr(response, "message", None)
+    if message is not None:
+        return getattr(message, "content", "") or ""
+    if isinstance(response, dict):
+        payload = response.get("message", {})
+        if isinstance(payload, dict):
+            return str(payload.get("content", "") or "")
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # JSON parsing
 # ---------------------------------------------------------------------------
@@ -297,10 +365,15 @@ class FactExtractor:
         *,
         provider: str | None = None,
         model: str | None = None,
+        ollama_base_url: str | None = None,
     ) -> None:
         self._provider = (
             provider or os.environ.get(ENV_LLM_PROVIDER, DEFAULT_PROVIDER)
         ).strip().lower()
+        self._ollama_base_url = (
+            ollama_base_url
+            or os.environ.get(ENV_OLLAMA_BASE_URL, DEFAULT_OLLAMA_BASE_URL)
+        )
 
         if self._provider == "openai":
             self._model = model or os.environ.get(
@@ -312,10 +385,24 @@ class FactExtractor:
                 ENV_ANTHROPIC_MODEL, DEFAULT_ANTHROPIC_MODEL
             )
             self._call_fn = _call_anthropic
+        elif self._provider == "ollama":
+            if _ollama_lib is None:
+                raise ImportError(
+                    "The 'ollama' package is required for the Ollama extraction provider. "
+                    "Install it with: pip install 'clara-memory[ollama]'"
+                )
+            self._model = model or os.environ.get(
+                ENV_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL
+            )
+            self._call_fn = lambda text, selected_model: _call_ollama(
+                text,
+                selected_model,
+                self._ollama_base_url,
+            )
         else:
             raise ValueError(
                 f"Unknown LLM provider {self._provider!r}. "
-                f"Supported: 'openai', 'anthropic'."
+                f"Supported: 'openai', 'anthropic', 'ollama'."
             )
 
     def extract(self, text: str) -> list[ExtractedFact]:

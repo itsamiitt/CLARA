@@ -11,8 +11,9 @@ subsystem together into three ergonomic async methods:
 Usage::
 
     agent = await ClaraMemory.create(
-        db_url="postgresql+asyncpg://...",
-        embedding_backend="openai",
+        db_url="sqlite+aiosqlite:///clara.db",
+        lance_path="./clara_vectors",
+        embedding_backend="local",
         llm_provider="openai",
     )
     await agent.remember("I switched from Python to Rust for systems work.")
@@ -24,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 from sqlalchemy.exc import OperationalError
 from typing import Any, Sequence
 
@@ -37,19 +39,33 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool, StaticPool
 
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
-from clara.extraction.extractor import ExtractedFact, FactExtractor
+from clara.extraction.extractor import (
+    DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_MODEL,
+    ENV_OLLAMA_BASE_URL,
+    ENV_OLLAMA_MODEL,
+    ExtractedFact,
+    FactExtractor,
+)
 from clara.interaction import InteractionLayer
 from clara.memory.belief import BeliefMemory
 from clara.reasoning.engine import ReasoningEngine
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import (
     EmbeddingEngine,
+    ENV_OLLAMA_EMBED_MODEL,
     _EmbeddingBackend,
     _LocalBackend,
     _OpenAIBackend,
     _create_backend,
 )
-from clara.retrieval.engine import RetrievalEngine, RetrievalResult, ScoredMemory
+from clara.retrieval.engine import (
+    DEFAULT_LANCE_PATH,
+    LanceRetrievalEngine,
+    RetrievalEngine,
+    RetrievalResult,
+    ScoredMemory,
+)
 from clara.scheduler.decay import DecayScheduler
 from clara.update.background import BackgroundWriter
 from clara.update.engine import MemoryUpdateEngine
@@ -214,7 +230,7 @@ class ClaraMemory:
     Parameters:
         db_url:
             SQLAlchemy async connection URL, e.g.
-            ``"postgresql+asyncpg://user:pass@host/db"`` or
+            ``"sqlite+aiosqlite:///clara.db"`` or
             ``"sqlite+aiosqlite://"`` for in-memory testing.
         embedding_backend:
             ``"openai"`` or ``"local"`` (sentence-transformers).
@@ -237,6 +253,7 @@ class ClaraMemory:
         embedding_engine: EmbeddingEngine,
         extractor: FactExtractor,
         decay_scheduler: DecayScheduler | None,
+        lance_engine: LanceRetrievalEngine | None = None,
         interaction_layer: InteractionLayer | None = None,
         cache: MemoryCache | None = None,
         background_writer: BackgroundWriter | None = None,
@@ -246,6 +263,7 @@ class ClaraMemory:
         self._embedding_engine = embedding_engine
         self._extractor = extractor
         self._decay_scheduler = decay_scheduler
+        self._lance_engine = lance_engine or LanceRetrievalEngine.get_default()
         self._interaction_layer = interaction_layer or InteractionLayer()
         self._llm_provider = getattr(extractor, "_provider", "openai")
         self._llm_model = getattr(extractor, "_model", None)
@@ -255,10 +273,14 @@ class ClaraMemory:
     @classmethod
     async def create(
         cls,
-        db_url: str,
+        db_url: str = "sqlite+aiosqlite:///clara.db",
         embedding_backend: str = "openai",
         llm_provider: str = "openai",
         *,
+        ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+        ollama_llm_model: str = DEFAULT_OLLAMA_MODEL,
+        ollama_embed_model: str = "nomic-embed-text",
+        lance_path: str = "./clara_vectors",
         start_scheduler: bool = True,
         cache_url: str | None = None,
     ) -> ClaraMemory:
@@ -266,8 +288,8 @@ class ClaraMemory:
 
         Args:
             db_url: SQLAlchemy async DB URL.
-            embedding_backend: ``"openai"`` or ``"local"``.
-            llm_provider: ``"openai"`` or ``"anthropic"``.
+            embedding_backend: ``"openai"``, ``"local"``, or ``"ollama"``.
+            llm_provider: ``"openai"``, ``"anthropic"``, or ``"ollama"``.
             start_scheduler: Whether to start the decay scheduler.
 
         Returns:
@@ -279,13 +301,45 @@ class ClaraMemory:
             await conn.run_sync(Base.metadata.create_all)
 
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        resolved_lance_path = lance_path
+        if lance_path == DEFAULT_LANCE_PATH:
+            resolved_lance_path = os.environ.get("CLARA_LANCE_PATH", lance_path)
+        LanceRetrievalEngine.configure_default_path(resolved_lance_path)
+        lance_engine = LanceRetrievalEngine.get_default()
+
+        resolved_ollama_base_url = ollama_base_url
+        if ollama_base_url == DEFAULT_OLLAMA_BASE_URL:
+            resolved_ollama_base_url = os.environ.get(ENV_OLLAMA_BASE_URL, ollama_base_url)
+
+        resolved_ollama_llm_model = ollama_llm_model
+        if ollama_llm_model == DEFAULT_OLLAMA_MODEL:
+            resolved_ollama_llm_model = os.environ.get(ENV_OLLAMA_MODEL, ollama_llm_model)
+
+        resolved_ollama_embed_model = ollama_embed_model
+        if ollama_embed_model == "nomic-embed-text":
+            resolved_ollama_embed_model = os.environ.get(
+                ENV_OLLAMA_EMBED_MODEL,
+                ollama_embed_model,
+            )
+
+        os.environ[ENV_OLLAMA_BASE_URL] = resolved_ollama_base_url
+        os.environ[ENV_OLLAMA_MODEL] = resolved_ollama_llm_model
+        os.environ[ENV_OLLAMA_EMBED_MODEL] = resolved_ollama_embed_model
 
         # --- Embedding ---
-        backend = _create_backend(embedding_backend)
+        backend = _create_backend(
+            embedding_backend,
+            ollama_base_url=resolved_ollama_base_url,
+            ollama_model=resolved_ollama_embed_model,
+        )
         embedding_engine = EmbeddingEngine(backend)
 
         # --- Extraction ---
-        extractor = FactExtractor(provider=llm_provider)
+        extractor = FactExtractor(
+            provider=llm_provider,
+            model=resolved_ollama_llm_model if llm_provider == "ollama" else None,
+            ollama_base_url=resolved_ollama_base_url,
+        )
         cache = MemoryCache(cache_url) if cache_url else None
 
         # --- Decay Scheduler ---
@@ -305,6 +359,7 @@ class ClaraMemory:
             embedding_engine=embedding_engine,
             extractor=extractor,
             decay_scheduler=decay_scheduler,
+            lance_engine=lance_engine,
             interaction_layer=InteractionLayer(),
             cache=cache,
             background_writer=BackgroundWriter(
@@ -359,7 +414,12 @@ class ClaraMemory:
                 update_engine = MemoryUpdateEngine(
                     session,
                     self._embedding_engine,
-                    RetrievalEngine(session, self._embedding_engine, cache=self._cache),
+                    RetrievalEngine(
+                        session,
+                        self._embedding_engine,
+                        cache=self._cache,
+                        lance_engine=self._lance_engine,
+                    ),
                     cache=self._cache,
                 )
 
@@ -397,7 +457,12 @@ class ClaraMemory:
             A :class:`RetrievalResult` grouped by memory type.
         """
         async with self._session_factory() as session:
-            retriever = RetrievalEngine(session, self._embedding_engine, cache=self._cache)
+            retriever = RetrievalEngine(
+                session,
+                self._embedding_engine,
+                cache=self._cache,
+                lance_engine=self._lance_engine,
+            )
             result = await retriever.search(
                 query,
                 top_k=top_k,
@@ -449,6 +514,7 @@ class ClaraMemory:
                     self._extractor,
                     llm_provider=self._llm_provider,
                     llm_model=self._llm_model,
+                    ollama_base_url=os.environ.get(ENV_OLLAMA_BASE_URL),
                     cache=self._cache,
                 )
                 response = await reasoning.respond(
@@ -495,6 +561,7 @@ class ClaraMemory:
             await self._background_writer.stop()
         if self._cache is not None:
             await self._cache.close()
+        self._lance_engine.close()
         await self._engine.dispose()
         logger.info("ClaraMemory closed")
 
@@ -507,7 +574,12 @@ class ClaraMemory:
             return
 
         async with self._session_factory() as session:
-            retriever = RetrievalEngine(session, self._embedding_engine, cache=self._cache)
+            retriever = RetrievalEngine(
+                session,
+                self._embedding_engine,
+                cache=self._cache,
+                lance_engine=self._lance_engine,
+            )
             try:
                 await retriever.record_accesses(memory_ids)
                 await session.commit()

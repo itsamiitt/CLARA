@@ -1,8 +1,8 @@
 """
 Tests for clara.retrieval.engine — RetrievalEngine with mocked backends.
 
-All tests mock both the AsyncSession (no real database) and the EmbeddingEngine
-(no real API calls).  This validates the scoring formula, grouping, access
+All tests mock the AsyncSession hydration query, the LanceDB ANN search, and
+the EmbeddingEngine. This validates the scoring formula, grouping, access
 tracking, and edge cases entirely in-process.
 """
 
@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -76,17 +76,25 @@ def _make_embedder(dims: int = 1536) -> MagicMock:
 
 
 def _make_async_session(
-    candidates: list[tuple[FakeMemory, float]] | None = None,
+    memories: list[FakeMemory] | None = None,
 ) -> AsyncMock:
-    """Return a mocked AsyncSession whose execute() returns the candidate rows."""
+    """Return a mocked AsyncSession whose execute() hydrates Memory rows."""
     session = AsyncMock()
 
     mock_result = MagicMock()
-    mock_result.all.return_value = candidates or []
+    mock_scalars = MagicMock()
+    mock_scalars.all.return_value = memories or []
+    mock_result.scalars.return_value = mock_scalars
     session.execute = AsyncMock(return_value=mock_result)
     session.flush = AsyncMock()
 
     return session
+
+
+def _stub_lance(engine: RetrievalEngine, pairs: list[tuple[FakeMemory, float]]) -> AsyncMock:
+    mock = AsyncMock(return_value=[(str(mem.memory_id), similarity) for mem, similarity in pairs])
+    engine._lance.search_candidates = mock  # type: ignore[method-assign]
+    return mock
 
 
 # ---------------------------------------------------------------------------
@@ -218,14 +226,15 @@ class TestRetrievalEngineSearch:
         event = FakeMemory(memory_type=MemoryType.event, confidence=0.8)
         skill = FakeMemory(memory_type=MemoryType.skill, confidence=0.7)
 
-        session = _make_async_session([
-            (belief, 0.1),   # distance=0.1 → similarity=0.9
-            (event, 0.2),    # distance=0.2 → similarity=0.8
-            (skill, 0.3),    # distance=0.3 → similarity=0.7
-        ])
+        session = _make_async_session([belief, event, skill])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [
+            (belief, 0.9),
+            (event, 0.8),
+            (skill, 0.7),
+        ])
         result = await engine.search("test query")
 
         assert len(result.beliefs) == 1
@@ -239,6 +248,7 @@ class TestRetrievalEngineSearch:
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [])
         await engine.search("What language does user prefer?")
 
         embedder.embed.assert_called_once_with("What language does user prefer?")
@@ -249,6 +259,7 @@ class TestRetrievalEngineSearch:
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [])
         result = await engine.search("test")
 
         assert result.total == 0
@@ -257,13 +268,14 @@ class TestRetrievalEngineSearch:
     @pytest.mark.asyncio
     async def test_search_respects_top_k(self):
         memories = [
-            (FakeMemory(confidence=0.9 - i * 0.05), 0.1 + i * 0.05)
+            (FakeMemory(confidence=0.9 - i * 0.05), 0.9 - i * 0.05)
             for i in range(10)
         ]
-        session = _make_async_session(memories)
+        session = _make_async_session([mem for mem, _similarity in memories])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, memories)
         result = await engine.search("test", top_k=3)
 
         assert result.total == 3
@@ -279,11 +291,11 @@ class TestRetrievalEngineSearch:
             updated_at=now - timedelta(days=10),
             access_count=5,
         )
-        # distance 0.15 → similarity 0.85
-        session = _make_async_session([(mem, 0.15)])
+        session = _make_async_session([mem])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [(mem, 0.85)])
         result = await engine.search("test", top_k=1)
 
         sm = result.beliefs[0]
@@ -310,13 +322,14 @@ class TestRetrievalEngineSearch:
         high_sim = FakeMemory(confidence=0.5, updated_at=now)
         low_sim = FakeMemory(confidence=0.5, updated_at=now)
 
-        session = _make_async_session([
-            (high_sim, 0.05),  # similarity 0.95
-            (low_sim, 0.50),   # similarity 0.50
-        ])
+        session = _make_async_session([high_sim, low_sim])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [
+            (high_sim, 0.95),
+            (low_sim, 0.50),
+        ])
         result = await engine.search("test")
 
         all_results = result.all
@@ -327,10 +340,11 @@ class TestRetrievalEngineSearch:
     @pytest.mark.asyncio
     async def test_increments_access_count(self):
         mem = FakeMemory(access_count=3)
-        session = _make_async_session([(mem, 0.1)])
+        session = _make_async_session([mem])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [(mem, 0.9)])
         await engine.search("test")
 
         # access_count should have been bumped from 3 → 4
@@ -339,10 +353,11 @@ class TestRetrievalEngineSearch:
     @pytest.mark.asyncio
     async def test_sets_last_accessed(self):
         mem = FakeMemory()
-        session = _make_async_session([(mem, 0.1)])
+        session = _make_async_session([mem])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [(mem, 0.9)])
         await engine.search("test")
 
         assert "last_accessed" in mem.metadata_
@@ -353,10 +368,11 @@ class TestRetrievalEngineSearch:
         mem = FakeMemory()
         mem.metadata_ = {}  # no access_count key
 
-        session = _make_async_session([(mem, 0.1)])
+        session = _make_async_session([mem])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [(mem, 0.9)])
         await engine.search("test")
 
         assert mem.metadata_["access_count"] == 1
@@ -364,10 +380,11 @@ class TestRetrievalEngineSearch:
     @pytest.mark.asyncio
     async def test_flush_called_after_access_update(self):
         mem = FakeMemory()
-        session = _make_async_session([(mem, 0.1)])
+        session = _make_async_session([mem])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [(mem, 0.9)])
         await engine.search("test")
 
         session.flush.assert_called()
@@ -377,10 +394,11 @@ class TestRetrievalEngineSearch:
     @pytest.mark.asyncio
     async def test_world_model_grouped_correctly(self):
         wm = FakeMemory(memory_type=MemoryType.world_model, confidence=0.9)
-        session = _make_async_session([(wm, 0.1)])
+        session = _make_async_session([wm])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [(wm, 0.9)])
         result = await engine.search("test")
 
         assert len(result.world_model) == 1
@@ -399,12 +417,17 @@ class TestRetrievalEngineSearch:
         s1 = FakeMemory(memory_type=MemoryType.skill, confidence=0.6, updated_at=now)
         w1 = FakeMemory(memory_type=MemoryType.world_model, confidence=0.5, updated_at=now)
 
-        session = _make_async_session([
-            (b1, 0.1), (b2, 0.15), (e1, 0.2), (s1, 0.25), (w1, 0.3),
-        ])
+        session = _make_async_session([b1, b2, e1, s1, w1])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [
+            (b1, 0.90),
+            (b2, 0.85),
+            (e1, 0.80),
+            (s1, 0.75),
+            (w1, 0.70),
+        ])
         result = await engine.search("test", top_k=10)
 
         assert len(result.beliefs) == 2
@@ -422,13 +445,14 @@ class TestRetrievalEngineSearch:
         popular = FakeMemory(confidence=0.5, updated_at=now, access_count=100)
         unpopular = FakeMemory(confidence=0.5, updated_at=now, access_count=1)
 
-        session = _make_async_session([
-            (popular, 0.2),    # similarity = 0.8
-            (unpopular, 0.2),  # similarity = 0.8
-        ])
+        session = _make_async_session([popular, unpopular])
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder)
+        _stub_lance(engine, [
+            (popular, 0.8),
+            (unpopular, 0.8),
+        ])
         result = await engine.search("test")
 
         all_results = result.all
@@ -448,7 +472,7 @@ class TestRetrievalEngineSearch:
         embedder = _make_embedder()
 
         engine = RetrievalEngine(session, embedder, candidate_multiplier=5)
+        lance = _stub_lance(engine, [])
         await engine.search("test", top_k=4)
 
-        # Verify execute was called (the LIMIT is baked into the SQL)
-        session.execute.assert_called_once()
+        assert lance.await_args.kwargs["n_candidates"] == 20

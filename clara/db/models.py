@@ -1,8 +1,8 @@
 """
-CLARA — Unified Memory Store: SQLAlchemy 2.0 Models
+CLARA - Unified Memory Store: SQLAlchemy 2.0 Models
 
 Defines the single-table schema for all memory types (belief, event, skill,
-world_model) stored in PostgreSQL with pgvector embeddings.
+world_model) stored in SQLite, with embeddings kept in LanceDB.
 """
 
 from __future__ import annotations
@@ -20,44 +20,11 @@ from sqlalchemy import (
     Index,
     MetaData,
     Uuid,
-    cast,
     literal,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.types import UserDefinedType
-
-try:
-    from pgvector.sqlalchemy import Vector
-except ImportError:
-    def _vector_literal(value: list[float] | tuple[float, ...]) -> str:
-        return "[" + ",".join(f"{float(v):.12g}" for v in value) + "]"
-
-    class Vector(UserDefinedType):
-        """Lightweight pgvector fallback used when the dependency is absent.
-
-        This keeps the package importable for SQLite-backed tests and local
-        development environments that do not have ``pgvector`` installed.
-        """
-
-        cache_ok = True
-
-        def __init__(self, dimensions: int) -> None:
-            self.dimensions = dimensions
-
-        def get_col_spec(self, **kw: object) -> str:
-            return f"VECTOR({self.dimensions})"
-
-        def load_dialect_impl(self, dialect):
-            if dialect.name == "sqlite":
-                return dialect.type_descriptor(Text())
-            return self
-
-        class comparator_factory(UserDefinedType.Comparator):
-            def cosine_distance(self, other: list[float] | tuple[float, ...]):
-                rhs = cast(literal(_vector_literal(other)), self.type)
-                return self.expr.op("<=>")(rhs)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +75,7 @@ class Base(DeclarativeBase):
 # ---------------------------------------------------------------------------
 
 VECTOR_DIMENSIONS = 1536  # OpenAI text-embedding-3-small / compatible models
-JSON_STORAGE_TYPE = JSON().with_variant(JSONB, "postgresql")
+JSON_STORAGE_TYPE = JSON
 
 
 class Memory(Base):
@@ -157,13 +124,6 @@ class Memory(Base):
         JSON_STORAGE_TYPE,
         nullable=False,
         comment="Type-specific structured content (subject/relation/object, steps, properties, etc.).",
-    )
-
-    # --- Embedding ---
-    embedding = mapped_column(
-        Vector(VECTOR_DIMENSIONS),
-        nullable=True,
-        comment="Dense vector embedding for semantic similarity search.",
     )
 
     # --- Scoring ---
@@ -238,6 +198,34 @@ class Memory(Base):
             "status",
         ),
     )
+
+    @hybrid_property
+    def embedding(self) -> list[float] | None:
+        """Compatibility shim for code paths that still set ``record.embedding``.
+
+        Embeddings are stored in LanceDB after the PostgreSQL/pgvector removal,
+        but several existing write paths still pass ``embedding=...`` into the
+        ORM constructor or assign ``record.embedding`` during updates. Keep an
+        instance-local cache so those callers remain unchanged.
+        """
+        cached = getattr(self, "_embedding_cache", None)
+        if cached is None:
+            return None
+        return [float(value) for value in cached]
+
+    @embedding.setter
+    def embedding(self, value: list[float] | tuple[float, ...] | None) -> None:
+        if value is None:
+            self._embedding_cache = None
+            return
+        self._embedding_cache = [float(item) for item in value]
+
+    @embedding.expression
+    def embedding(cls):
+        # There is no persisted SQL column anymore. Returning a non-null literal
+        # keeps legacy ``Memory.embedding.is_(None)`` checks deterministic in
+        # tests without implying any real database storage.
+        return literal(False)
 
     def __repr__(self) -> str:
         return (

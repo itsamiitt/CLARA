@@ -6,18 +6,23 @@ response back into the update engine.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import os
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Sequence, TypeAlias
+from typing import Any, Awaitable, Callable, Sequence, TypeAlias
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.extraction.extractor import (
     DEFAULT_ANTHROPIC_MODEL,
+    DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_MODEL,
     DEFAULT_OPENAI_MODEL,
     ENV_ANTHROPIC_KEY,
+    ENV_OLLAMA_BASE_URL,
+    ENV_OLLAMA_MODEL,
     ENV_OPENAI_KEY,
     ExtractedFact,
     FactExtractor,
@@ -31,6 +36,12 @@ from clara.reasoning.context import ContextAssembler
 from clara.update.engine import MemoryUpdateEngine, UpdateResult
 
 logger = logging.getLogger(__name__)
+try:
+    import ollama as _ollama_lib  # type: ignore[import-untyped]
+except ImportError:
+    _ollama_lib: Any = None  # type: ignore[assignment]
+
+_OLLAMA_MODELS_READY: set[tuple[str, str]] = set()
 
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "You are a helpful assistant. Use the provided memory context when it is relevant. "
@@ -61,6 +72,7 @@ class ReasoningEngine:
         *,
         llm_provider: str = "openai",
         llm_model: str | None = None,
+        ollama_base_url: str | None = None,
         response_generator: ResponseGenerator | None = None,
         cache: MemoryCache | None = None,
     ) -> None:
@@ -69,6 +81,10 @@ class ReasoningEngine:
         self._extractor = extractor
         self._llm_provider = llm_provider
         self._llm_model = llm_model
+        self._ollama_base_url = (
+            ollama_base_url
+            or os.environ.get(ENV_OLLAMA_BASE_URL, DEFAULT_OLLAMA_BASE_URL)
+        )
         self._response_generator = response_generator
         self._retriever = RetrievalEngine(session, embedding_engine, cache=cache)
         self._assembler = ContextAssembler(self._retriever)
@@ -138,13 +154,24 @@ class ReasoningEngine:
             return await self._call_openai(final_system_prompt, query)
         if provider == "anthropic":
             return await self._call_anthropic(final_system_prompt, query)
+        if provider == "ollama":
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                self._call_ollama,
+                final_system_prompt,
+                query,
+            )
         raise ValueError(f"Unknown reasoning provider {self._llm_provider!r}.")
 
     def _model_name(self) -> str:
         if self._llm_model:
             return self._llm_model
-        if self._llm_provider.strip().lower() == "anthropic":
+        provider = self._llm_provider.strip().lower()
+        if provider == "anthropic":
             return DEFAULT_ANTHROPIC_MODEL
+        if provider == "ollama":
+            return os.environ.get(ENV_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
         return DEFAULT_OPENAI_MODEL
 
     async def _call_openai(self, system_prompt: str, query: str) -> str:
@@ -189,3 +216,45 @@ class ReasoningEngine:
             temperature=0.2,
         )
         return response.content[0].text or ""
+
+    def _call_ollama(self, system_prompt: str, query: str) -> str:
+        if _ollama_lib is None:
+            raise ImportError(
+                "The 'ollama' package is required for the Ollama reasoning provider. "
+                "Install it with: pip install 'clara-memory[ollama]'"
+            )
+
+        model = self._model_name()
+        key = (self._ollama_base_url, model)
+        if key not in _OLLAMA_MODELS_READY:
+            client = _ollama_lib.Client(host=self._ollama_base_url)
+            listing = client.list()
+            models = listing.get("models", []) if isinstance(listing, dict) else getattr(
+                listing, "models", []
+            )
+            names = {
+                str(item.get("name") or item.get("model") or "")
+                for item in models
+                if isinstance(item, dict)
+            }
+            if model not in names:
+                client.pull(model)
+            _OLLAMA_MODELS_READY.add(key)
+
+        client = _ollama_lib.Client(host=self._ollama_base_url)
+        response = client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query},
+            ],
+            options={"temperature": 0.2, "num_predict": 2048},
+        )
+        message = getattr(response, "message", None)
+        if message is not None:
+            return getattr(message, "content", "") or ""
+        if isinstance(response, dict):
+            payload = response.get("message", {})
+            if isinstance(payload, dict):
+                return str(payload.get("content", "") or "")
+        return ""

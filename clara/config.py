@@ -16,7 +16,7 @@ Usage::
     config = ClaraConfig.from_env()
 
     # Explicit overrides (e.g. tests)
-    config = ClaraConfig(db_url="sqlite+aiosqlite://", start_scheduler=False)
+    config = ClaraConfig(db_url="sqlite+aiosqlite:///clara.db", start_scheduler=False)
 """
 
 from __future__ import annotations
@@ -29,12 +29,15 @@ from dataclasses import dataclass
 # Default values (keep in sync with per-module defaults)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_DB_URL = "sqlite+aiosqlite://"
+_DEFAULT_DB_URL = "sqlite+aiosqlite:///clara.db"
 _DEFAULT_EMBEDDING_BACKEND = "openai"
 _DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 _DEFAULT_LLM_PROVIDER = "openai"
 _DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 _DEFAULT_ANTHROPIC_MODEL = "claude-3-5-haiku-20241022"
+_DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+_DEFAULT_OLLAMA_MODEL = "llama3.2"
+_DEFAULT_OLLAMA_EMBED_MODEL = "nomic-embed-text"
 _DEFAULT_RETRIEVAL_TOP_K = 8
 _DEFAULT_SIMILARITY_THRESHOLD = 0.82
 _DEFAULT_ARCHIVAL_THRESHOLD = 0.15
@@ -49,18 +52,24 @@ class ClaraConfig:
 
     Attributes:
         db_url:
-            SQLAlchemy async connection URL.  Defaults to in-memory SQLite.
+            SQLAlchemy async connection URL. Defaults to a local SQLite file.
         embedding_backend:
             ``"openai"`` or ``"local"`` (sentence-transformers).
         openai_embedding_model:
             Model name for OpenAI embeddings.
         llm_provider:
-            ``"openai"`` or ``"anthropic"`` — used by the fact extractor
+            ``"openai"``, ``"anthropic"``, or ``"ollama"`` — used by the fact extractor
             and reasoning engine.
         openai_model:
             OpenAI model for extraction / reasoning.
         anthropic_model:
             Anthropic model for extraction / reasoning.
+        ollama_base_url:
+            Base URL for the local Ollama server.
+        ollama_llm_model:
+            Ollama model for extraction / reasoning / reflection.
+        ollama_embed_model:
+            Ollama model for embeddings.
         retrieval_top_k:
             Default number of results returned by retrieval queries.
         similarity_threshold:
@@ -94,6 +103,9 @@ class ClaraConfig:
     llm_provider: str = _DEFAULT_LLM_PROVIDER
     openai_model: str = _DEFAULT_OPENAI_MODEL
     anthropic_model: str = _DEFAULT_ANTHROPIC_MODEL
+    ollama_base_url: str = _DEFAULT_OLLAMA_BASE_URL
+    ollama_llm_model: str = _DEFAULT_OLLAMA_MODEL
+    ollama_embed_model: str = _DEFAULT_OLLAMA_EMBED_MODEL
 
     # Retrieval
     retrieval_top_k: int = _DEFAULT_RETRIEVAL_TOP_K
@@ -125,6 +137,9 @@ class ClaraConfig:
         * ``CLARA_LLM_PROVIDER``
         * ``CLARA_OPENAI_MODEL``
         * ``CLARA_ANTHROPIC_MODEL``
+        * ``CLARA_OLLAMA_BASE_URL``
+        * ``CLARA_OLLAMA_MODEL``
+        * ``CLARA_OLLAMA_EMBED_MODEL``
         * ``CLARA_RETRIEVAL_TOP_K``
         * ``CLARA_SIMILARITY_THRESHOLD``
         * ``CLARA_ARCHIVAL_THRESHOLD``
@@ -167,6 +182,9 @@ class ClaraConfig:
             llm_provider=_str("CLARA_LLM_PROVIDER", _DEFAULT_LLM_PROVIDER),
             openai_model=_str("CLARA_OPENAI_MODEL", _DEFAULT_OPENAI_MODEL),
             anthropic_model=_str("CLARA_ANTHROPIC_MODEL", _DEFAULT_ANTHROPIC_MODEL),
+            ollama_base_url=_str("CLARA_OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL),
+            ollama_llm_model=_str("CLARA_OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL),
+            ollama_embed_model=_str("CLARA_OLLAMA_EMBED_MODEL", _DEFAULT_OLLAMA_EMBED_MODEL),
             retrieval_top_k=_int("CLARA_RETRIEVAL_TOP_K", _DEFAULT_RETRIEVAL_TOP_K),
             similarity_threshold=_float("CLARA_SIMILARITY_THRESHOLD", _DEFAULT_SIMILARITY_THRESHOLD),
             archival_threshold=_float("CLARA_ARCHIVAL_THRESHOLD", _DEFAULT_ARCHIVAL_THRESHOLD),

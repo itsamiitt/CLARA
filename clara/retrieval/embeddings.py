@@ -19,8 +19,9 @@ from __future__ import annotations
 import os
 import threading
 from abc import ABC, abstractmethod
-from types import ModuleType
 from typing import Any
+
+from clara.db.models import VECTOR_DIMENSIONS
 
 # Optional dependency imports — guarded so the module can load even if
 # only one backend's dependencies are installed.
@@ -34,6 +35,11 @@ try:
 except ImportError:
     SentenceTransformer: Any = None  # type: ignore[assignment]
 
+try:
+    import ollama as _ollama_lib  # type: ignore[import-untyped]
+except ImportError:
+    _ollama_lib: Any = None  # type: ignore[assignment]
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -42,6 +48,8 @@ except ImportError:
 ENV_BACKEND = "CLARA_EMBEDDING_BACKEND"
 ENV_OPENAI_KEY = "OPENAI_API_KEY"
 ENV_OPENAI_MODEL = "CLARA_OPENAI_EMBEDDING_MODEL"
+ENV_OLLAMA_BASE_URL = "CLARA_OLLAMA_BASE_URL"
+ENV_OLLAMA_EMBED_MODEL = "CLARA_OLLAMA_EMBED_MODEL"
 
 DEFAULT_BACKEND = "openai"
 OPENAI_MODEL = "text-embedding-3-small"
@@ -49,6 +57,9 @@ OPENAI_DIMENSIONS = 1536
 
 LOCAL_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 LOCAL_DIMENSIONS = 384
+
+OLLAMA_MODEL = "nomic-embed-text"
+OLLAMA_BASE_URL = "http://localhost:11434"
 
 OPENAI_BATCH_LIMIT = 2048  # Max texts per single API call
 
@@ -176,6 +187,62 @@ class _LocalBackend(_EmbeddingBackend):
 
 
 # ---------------------------------------------------------------------------
+# Ollama backend
+# ---------------------------------------------------------------------------
+
+class _OllamaBackend(_EmbeddingBackend):
+    """Wraps Ollama's local embedding API and normalizes vectors to storage size."""
+
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        if _ollama_lib is None:
+            raise ImportError(
+                "The 'ollama' package is required for the Ollama embedding backend. "
+                "Install it with: pip install 'clara-memory[ollama]'"
+            )
+
+        self._model = model or os.environ.get(ENV_OLLAMA_EMBED_MODEL, OLLAMA_MODEL)
+        self._client = _ollama_lib.Client(
+            host=base_url or os.environ.get(ENV_OLLAMA_BASE_URL, OLLAMA_BASE_URL)
+        )
+        self._ensure_model()
+
+    def _ensure_model(self) -> None:
+        listing = self._client.list()
+        models = listing.get("models", []) if isinstance(listing, dict) else getattr(
+            listing, "models", []
+        )
+        names = {
+            str(item.get("name") or item.get("model") or "")
+            for item in models
+            if isinstance(item, dict)
+        }
+        if self._model not in names:
+            self._client.pull(self._model)
+
+    @property
+    def dimensions(self) -> int:
+        return VECTOR_DIMENSIONS
+
+    def embed(self, text: str) -> list[float]:
+        response = self._client.embeddings(model=self._model, prompt=text)
+        raw = response.get("embedding", []) if isinstance(response, dict) else []
+        return normalize_embedding_dimensions(
+            [float(value) for value in raw],
+            target_dimensions=VECTOR_DIMENSIONS,
+        )
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        return [self.embed(text) for text in texts]
+
+
+# ---------------------------------------------------------------------------
 # Singleton management
 # ---------------------------------------------------------------------------
 
@@ -213,6 +280,8 @@ class EmbeddingEngine:
             return "openai"
         if isinstance(self._backend, _LocalBackend):
             return "local"
+        if isinstance(self._backend, _OllamaBackend):
+            return "ollama"
         return type(self._backend).__name__
 
     def embed(self, text: str) -> list[float]:
@@ -258,16 +327,23 @@ class EmbeddingEngine:
 # Factory / singleton helpers
 # ---------------------------------------------------------------------------
 
-def _create_backend(name: str) -> _EmbeddingBackend:
+def _create_backend(
+    name: str,
+    *,
+    ollama_base_url: str | None = None,
+    ollama_model: str | None = None,
+) -> _EmbeddingBackend:
     """Instantiate the backend identified by *name*."""
     name_lower = name.strip().lower()
     if name_lower == "openai":
         return _OpenAIBackend()
     if name_lower == "local":
         return _LocalBackend()
+    if name_lower == "ollama":
+        return _OllamaBackend(model=ollama_model, base_url=ollama_base_url)
     raise ValueError(
         f"Unknown embedding backend {name!r}. "
-        f"Supported values for {ENV_BACKEND}: 'openai', 'local'."
+        f"Supported values for {ENV_BACKEND}: 'openai', 'local', 'ollama'."
     )
 
 

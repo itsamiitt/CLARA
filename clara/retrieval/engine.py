@@ -1,35 +1,37 @@
 """
-CLARA — Vector Retrieval Engine
+CLARA - Vector Retrieval Engine
 
 Retrieves relevant memories from the Unified Memory Store given a natural
-language query.  The pipeline:
-
-    1. Embed the query text via :class:`~clara.retrieval.embeddings.EmbeddingEngine`.
-    2. Run a pgvector cosine similarity search filtered to ``status = 'active'``.
-    3. Rank candidates using the composite scoring formula from CONTEXT.md:
-
-       ``final_score = 0.65 × similarity + 0.20 × confidence
-                     + 0.10 × recency + 0.05 × usage_frequency``
-
-    4. Return the top-k results grouped by :class:`~clara.db.models.MemoryType`.
-    5. Increment ``access_count`` on every retrieved record.
+language query. Vector search is handled by embedded LanceDB, while SQLite
+remains the source of truth for relational metadata and lifecycle fields.
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import logging
 import math
+import os
 import uuid
 from ast import literal_eval
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
+from threading import Lock, Thread
 from typing import Any, Sequence
 
-from sqlalchemy import select, text as sa_text, and_, func
+import lancedb
+import pyarrow as pa
+from sqlalchemy import and_, event, inspect as sa_inspect, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
 from clara.retrieval.cache import CachedScoredMemory, MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +47,16 @@ RECENCY_LAMBDA: float = 0.01  # decay constant for recency_score
 
 # How many candidates to pull from the vector index before re-ranking
 DEFAULT_CANDIDATE_MULTIPLIER: int = 4  # top_k × this = ANN candidates
+
+DEFAULT_LANCE_PATH = "./clara_vectors"
+LANCE_TABLE_NAME = "memories"
+LANCE_SCHEMA = pa.schema([
+    pa.field("memory_id", pa.string()),
+    pa.field("vector", pa.list_(pa.float32(), VECTOR_DIMENSIONS)),
+    pa.field("user_id", pa.string()),
+    pa.field("memory_type", pa.string()),
+    pa.field("status", pa.string()),
+])
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +95,18 @@ class RetrievalResult:
         return len(self.beliefs) + len(self.events) + len(self.skills) + len(self.world_model)
 
 
+@dataclass(frozen=True, slots=True)
+class LanceMemoryRecord:
+    """Minimal record persisted in the embedded LanceDB vector table."""
+
+    memory_id: str
+    vector: list[float] | None
+    user_id: str
+    memory_type: str
+    status: str
+    is_new: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Scoring helpers
 # ---------------------------------------------------------------------------
@@ -90,7 +114,6 @@ class RetrievalResult:
 def compute_recency_score(updated_at: datetime, now: datetime | None = None) -> float:
     """``recency_score = e^(−λ × days_since_last_accessed)``"""
     now = now or datetime.now(timezone.utc)
-    # Ensure both datetimes are timezone-aware (SQLite may return naive ones)
     if updated_at.tzinfo is None:
         updated_at = updated_at.replace(tzinfo=timezone.utc)
     if now.tzinfo is None:
@@ -100,10 +123,7 @@ def compute_recency_score(updated_at: datetime, now: datetime | None = None) -> 
 
 
 def compute_usage_frequency(access_count: int, max_access_count: int) -> float:
-    """``usage_frequency = log(1 + access_count) / log(1 + max_access_count)``
-
-    Returns 0.0 when *max_access_count* is 0 (no accesses recorded yet).
-    """
+    """``usage_frequency = log(1 + access_count) / log(1 + max_access_count)``"""
     if max_access_count <= 0:
         return 0.0
     denominator = math.log(1 + max_access_count)
@@ -128,19 +148,354 @@ def compute_final_score(
 
 
 # ---------------------------------------------------------------------------
+# Embedded LanceDB vector store
+# ---------------------------------------------------------------------------
+
+class LanceRetrievalEngine:
+    """Handles vector indexing and ANN search against embedded LanceDB."""
+
+    _default_path: str = DEFAULT_LANCE_PATH
+    _shared: dict[str, "LanceRetrievalEngine"] = {}
+    _shared_lock = Lock()
+
+    def __init__(self, lance_path: str = DEFAULT_LANCE_PATH) -> None:
+        self._lance_path = lance_path
+        self._records_lock = Lock()
+        self._table_lock = Lock()
+        self._sync_lock = Lock()
+        self._pending_lock = Lock()
+        self._pending: dict[str, LanceMemoryRecord] = {}
+        self._records: dict[str, LanceMemoryRecord] = {}
+        self._records_loaded = False
+        self._flush_thread: Thread | None = None
+        self._db = None
+        self._table = None
+
+    @property
+    def lance_path(self) -> str:
+        return self._lance_path
+
+    @classmethod
+    def configure_default_path(cls, lance_path: str) -> None:
+        cls._default_path = lance_path
+        os.environ["CLARA_LANCE_PATH"] = lance_path
+
+    @classmethod
+    def get_default(cls) -> "LanceRetrievalEngine":
+        lance_path = os.environ.get("CLARA_LANCE_PATH", cls._default_path or DEFAULT_LANCE_PATH)
+        with cls._shared_lock:
+            engine = cls._shared.get(lance_path)
+            if engine is None:
+                engine = cls(lance_path)
+                cls._shared[lance_path] = engine
+            return engine
+
+    @classmethod
+    def reset_defaults(cls) -> None:
+        with cls._shared_lock:
+            for engine in cls._shared.values():
+                engine.close()
+            cls._shared.clear()
+        cls._default_path = os.environ.get("CLARA_LANCE_PATH", DEFAULT_LANCE_PATH)
+
+    def close(self) -> None:
+        thread = self._flush_thread
+        self.flush_pending_sync()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=30)
+        # LanceDB embedded connections do not currently expose a close() API.
+        self._db = None
+        self._table = None
+
+    async def search_candidates(
+        self,
+        query_vector: list[float],
+        *,
+        n_candidates: int,
+        memory_types: Sequence[MemoryType] | None = None,
+        user_id: str | None = None,
+    ) -> list[tuple[str, float]]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            functools.partial(
+                self._search_candidates_sync,
+                query_vector=query_vector,
+                n_candidates=n_candidates,
+                memory_types=memory_types,
+                user_id=user_id,
+            ),
+        )
+
+    async def sync_records(self, records: Sequence[LanceMemoryRecord]) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            functools.partial(self._sync_records_sync, records=list(records)),
+        )
+
+    async def flush_pending(self) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.flush_pending_sync)
+
+    def sync_records_sync(self, records: Sequence[LanceMemoryRecord]) -> None:
+        self._sync_records_sync(records)
+
+    def enqueue_records(self, records: Sequence[LanceMemoryRecord]) -> None:
+        if not records:
+            return
+        self._merge_records(records)
+        with self._pending_lock:
+            for record in records:
+                if record.memory_id:
+                    self._pending[record.memory_id] = record
+        self._ensure_background_flush()
+
+    def flush_pending_sync(self) -> None:
+        while True:
+            with self._pending_lock:
+                records = list(self._pending.values())
+                self._pending.clear()
+            if not records:
+                with self._sync_lock:
+                    return
+            self._sync_records_sync(records)
+
+    def _ensure_background_flush(self) -> None:
+        with self._pending_lock:
+            if self._flush_thread is not None and self._flush_thread.is_alive():
+                return
+            self._flush_thread = Thread(
+                target=self._background_flush_worker,
+                name="clara-lance-sync",
+                daemon=True,
+            )
+            self._flush_thread.start()
+
+    def _background_flush_worker(self) -> None:
+        while True:
+            try:
+                self.flush_pending_sync()
+            except Exception:
+                logger.exception("Background LanceDB sync failed")
+            with self._pending_lock:
+                if not self._pending:
+                    self._flush_thread = None
+                    return
+
+    @staticmethod
+    def _escape(value: str) -> str:
+        return value.replace("'", "''")
+
+    def _ensure_table_sync(self):
+        with self._table_lock:
+            if self._table is not None:
+                return self._table
+
+            Path(self._lance_path).mkdir(parents=True, exist_ok=True)
+            db = lancedb.connect(self._lance_path)
+            if hasattr(db, "list_tables"):
+                table_names = db.list_tables()
+                tables = set(getattr(table_names, "tables", table_names) or [])
+            elif hasattr(db, "table_names"):
+                tables = set(db.table_names())
+            else:
+                tables = set(getattr(db.list_tables(), "tables", []) or [])
+            if LANCE_TABLE_NAME not in tables:
+                table = db.create_table(LANCE_TABLE_NAME, schema=LANCE_SCHEMA)
+            else:
+                table = db.open_table(LANCE_TABLE_NAME)
+
+            self._db = db
+            self._table = table
+            return table
+
+    def _build_where_clause(
+        self,
+        *,
+        user_id: str | None,
+        memory_types: Sequence[MemoryType] | None,
+    ) -> str:
+        parts = ["status = 'active'"]
+        if user_id is not None:
+            parts.append(f"user_id = '{self._escape(user_id)}'")
+        if memory_types:
+            values = ", ".join(
+                f"'{self._escape(mem_type.value if isinstance(mem_type, MemoryType) else str(mem_type))}'"
+                for mem_type in memory_types
+            )
+            parts.append(f"memory_type IN ({values})")
+        return " AND ".join(parts)
+
+    def _merge_records(self, records: Sequence[LanceMemoryRecord]) -> None:
+        if not records:
+            return
+
+        with self._records_lock:
+            for record in records:
+                if not record.memory_id:
+                    continue
+                existing = self._records.get(record.memory_id)
+                vector = record.vector
+                if vector is None and existing is not None:
+                    vector = existing.vector
+                self._records[record.memory_id] = LanceMemoryRecord(
+                    memory_id=record.memory_id,
+                    vector=vector,
+                    user_id=record.user_id,
+                    memory_type=record.memory_type,
+                    status=record.status,
+                    is_new=record.is_new,
+                )
+
+    def _ensure_records_loaded_sync(self) -> None:
+        with self._records_lock:
+            if self._records_loaded:
+                return
+
+        loaded_records: dict[str, LanceMemoryRecord] = {}
+        try:
+            table = self._ensure_table_sync()
+            rows = table.to_arrow().to_pylist()
+        except Exception:
+            logger.exception("Failed to load LanceDB records into memory")
+            rows = []
+
+        for row in rows:
+            memory_id = row.get("memory_id")
+            if not memory_id:
+                continue
+            loaded_records[str(memory_id)] = LanceMemoryRecord(
+                memory_id=str(memory_id),
+                vector=RetrievalEngine._embedding_to_list(row.get("vector")),
+                user_id=row.get("user_id") or "",
+                memory_type=str(row.get("memory_type") or ""),
+                status=str(row.get("status") or ""),
+            )
+
+        with self._records_lock:
+            if self._records_loaded:
+                return
+            loaded_records.update(self._records)
+            self._records = loaded_records
+            self._records_loaded = True
+
+    @staticmethod
+    def _matches_filters(
+        record: LanceMemoryRecord,
+        *,
+        user_id: str | None,
+        memory_types: Sequence[MemoryType] | None,
+    ) -> bool:
+        if user_id is not None and record.user_id != user_id:
+            return False
+        if memory_types:
+            allowed_types = {
+                mem_type.value if isinstance(mem_type, MemoryType) else str(mem_type)
+                for mem_type in memory_types
+            }
+            if record.memory_type not in allowed_types:
+                return False
+        return True
+
+    def _search_candidates_sync(
+        self,
+        *,
+        query_vector: list[float],
+        n_candidates: int,
+        memory_types: Sequence[MemoryType] | None,
+        user_id: str | None,
+    ) -> list[tuple[str, float]]:
+        if n_candidates <= 0:
+            return []
+        if memory_types is not None and len(memory_types) == 0:
+            return []
+
+        self._ensure_records_loaded_sync()
+        with self._records_lock:
+            records = list(self._records.values())
+
+        ranked = sorted(
+            (
+                (
+                    record.memory_id,
+                    RetrievalEngine._cosine_similarity(query_vector, record.vector),
+                )
+                for record in records
+                if record.vector is not None
+                and record.status == MemoryStatus.active.value
+                and self._matches_filters(record, user_id=user_id, memory_types=memory_types)
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return ranked[:n_candidates]
+
+    def _sync_records_sync(self, records: Sequence[LanceMemoryRecord]) -> None:
+        if not records:
+            return
+
+        with self._sync_lock:
+            self._merge_records(records)
+            table = self._ensure_table_sync()
+            deduped: dict[str, LanceMemoryRecord] = {
+                record.memory_id: record for record in records if record.memory_id
+            }
+            if not deduped:
+                return
+
+            inserts = [
+                {
+                    "memory_id": record.memory_id,
+                    "vector": [float(value) for value in record.vector],
+                    "user_id": record.user_id,
+                    "memory_type": record.memory_type,
+                    "status": record.status,
+                }
+                for record in deduped.values()
+                if record.vector is not None and record.is_new
+            ]
+            if inserts:
+                table.add(inserts)
+
+            upserts = [
+                {
+                    "memory_id": record.memory_id,
+                    "vector": [float(value) for value in record.vector],
+                    "user_id": record.user_id,
+                    "memory_type": record.memory_type,
+                    "status": record.status,
+                }
+                for record in deduped.values()
+                if record.vector is not None and not record.is_new
+            ]
+            if upserts:
+                (
+                    table.merge_insert("memory_id")
+                    .when_matched_update_all()
+                    .when_not_matched_insert_all()
+                    .execute(upserts)
+                )
+
+            for record in deduped.values():
+                if record.vector is not None:
+                    continue
+                table.update(
+                    where=f"memory_id = '{self._escape(record.memory_id)}'",
+                    values={
+                        "user_id": record.user_id,
+                        "memory_type": record.memory_type,
+                        "status": record.status,
+                    },
+                )
+
+
+# ---------------------------------------------------------------------------
 # RetrievalEngine
 # ---------------------------------------------------------------------------
 
 class RetrievalEngine:
-    """Semantic retrieval over the Unified Memory Store.
-
-    Usage::
-
-        engine = RetrievalEngine(session, embedding_engine)
-        results = await engine.search("What language does the user prefer?")
-        for sm in results.beliefs:
-            print(sm.memory.content, sm.score)
-    """
+    """Semantic retrieval over the Unified Memory Store."""
 
     def __init__(
         self,
@@ -149,15 +504,17 @@ class RetrievalEngine:
         *,
         candidate_multiplier: int = DEFAULT_CANDIDATE_MULTIPLIER,
         cache: MemoryCache | None = None,
+        lance_engine: LanceRetrievalEngine | None = None,
     ) -> None:
         self._session = session
         self._embedder = embedding_engine
         self._candidate_multiplier = candidate_multiplier
         self._cache = cache
+        self._lance = lance_engine or LanceRetrievalEngine.get_default()
 
-    # ------------------------------------------------------------------
-    # search
-    # ------------------------------------------------------------------
+    @property
+    def lance(self) -> LanceRetrievalEngine:
+        return self._lance
 
     async def search(
         self,
@@ -168,21 +525,7 @@ class RetrievalEngine:
         user_id: str | None = None,
         track_access: bool = True,
     ) -> RetrievalResult:
-        """Search the memory store and return ranked, grouped results.
-
-        Args:
-            query: Natural language query text.
-            top_k: Maximum number of results to return (across all types).
-            memory_types: Optional filter — restrict search to specific
-                memory types.  ``None`` means search all types.
-            user_id: Optional tenant partition key. When provided, search is
-                restricted to rows for that user only.
-            track_access: Whether to bump access counters for returned
-                memories in this session.
-
-        Returns:
-            A :class:`RetrievalResult` with results grouped by memory type.
-        """
+        """Search the memory store and return ranked, grouped results."""
         cache_key: str | None = None
         if self._cache is not None:
             cache_key = self._cache.make_query_hash(
@@ -198,16 +541,11 @@ class RetrievalEngine:
                         await self._increment_access_counts([sm.memory for sm in cached_result.all])
                     return cached_result
 
-        # 1. Embed the query
         query_vector = normalize_embedding_dimensions(
             self._embedder.embed(query),
             target_dimensions=VECTOR_DIMENSIONS,
         )
-
-        # 2. Vector similarity search (ANN) — pull more candidates than
-        #    top_k so the re-ranking stage has room to reshuffle.
         n_candidates = top_k * self._candidate_multiplier
-
         candidates = await self._fetch_candidates(
             query_vector,
             n_candidates=n_candidates,
@@ -218,51 +556,40 @@ class RetrievalEngine:
         if not candidates:
             return RetrievalResult()
 
-        # 3. Composite scoring
         now = datetime.now(timezone.utc)
-
-        # Determine max_access_count across the candidate set for normalization
-        max_access_count = max(
-            self._get_access_count(m) for m, _ in candidates
-        )
+        max_access_count = max(self._get_access_count(memory) for memory, _ in candidates)
 
         scored: list[ScoredMemory] = []
-        for mem, sim in candidates:
-            recency = compute_recency_score(mem.updated_at, now)
-
-            access_count = self._get_access_count(mem)
+        for memory, similarity in candidates:
+            recency = compute_recency_score(memory.updated_at, now)
+            access_count = self._get_access_count(memory)
             usage_freq = compute_usage_frequency(access_count, max_access_count)
-
             final = compute_final_score(
-                similarity=sim,
-                confidence=mem.confidence,
+                similarity=similarity,
+                confidence=memory.confidence,
                 recency_score=recency,
                 usage_frequency=usage_freq,
             )
+            scored.append(
+                ScoredMemory(
+                    memory=memory,
+                    score=final,
+                    similarity=similarity,
+                    confidence=memory.confidence,
+                    recency_score=recency,
+                    usage_frequency=usage_freq,
+                )
+            )
 
-            scored.append(ScoredMemory(
-                memory=mem,
-                score=final,
-                similarity=sim,
-                confidence=mem.confidence,
-                recency_score=recency,
-                usage_frequency=usage_freq,
-            ))
-
-        # 4. Sort descending and take top_k
-        scored.sort(key=lambda s: s.score, reverse=True)
+        scored.sort(key=lambda item: item.score, reverse=True)
         scored = scored[:top_k]
 
-        # 5. Increment access_count on retrieved records
         if track_access:
-            await self._increment_access_counts([s.memory for s in scored])
+            await self._increment_access_counts([item.memory for item in scored])
 
-        # 6. Group by memory type
         result = self._group_scored(scored)
-
         if self._cache is not None and cache_key is not None:
             await self._cache.set(user_id, cache_key, self._to_cached_hits(scored))
-
         return result
 
     async def record_accesses(self, memory_ids: Sequence[Any]) -> None:
@@ -276,10 +603,6 @@ class RetrievalEngine:
         if memories:
             await self._increment_access_counts(list(memories))
 
-    # ------------------------------------------------------------------
-    # Internal: fetch candidates via pgvector
-    # ------------------------------------------------------------------
-
     async def _fetch_candidates(
         self,
         query_vector: list[float],
@@ -288,51 +611,49 @@ class RetrievalEngine:
         memory_types: Sequence[MemoryType] | None = None,
         user_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
-        """Run an ANN search and return ``(Memory, cosine_similarity)`` pairs.
-
-        Uses pgvector's ``<=>`` (cosine distance) operator. Similarity is
-        calculated as ``1 − distance``.
-        """
-        if self._dialect_name() == "sqlite":
-            return await self._fetch_candidates_sqlite(
-                query_vector,
-                n_candidates=n_candidates,
-                memory_types=memory_types,
-                user_id=user_id,
-            )
-
-        # cosine_distance column expression
-        distance_expr = Memory.embedding.cosine_distance(query_vector).label(
-            "cosine_distance"
+        """Query LanceDB, then hydrate full ORM rows from SQLite."""
+        id_pairs = await self._lance.search_candidates(
+            query_vector,
+            n_candidates=n_candidates,
+            memory_types=memory_types,
+            user_id=user_id,
         )
+        if not id_pairs:
+            return []
 
-        filters = [
-            Memory.status == MemoryStatus.active,
-            Memory.embedding.is_not(None),
-        ]
+        memory_ids: list[uuid.UUID] = []
+        ordered_ids: list[str] = []
+        for memory_id, _similarity in id_pairs:
+            try:
+                parsed = uuid.UUID(str(memory_id))
+            except (TypeError, ValueError):
+                continue
+            memory_ids.append(parsed)
+            ordered_ids.append(str(parsed))
+
+        if not memory_ids:
+            return []
+
+        filters = [Memory.memory_id.in_(memory_ids), Memory.status == MemoryStatus.active]
         if user_id is not None:
             filters.append(Memory.user_id == user_id)
         if memory_types:
             filters.append(Memory.memory_type.in_(memory_types))
 
-        stmt = (
-            select(Memory, distance_expr)
-            .where(and_(*filters))
-            .order_by(distance_expr.asc())
-            .limit(n_candidates)
-        )
-
+        stmt = select(Memory).where(and_(*filters))
         result = await self._session.execute(stmt)
-        rows = result.all()
+        rows = {
+            str(memory.memory_id): memory
+            for memory in result.scalars().all()
+            if memory.status == MemoryStatus.active
+        }
 
-        # Convert distance → similarity
-        return [(mem, 1.0 - dist) for mem, dist in rows]
-
-    def _dialect_name(self) -> str | None:
-        bind = getattr(self._session, "bind", None)
-        dialect = getattr(bind, "dialect", None)
-        name = getattr(dialect, "name", None)
-        return name if isinstance(name, str) else None
+        hydrated: list[tuple[Memory, float]] = []
+        for memory_id, similarity in id_pairs:
+            memory = rows.get(str(memory_id))
+            if memory is not None:
+                hydrated.append((memory, similarity))
+        return hydrated
 
     @staticmethod
     def _embedding_to_list(value: Any) -> list[float] | None:
@@ -366,41 +687,8 @@ class RetrievalEngine:
             return 0.0
         return dot / (mag_a * mag_b)
 
-    async def _fetch_candidates_sqlite(
-        self,
-        query_vector: list[float],
-        *,
-        n_candidates: int,
-        memory_types: Sequence[MemoryType] | None = None,
-        user_id: str | None = None,
-    ) -> list[tuple[Memory, float]]:
-        filters = [Memory.status == MemoryStatus.active]
-        if user_id is not None:
-            filters.append(Memory.user_id == user_id)
-        if memory_types:
-            filters.append(Memory.memory_type.in_(memory_types))
-
-        stmt = select(Memory).where(and_(*filters))
-        result = await self._session.execute(stmt)
-        rows = result.scalars().all()
-
-        pairs: list[tuple[Memory, float]] = []
-        for mem in rows:
-            mem_vector = self._embedding_to_list(mem.embedding)
-            if mem_vector is None:
-                continue
-            pairs.append((mem, self._cosine_similarity(query_vector, mem_vector)))
-
-        pairs.sort(key=lambda pair: pair[1], reverse=True)
-        return pairs[:n_candidates]
-
-    # ------------------------------------------------------------------
-    # Internal: access tracking
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _get_access_count(memory: Memory) -> int:
-        """Read ``access_count`` from the metadata JSONB (default 0)."""
         meta = memory.metadata_ or {}
         return int(meta.get("access_count", 0))
 
@@ -408,44 +696,41 @@ class RetrievalEngine:
         self,
         memories: list[Memory],
     ) -> None:
-        """Bump ``access_count`` and ``last_accessed`` in metadata for each record."""
         now_iso = datetime.now(timezone.utc).isoformat()
-
-        for mem in memories:
-            meta: dict[str, Any] = dict(mem.metadata_) if mem.metadata_ else {}
+        for memory in memories:
+            meta: dict[str, Any] = dict(memory.metadata_) if memory.metadata_ else {}
             meta["access_count"] = int(meta.get("access_count", 0)) + 1
             meta["last_accessed"] = now_iso
-            mem.metadata_ = meta
-
+            memory.metadata_ = meta
         await self._session.flush()
 
     @staticmethod
     def _group_scored(scored: Sequence[ScoredMemory]) -> RetrievalResult:
         result = RetrievalResult()
-        for sm in scored:
-            match sm.memory.memory_type:
+        for scored_memory in scored:
+            match scored_memory.memory.memory_type:
                 case MemoryType.belief:
-                    result.beliefs.append(sm)
+                    result.beliefs.append(scored_memory)
                 case MemoryType.event:
-                    result.events.append(sm)
+                    result.events.append(scored_memory)
                 case MemoryType.skill:
-                    result.skills.append(sm)
+                    result.skills.append(scored_memory)
                 case MemoryType.world_model:
-                    result.world_model.append(sm)
+                    result.world_model.append(scored_memory)
         return result
 
     @staticmethod
     def _to_cached_hits(scored: Sequence[ScoredMemory]) -> list[CachedScoredMemory]:
         return [
             CachedScoredMemory(
-                memory_id=str(sm.memory.memory_id),
-                score=sm.score,
-                similarity=sm.similarity,
-                confidence=sm.confidence,
-                recency_score=sm.recency_score,
-                usage_frequency=sm.usage_frequency,
+                memory_id=str(item.memory.memory_id),
+                score=item.score,
+                similarity=item.similarity,
+                confidence=item.confidence,
+                recency_score=item.recency_score,
+                usage_frequency=item.usage_frequency,
             )
-            for sm in scored
+            for item in scored
         ]
 
     async def _hydrate_cached_hits(
@@ -486,5 +771,87 @@ class RetrievalEngine:
                     usage_frequency=hit.usage_frequency,
                 )
             )
-
         return self._group_scored(scored)
+
+
+# ---------------------------------------------------------------------------
+# Automatic SQLite → LanceDB sync on successful commit
+# ---------------------------------------------------------------------------
+
+def _snapshot_memory(memory: Memory, *, is_new: bool) -> LanceMemoryRecord | None:
+    memory_id = getattr(memory, "memory_id", None)
+    memory_type = getattr(memory, "memory_type", None)
+    status = getattr(memory, "status", None)
+    if memory_id is None or memory_type is None or status is None:
+        return None
+
+    vector = RetrievalEngine._embedding_to_list(memory.embedding)
+    return LanceMemoryRecord(
+        memory_id=str(memory_id),
+        vector=vector,
+        user_id=memory.user_id or "",
+        memory_type=memory_type.value if hasattr(memory_type, "value") else str(memory_type),
+        status=status.value if hasattr(status, "value") else str(status),
+        is_new=is_new,
+    )
+
+
+def _needs_lance_sync(memory: Memory, *, is_new: bool) -> bool:
+    if is_new:
+        return True
+
+    if getattr(memory, "_embedding_cache", None) is not None:
+        return True
+
+    state = sa_inspect(memory)
+    for field_name in ("status", "user_id", "memory_type"):
+        if state.attrs[field_name].history.has_changes():
+            return True
+    return False
+
+
+def _install_lance_commit_sync() -> None:
+    if getattr(_install_lance_commit_sync, "_installed", False):
+        return
+
+    @event.listens_for(Session, "before_flush")
+    def _capture_memory_objects(session, flush_context, instances) -> None:
+        tracked = session.info.setdefault("_lance_tracked_objects", {})
+        for obj in list(session.new) + list(session.dirty):
+            is_new = obj in session.new
+            if isinstance(obj, Memory) and _needs_lance_sync(obj, is_new=is_new):
+                tracked[id(obj)] = (obj, obj in session.new)
+
+    @event.listens_for(Session, "after_flush_postexec")
+    def _snapshot_tracked_objects(session, flush_context) -> None:
+        tracked = session.info.pop("_lance_tracked_objects", {})
+        if not tracked:
+            return
+
+        snapshots = session.info.setdefault("_lance_pending_snapshots", {})
+        for obj, is_new in tracked.values():
+            snapshot = _snapshot_memory(obj, is_new=is_new)
+            if snapshot is not None:
+                snapshots[snapshot.memory_id] = snapshot
+
+    @event.listens_for(Session, "after_commit")
+    def _sync_lance_after_commit(session) -> None:
+        snapshots = list(session.info.pop("_lance_pending_snapshots", {}).values())
+        session.info.pop("_lance_tracked_objects", None)
+        if not snapshots:
+            return
+
+        try:
+            LanceRetrievalEngine.get_default().enqueue_records(snapshots)
+        except Exception:
+            logger.exception("Failed to sync memories into LanceDB after commit")
+
+    @event.listens_for(Session, "after_rollback")
+    def _clear_lance_pending(session) -> None:
+        session.info.pop("_lance_tracked_objects", None)
+        session.info.pop("_lance_pending_snapshots", None)
+
+    _install_lance_commit_sync._installed = True
+
+
+_install_lance_commit_sync()

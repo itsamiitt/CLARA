@@ -2,36 +2,24 @@
 <p align="center">
   <a href="https://pypi.org/project/clara-memory/"><img src="https://img.shields.io/pypi/v/clara-memory?color=blue&label=PyPI" alt="PyPI version"></a>
   <a href="https://pypi.org/project/clara-memory/"><img src="https://img.shields.io/pypi/pyversions/clara-memory?label=Python" alt="Python 3.10+"></a>
-  <a href="https://github.com/itsamiitt/CLARA"><img src="https://img.shields.io/badge/tests-362%20passed-success" alt="Test status"></a>
+  <a href="https://github.com/itsamiitt/CLARA"><img src="https://img.shields.io/badge/tests-384%20passed-success" alt="Test status"></a>
 </p>
 
 <h1 align="center">CLARA</h1>
 <p align="center"><b>Cognitive Living Architecture for Reliable Agents</b></p>
 
-CLARA is a structured memory system for agents. It converts raw text into typed memories, stores them with provenance and embeddings, and retrieves them as ranked context.
+CLARA is a structured memory system for agents. It extracts facts from text, stores them as typed memories, retrieves them by relevance, and builds memory-grounded context for downstream reasoning.
 
-## What CLARA Is
+## Overview
 
-CLARA is designed for agent memory, not generic document storage.
+CLARA is built around four memory types:
 
-Today it stores four memory types in one unified store:
+- `belief`
+- `event`
+- `skill`
+- `world_model`
 
-- belief
-- event
-- skill
-- world_model
-
-Each stored memory row contains:
-
-- structured JSON content
-- an embedding for retrieval
-- confidence
-- status
-- decay rate
-- timestamps
-- metadata and provenance
-
-The public facade is:
+The public interface is intentionally small:
 
 ```python
 await agent.remember(text)
@@ -40,41 +28,51 @@ await agent.context_for(query, top_k=8)
 await agent.interact(message, user_id="alice")
 ```
 
-## What It Does Well
+What CLARA does well:
 
-- extracts facts from raw text
-- classifies memories into belief, event, skill, and world model
-- stores embeddings with each memory
-- retrieves memories by semantic similarity plus confidence, recency, and usage
-- reinforces or supersedes beliefs instead of blindly overwriting them
-- supports local SQLite testing and PostgreSQL + pgvector production use
+- extracts structured facts from raw text
+- classifies memories into typed records
+- reinforces or supersedes beliefs instead of overwriting blindly
+- retrieves memories with semantic similarity plus confidence, recency, and usage
+- keeps relational metadata in SQLite and vector search in embedded LanceDB
+- supports fully local operation with Ollama
 
-## Current Scope
+## Easiest Installation
 
-Implemented well:
+The simplest supported setup is:
 
-- belief memory lifecycle
-- event, skill, and world-model typed storage
-- retrieval and context formatting
-- reasoning loop with memory-grounded response generation
-- reflection-driven insight synthesis from recent memories
-- decay and pruning
-- optional retrieval-result caching with in-memory or Redis backends
-- FastAPI service layer for interaction and memory queries
-- admin/reporting endpoints for stats, conflicts, decay, health, and skill ranking
-- tenant-scoped retrieval, updates, and reflection runs
-- SQLite test/dev fallback
+- SQLite for relational metadata
+- LanceDB for vector search
+- Ollama for local LLM + embeddings
 
-Not implemented yet:
+Create and activate a virtual environment:
 
-- first-class document storage
-- chunk store for long documents
-- rich procedural skill graphs
-- true mutable world-model merge logic
+```bash
+python -m venv .venv
+```
 
-If you need document ingestion, the right design is to add separate `documents` and `document_chunks` tables and let memories reference them for provenance.
+Windows:
 
-## Quickstart
+```bash
+.venv\Scripts\activate
+```
+
+macOS/Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Install CLARA with Ollama support:
+
+```bash
+python -m pip install --upgrade pip
+pip install "clara-memory[ollama]"
+ollama pull llama3.2
+ollama pull nomic-embed-text
+```
+
+Minimal zero-key startup:
 
 ```python
 import asyncio
@@ -83,23 +81,83 @@ from clara.agent import ClaraMemory
 
 async def main():
     agent = await ClaraMemory.create(
-        db_url="postgresql+asyncpg://user:pass@localhost:5432/clara",
-        embedding_backend="openai",   # or "local"
-        llm_provider="openai",        # or "anthropic"
+        embedding_backend="ollama",
+        llm_provider="ollama",
     )
 
-    await agent.remember("I use Rust for systems work.")
-
-    result = await agent.recall("What language does the user use?", top_k=5)
+    await agent.remember("I prefer concise answers.")
+    result = await agent.recall("what does the user prefer?")
     print(result.total)
 
-    ctx = await agent.context_for("Help the user deploy a Rust service.", top_k=5)
-    print(ctx)
+    await agent.close()
 
-    reply = await agent.interact(
-        "What language does the user use for systems work?",
-        user_id="alice",
+
+asyncio.run(main())
+```
+
+By default this creates:
+
+- `clara.db`
+- `./clara_vectors`
+
+No PostgreSQL server, pgvector extension, or API key is required for storage.
+
+## Installation Options
+
+Runtime packages:
+
+- `pip install clara-memory`
+  Uses SQLite + LanceDB storage with OpenAI available as the default LLM/embedding path.
+- `pip install "clara-memory[ollama]"`
+  Best local-first install. Recommended for zero-key usage.
+- `pip install "clara-memory[local]"`
+  Enables `sentence-transformers` embeddings for local embedding-only setups.
+- `pip install "clara-memory[anthropic]"`
+  Enables Anthropic as the LLM provider.
+- `pip install "clara-memory[api]"`
+  Adds FastAPI and Uvicorn for the HTTP service.
+- `pip install -e ".[dev]"`
+  Contributor install from source.
+
+Source install:
+
+```bash
+git clone https://github.com/itsamiitt/CLARA.git
+cd CLARA
+pip install -e ".[dev]"
+```
+
+## Quickstart
+
+Explicit local setup:
+
+```python
+import asyncio
+from clara.agent import ClaraMemory
+
+
+async def main():
+    agent = await ClaraMemory.create(
+        db_url="sqlite+aiosqlite:///clara.db",
+        lance_path="./clara_vectors",
+        embedding_backend="ollama",
+        llm_provider="ollama",
+        ollama_base_url="http://localhost:11434",
+        ollama_llm_model="llama3.2",
+        ollama_embed_model="nomic-embed-text",
+        start_scheduler=False,
     )
+
+    await agent.remember("Alicia uses Rust for payments systems.")
+    await agent.remember("Alicia knows Kubernetes.")
+
+    result = await agent.recall("What does Alicia use for payments systems?", top_k=5)
+    print(result.total)
+
+    context = await agent.context_for("Summarize Alicia's stack.", top_k=5)
+    print(context)
+
+    reply = await agent.interact("What stack does Alicia use?", user_id="alice")
     print(reply["response"])
 
     await agent.close()
@@ -108,15 +166,19 @@ async def main():
 asyncio.run(main())
 ```
 
-## Storage Model
+## Storage Architecture
 
-CLARA stores extracted memory records in the `memories` table.
+CLARA now uses a two-layer embedded storage design:
 
-Key fields:
+- SQLite via `aiosqlite` for relational memory metadata
+- LanceDB for vector indexing and search
 
+SQLite stores:
+
+- `memory_id`
+- `user_id`
 - `memory_type`
 - `content`
-- `embedding`
 - `confidence`
 - `status`
 - `decay_rate`
@@ -124,27 +186,102 @@ Key fields:
 - `updated_at`
 - `metadata`
 
-Raw source text is kept as provenance in metadata:
+LanceDB stores:
 
-- beliefs keep an evidence trail
-- other memory types keep `raw_text` and `source_type`
+- `memory_id`
+- `vector`
+- `user_id`
+- `memory_type`
+- `status`
 
-This means CLARA currently stores distilled memory, not full source documents.
+This keeps setup simple while avoiding Python-side full-table scans for semantic retrieval.
 
 ## Memory Flow
 
-1. `remember(text)` runs fact extraction.
-2. Each extracted fact is classified into a memory type.
-3. The fact is embedded.
-4. Similar memories are searched.
-5. CLARA creates, reinforces, supersedes, or retains both.
-6. `recall()` ranks results across memory types.
-7. `context_for()` renders the retrieval result for prompt injection.
-8. `interact()` runs retrieval, builds memory context, calls the reasoning model, and stores any facts extracted from the response.
+1. `remember(text)` extracts structured facts.
+2. Facts are classified into one of the supported memory types.
+3. Each fact is embedded.
+4. CLARA searches for similar active memories.
+5. It creates, reinforces, supersedes, or retains both depending on conflict rules.
+6. `recall()` ranks results by similarity, confidence, recency, and usage.
+7. `context_for()` renders retrieval results into a prompt-ready memory block.
+8. `interact()` retrieves context, generates a response, and stores facts extracted from that response.
+
+## Provider Matrix
+
+Embedding backends:
+
+- `openai`
+- `local`
+- `ollama`
+
+LLM providers:
+
+- `openai`
+- `anthropic`
+- `ollama`
+
+Requirements by mode:
+
+- `embedding_backend="openai"` requires `OPENAI_API_KEY`
+- `embedding_backend="local"` requires `sentence-transformers`
+- `embedding_backend="ollama"` requires `pip install "clara-memory[ollama]"` and a local Ollama server
+- `llm_provider="openai"` requires `OPENAI_API_KEY`
+- `llm_provider="anthropic"` requires `ANTHROPIC_API_KEY`
+- `llm_provider="ollama"` requires `pip install "clara-memory[ollama]"` and a local Ollama server
+
+## Environment Variables
+
+Core settings:
+
+- `CLARA_DB_URL`
+- `CLARA_LANCE_PATH`
+- `CLARA_EMBEDDING_BACKEND`
+- `CLARA_LLM_PROVIDER`
+- `CLARA_START_SCHEDULER`
+- `CLARA_CACHE_URL`
+
+OpenAI settings:
+
+- `OPENAI_API_KEY`
+- `CLARA_OPENAI_MODEL`
+- `CLARA_OPENAI_EMBEDDING_MODEL`
+
+Anthropic settings:
+
+- `ANTHROPIC_API_KEY`
+- `CLARA_ANTHROPIC_MODEL`
+
+Ollama settings:
+
+- `CLARA_OLLAMA_BASE_URL`
+- `CLARA_OLLAMA_MODEL`
+- `CLARA_OLLAMA_EMBED_MODEL`
+
+Example local-first shell config:
+
+```bash
+export CLARA_DB_URL="sqlite+aiosqlite:///clara.db"
+export CLARA_LANCE_PATH="./clara_vectors"
+export CLARA_EMBEDDING_BACKEND="ollama"
+export CLARA_LLM_PROVIDER="ollama"
+export CLARA_OLLAMA_MODEL="llama3.2"
+export CLARA_OLLAMA_EMBED_MODEL="nomic-embed-text"
+```
 
 ## API
 
-CLARA also exposes a FastAPI service layer.
+Install the API extra:
+
+```bash
+pip install "clara-memory[api]"
+```
+
+Run locally:
+
+```bash
+uvicorn clara.main:app --reload
+```
 
 Core routes:
 
@@ -155,115 +292,91 @@ Core routes:
 - `GET /memory/beliefs`
 - `GET /memory/{memory_id}`
 
+Admin routes:
+
+- stats
+- conflicts
+- decay
+- health
+- skill ranking
+
+## Current Scope
+
+Implemented:
+
+- belief memory lifecycle
+- event, skill, and world-model storage
+- semantic retrieval and context formatting
+- reasoning loop with memory-grounded responses
+- reflection-driven insight synthesis
+- decay and pruning
+- optional in-memory or Redis retrieval caching
+- tenant-scoped retrieval and updates
+- FastAPI service layer
+
+Not implemented yet:
+
+- first-class document storage
+- chunked document ingestion
+- rich procedural skill graphs
+- mutable world-model merge semantics
+
+If you need document ingestion, the right next step is separate `documents` and `document_chunks` tables with memories referencing them for provenance.
+
+## Troubleshooting
+
+If `ollama` is selected and not installed:
+
+- install with `pip install "clara-memory[ollama]"`
+
+If Ollama models are missing:
+
+- `ollama pull llama3.2`
+- `ollama pull nomic-embed-text`
+
+If you want an explicit database path:
+
+- pass `db_url="sqlite+aiosqlite:///your-path.db"` to `ClaraMemory.create()`
+
+If you want a separate vector directory:
+
+- pass `lance_path="./your_vectors"`
+
+## Verification
+
+Current verified state in this working tree:
+
+- default suite: `384 passed, 1 deselected`
+- stress suite: previously verified during migration work
+
 Run locally:
 
 ```bash
-uvicorn clara.main:app --reload
+pytest --tb=short -q
 ```
-
-## Production and Local Use
-
-### Production
-
-Use PostgreSQL with pgvector.
-
-Example database URL:
-
-```bash
-export DATABASE_URL="postgresql+asyncpg://clara:secret@localhost:5432/clara"
-```
-
-### Local development and tests
-
-SQLite is supported for local development and automated tests.
-
-On SQLite:
-
-- schema creation works
-- retrieval uses a Python cosine-similarity fallback instead of pgvector SQL
-
-PostgreSQL + pgvector is still the intended deployment target.
-
-## Installation
-
-### From source
-
-```bash
-git clone https://github.com/itsamiitt/CLARA.git
-cd CLARA
-pip install -e ".[dev]"
-```
-
-### Optional runtime choices
-
-- `embedding_backend="openai"` requires `OPENAI_API_KEY`
-- `embedding_backend="local"` requires `sentence-transformers`
-- `llm_provider="openai"` requires `OPENAI_API_KEY`
-- `llm_provider="anthropic"` requires `ANTHROPIC_API_KEY`
-
-For local SQLite testing, install `aiosqlite`.
 
 ## Repository Layout
 
 ```text
 clara/
   agent.py
+  config.py
   db/
     models.py
-    migrations/
   extraction/
     extractor.py
   memory/
-    belief.py
+  reasoning/
+  reflection/
   retrieval/
     embeddings.py
     engine.py
   scheduler/
-    decay.py
   update/
-    engine.py
 tests/
+scripts/
 README.md
 pyproject.toml
-```
-
-## GitHub Hygiene
-
-### Keep on GitHub
-
-- source code
-- tests
-- migrations
-- `pyproject.toml`
-- `README.md`
-- sanitized docs and architecture notes
-
-### Keep out of GitHub
-
-- `.env` files
-- credentials and API keys
-- local databases
-- generated test output
-- logs, caches, temp files
-- private user data
-- raw local notes that are not meant for distribution
-
-Important:
-
-- adding a file to `.gitignore` stops new untracked copies from being added
-- if a file is already tracked by Git, it must also be removed from the index separately if you want it gone from future commits
-
-## Verification
-
-Current verified state in this repo:
-
-- full suite passes: `371 passed`
-- facade-level smoke tests pass for belief, event, skill, and world-model storage and retrieval
-
-Run locally with:
-
-```bash
-pytest --tb=short -q
 ```
 
 ## License

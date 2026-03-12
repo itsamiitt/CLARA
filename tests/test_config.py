@@ -17,7 +17,7 @@ class TestClaraConfigDefaults:
 
     def test_default_db_url(self):
         cfg = ClaraConfig()
-        assert cfg.db_url == "sqlite+aiosqlite://"
+        assert cfg.db_url == "sqlite+aiosqlite:///clara.db"
 
     def test_default_embedding_backend(self):
         cfg = ClaraConfig()
@@ -81,7 +81,7 @@ class TestClaraConfigExplicitOverride:
         assert cfg.retrieval_top_k == 16
         assert cfg.start_scheduler is False
         # Non-overridden fields keep defaults
-        assert cfg.db_url == "sqlite+aiosqlite://"
+        assert cfg.db_url == "sqlite+aiosqlite:///clara.db"
         assert cfg.embedding_backend == "openai"
 
 
@@ -100,7 +100,7 @@ class TestClaraConfigFromEnv:
     def test_from_env_uses_defaults_when_empty(self):
         with patch.dict(os.environ, {}, clear=True):
             cfg = ClaraConfig.from_env()
-        assert cfg.db_url == "sqlite+aiosqlite://"
+        assert cfg.db_url == "sqlite+aiosqlite:///clara.db"
         assert cfg.embedding_backend == "openai"
         assert cfg.llm_provider == "openai"
         assert cfg.start_scheduler is True
@@ -177,7 +177,7 @@ class TestClaraConfigFromEnv:
         env = {"CLARA_DB_URL": ""}
         with patch.dict(os.environ, env, clear=True):
             cfg = ClaraConfig.from_env()
-        assert cfg.db_url == "sqlite+aiosqlite://"
+        assert cfg.db_url == "sqlite+aiosqlite:///clara.db"
 
     def test_from_env_all_fields_together(self):
         env = {

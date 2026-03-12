@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Sequence, TypeAlias
+from typing import Any, Awaitable, Callable, Sequence, TypeAlias
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,8 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import (
     DEFAULT_ANTHROPIC_MODEL,
+    DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_MODEL,
     DEFAULT_OPENAI_MODEL,
     ENV_ANTHROPIC_KEY,
+    ENV_OLLAMA_BASE_URL,
+    ENV_OLLAMA_MODEL,
     ENV_OPENAI_KEY,
     ExtractedFact,
     _anthropic,
@@ -34,6 +39,12 @@ from clara.reflection.prompts import (
 from clara.update.engine import MemoryUpdateEngine, UpdateResult
 
 logger = logging.getLogger(__name__)
+try:
+    import ollama as _ollama_lib  # type: ignore[import-untyped]
+except ImportError:
+    _ollama_lib: Any = None  # type: ignore[assignment]
+
+_OLLAMA_MODELS_READY: set[tuple[str, str]] = set()
 
 DEFAULT_REFLECTION_WINDOW_DAYS = 7
 DEFAULT_MIN_OCCURRENCES = 3
@@ -176,6 +187,7 @@ class ReflectionEngine:
         *,
         llm_provider: str = "openai",
         llm_model: str | None = None,
+        ollama_base_url: str | None = None,
         insight_generator: InsightGenerator | None = None,
         window_days: int = DEFAULT_REFLECTION_WINDOW_DAYS,
         min_occurrences: int = DEFAULT_MIN_OCCURRENCES,
@@ -185,6 +197,10 @@ class ReflectionEngine:
         self._embedder = embedding_engine
         self._llm_provider = llm_provider
         self._llm_model = llm_model
+        self._ollama_base_url = (
+            ollama_base_url
+            or os.environ.get(ENV_OLLAMA_BASE_URL, DEFAULT_OLLAMA_BASE_URL)
+        )
         self._insight_generator = insight_generator
         self._window_days = window_days
         self._min_occurrences = min_occurrences
@@ -267,13 +283,24 @@ class ReflectionEngine:
             return await self._call_openai(prompt, pattern)
         if provider == "anthropic":
             return await self._call_anthropic(prompt, pattern)
+        if provider == "ollama":
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                self._call_ollama,
+                prompt,
+                pattern,
+            )
         return fallback_reflection_text(pattern)
 
     def _model_name(self) -> str:
         if self._llm_model:
             return self._llm_model
-        if self._llm_provider.strip().lower() == "anthropic":
+        provider = self._llm_provider.strip().lower()
+        if provider == "anthropic":
             return DEFAULT_ANTHROPIC_MODEL
+        if provider == "ollama":
+            return os.environ.get(ENV_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
         return DEFAULT_OPENAI_MODEL
 
     async def _call_openai(self, prompt: str, pattern: PatternCandidate) -> str:
@@ -310,3 +337,44 @@ class ReflectionEngine:
             temperature=0.2,
         )
         return (response.content[0].text or "").strip()
+
+    def _call_ollama(self, prompt: str, pattern: PatternCandidate) -> str:
+        if _ollama_lib is None:
+            raise ImportError(
+                "The 'ollama' package is required for the Ollama reflection provider. "
+                "Install it with: pip install 'clara-memory[ollama]'"
+            )
+
+        model = self._model_name()
+        key = (self._ollama_base_url, model)
+        if key not in _OLLAMA_MODELS_READY:
+            client = _ollama_lib.Client(host=self._ollama_base_url)
+            listing = client.list()
+            models = listing.get("models", []) if isinstance(listing, dict) else getattr(
+                listing, "models", []
+            )
+            names = {
+                str(item.get("name") or item.get("model") or "")
+                for item in models
+                if isinstance(item, dict)
+            }
+            if model not in names:
+                client.pull(model)
+            _OLLAMA_MODELS_READY.add(key)
+
+        client = _ollama_lib.Client(host=self._ollama_base_url)
+        response = client.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.3, "num_predict": 1024},
+        )
+        message = getattr(response, "message", None)
+        if message is not None:
+            content = getattr(message, "content", "") or ""
+            return str(content).strip() or fallback_reflection_text(pattern)
+        if isinstance(response, dict):
+            payload = response.get("message", {})
+            if isinstance(payload, dict):
+                content = str(payload.get("content", "") or "").strip()
+                return content or fallback_reflection_text(pattern)
+        return fallback_reflection_text(pattern)
