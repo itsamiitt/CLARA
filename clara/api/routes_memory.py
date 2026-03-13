@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clara.api.dependencies import get_agent, get_session
+from clara.api.dependencies import get_agent, get_current_user, get_session, resolve_user_scope
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.memory.belief import BeliefMemory
 from clara.retrieval.engine import RetrievalResult, ScoredMemory
@@ -54,9 +54,14 @@ async def search(
     q: str = Query(..., min_length=1),
     top_k: int = Query(8, ge=1, le=100),
     user_id: str | None = None,
+    current_user: str | None = Depends(get_current_user),
     agent=Depends(get_agent),
 ) -> dict[str, object]:
-    result = await agent.recall(q, top_k=top_k, user_id=user_id)
+    effective_user_id = resolve_user_scope(
+        requested_user_id=user_id,
+        current_user=current_user,
+    )
+    result = await agent.recall(q, top_k=top_k, user_id=effective_user_id)
     return _retrieval_payload(result)
 
 
@@ -65,14 +70,19 @@ async def timeline(
     user_id: str | None = None,
     subject: str | None = None,
     limit: int = Query(20, ge=1, le=200),
+    current_user: str | None = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
+    effective_user_id = resolve_user_scope(
+        requested_user_id=user_id,
+        current_user=current_user,
+    )
     filters = [
         Memory.memory_type == MemoryType.event,
         Memory.status == MemoryStatus.active,
     ]
-    if user_id is not None:
-        filters.append(Memory.user_id == user_id)
+    if effective_user_id is not None:
+        filters.append(Memory.user_id == effective_user_id)
     if subject is not None:
         filters.append(Memory.content["subject"].as_string() == subject)
 
@@ -95,13 +105,18 @@ async def beliefs(
     relation: str | None = None,
     domain: str | None = None,
     limit: int = Query(50, ge=1, le=200),
+    current_user: str | None = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
+    effective_user_id = resolve_user_scope(
+        requested_user_id=user_id,
+        current_user=current_user,
+    )
     rows = await BeliefMemory(session).get_active_beliefs(
         subject=subject,
         relation=relation,
         domain=domain,
-        user_id=user_id,
+        user_id=effective_user_id,
         limit=limit,
     )
     return {"beliefs": [_memory_summary(row) for row in rows]}
@@ -111,11 +126,16 @@ async def beliefs(
 async def get_memory(
     memory_id: UUID,
     user_id: str | None = None,
+    current_user: str | None = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, object]:
+    effective_user_id = resolve_user_scope(
+        requested_user_id=user_id,
+        current_user=current_user,
+    )
     filters = [Memory.memory_id == memory_id]
-    if user_id is not None:
-        filters.append(Memory.user_id == user_id)
+    if effective_user_id is not None:
+        filters.append(Memory.user_id == effective_user_id)
 
     row = await session.scalar(select(Memory).where(and_(*filters)))
     if row is None:

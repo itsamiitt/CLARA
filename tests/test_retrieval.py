@@ -17,10 +17,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from clara.db.models import MemoryStatus, MemoryType
+from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.retrieval.engine import (
     DEFAULT_CANDIDATE_MULTIPLIER,
+    LanceRetrievalEngine,
     RECENCY_LAMBDA,
     W_CONFIDENCE,
     W_RECENCY,
@@ -476,3 +479,111 @@ class TestRetrievalEngineSearch:
         await engine.search("test", top_k=4)
 
         assert lance.await_args.kwargs["n_candidates"] == 20
+
+
+class _FakeLanceQuery:
+    def __init__(self, rows):
+        self.rows = rows
+        self.metric_name = None
+        self.where_clause = None
+        self.prefilter = None
+        self.limit_value = None
+        self.selected = None
+
+    def metric(self, name):
+        self.metric_name = name
+        return self
+
+    def where(self, clause, prefilter=False):
+        self.where_clause = clause
+        self.prefilter = prefilter
+        return self
+
+    def limit(self, value):
+        self.limit_value = value
+        return self
+
+    def select(self, columns):
+        self.selected = columns
+        return self
+
+    def to_list(self):
+        return self.rows
+
+
+class _FakeLanceTable:
+    def __init__(self, rows):
+        self.rows = rows
+        self.search_calls = []
+        self.query = _FakeLanceQuery(rows)
+
+    def search(self, vector):
+        self.search_calls.append(vector)
+        return self.query
+
+
+class TestLanceRetrievalEngine:
+    def test_native_search_uses_lancedb_query_builder(self):
+        lance = LanceRetrievalEngine("ignored")
+        table = _FakeLanceTable([
+            {"memory_id": "abc", "_distance": 0.1},
+            {"memory_id": "def", "_distance": 0.4},
+        ])
+        lance._ensure_table_sync = MagicMock(return_value=table)  # type: ignore[method-assign]
+        lance.flush_pending_sync = MagicMock()
+
+        pairs = lance._search_candidates_sync(
+            query_vector=[0.1, 0.2],
+            n_candidates=5,
+            memory_types=[MemoryType.skill],
+            user_id="alice",
+        )
+
+        assert [memory_id for memory_id, _similarity in pairs] == ["abc", "def"]
+        assert pairs[0][1] == pytest.approx(0.9)
+        assert pairs[1][1] == pytest.approx(0.6)
+        lance.flush_pending_sync.assert_called_once_with()
+        assert table.search_calls == [[0.1, 0.2]]
+        assert table.query.metric_name == "cosine"
+        assert table.query.prefilter is True
+        assert "status = 'active'" in table.query.where_clause
+        assert "user_id = 'alice'" in table.query.where_clause
+        assert "memory_type IN ('skill')" in table.query.where_clause
+        assert table.query.limit_value == 5
+        assert table.query.selected == ["memory_id", "_distance"]
+
+
+@pytest_asyncio.fixture
+async def retrieval_db():
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
+
+
+class TestLanceCommitRouting:
+    @pytest.mark.asyncio
+    async def test_after_commit_uses_session_bound_lance_engine(self, retrieval_db):
+        lance = MagicMock(spec=LanceRetrievalEngine)
+        factory = async_sessionmaker(
+            retrieval_db,
+            expire_on_commit=False,
+            info={"_lance_engine": lance},
+        )
+
+        async with factory() as session:
+            session.add(
+                Memory(
+                    memory_type=MemoryType.belief,
+                    user_id="alice",
+                    content={"subject": "user", "relation": "uses", "object": "Rust"},
+                    embedding=[0.1, 0.2, 0.3],
+                    confidence=0.9,
+                    status=MemoryStatus.active,
+                    decay_rate=0.02,
+                )
+            )
+            await session.commit()
+
+        lance.enqueue_records.assert_called_once()

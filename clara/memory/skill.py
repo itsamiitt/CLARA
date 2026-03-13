@@ -38,6 +38,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clara.core.enums import SkillOutcome
 from clara.core.exceptions import MemoryNotFoundError
 from clara.db.models import Memory, MemoryStatus, MemoryType
+from clara.retrieval.cache import MemoryCache
+from clara.retrieval.embeddings import EmbeddingEngine
+from clara.retrieval.engine import LanceRetrievalEngine, RetrievalEngine
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +62,13 @@ class SkillStore:
     for committing or rolling back the session.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        retrieval_engine: RetrievalEngine | None = None,
+    ) -> None:
         self._session = session
+        self._retrieval_engine = retrieval_engine
 
     # ------------------------------------------------------------------
     # create
@@ -243,6 +251,18 @@ class SkillStore:
         Returns:
             Matching skills ordered by confidence (highest first).
         """
+        retriever = self._get_retrieval_engine()
+        if retriever is not None:
+            semantic = await retriever.search(
+                context,
+                top_k=limit,
+                memory_types=[MemoryType.skill],
+                user_id=user_id,
+                track_access=False,
+            )
+            if semantic.skills:
+                return [sm.memory for sm in semantic.skills[:limit]]
+
         all_skills = await self.get_active_skills(user_id=user_id, limit=200)
         context_lower = context.lower()
 
@@ -286,6 +306,27 @@ class SkillStore:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    def _get_retrieval_engine(self) -> RetrievalEngine | None:
+        if self._retrieval_engine is not None:
+            return self._retrieval_engine
+
+        session_info = getattr(getattr(self._session, "sync_session", self._session), "info", None)
+        if not isinstance(session_info, dict):
+            return None
+        embedding_engine = session_info.get("_clara_embedding_engine")
+        if not isinstance(embedding_engine, EmbeddingEngine):
+            return None
+
+        cache = session_info.get("_clara_cache")
+        lance_engine = session_info.get("_lance_engine")
+        self._retrieval_engine = RetrievalEngine(
+            self._session,
+            embedding_engine,
+            cache=cache if isinstance(cache, MemoryCache) else None,
+            lance_engine=lance_engine if isinstance(lance_engine, LanceRetrievalEngine) else None,
+        )
+        return self._retrieval_engine
 
     # ------------------------------------------------------------------
     # Internal helpers

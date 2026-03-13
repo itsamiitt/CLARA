@@ -299,8 +299,6 @@ class ClaraMemory:
         engine = _make_engine(db_url)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
         resolved_lance_path = lance_path
         if lance_path == DEFAULT_LANCE_PATH:
             resolved_lance_path = os.environ.get("CLARA_LANCE_PATH", lance_path)
@@ -341,6 +339,15 @@ class ClaraMemory:
             ollama_base_url=resolved_ollama_base_url,
         )
         cache = MemoryCache(cache_url) if cache_url else None
+        session_factory = async_sessionmaker(
+            engine,
+            expire_on_commit=False,
+            info={
+                "_lance_engine": lance_engine,
+                "_clara_embedding_engine": embedding_engine,
+                "_clara_cache": cache,
+            },
+        )
 
         # --- Decay Scheduler ---
         decay_scheduler: DecayScheduler | None = None
@@ -366,6 +373,7 @@ class ClaraMemory:
                 session_factory,
                 embedding_engine,
                 cache=cache,
+                lance_engine=lance_engine,
             ),
         )
         logger.info(
@@ -386,6 +394,7 @@ class ClaraMemory:
         text: str,
         *,
         user_id: str | None = None,
+        wait: bool = True,
     ) -> list[dict[str, Any]]:
         """Extract facts from *text* and store them in the memory store.
 
@@ -407,9 +416,26 @@ class ClaraMemory:
             logger.debug("No facts extracted from text: %r", text[:120])
             return []
 
+        if not wait:
+            if self._background_writer is None:
+                raise RuntimeError("Background writer is not configured.")
+            for fact in facts:
+                await self._background_writer.enqueue(fact, user_id=interaction.user_id)
+            logger.info("Queued %d fact(s) for background processing", len(facts))
+            return [
+                {
+                    "action": "queued",
+                    "memory_id": None,
+                    "conflict": False,
+                    "superseded_id": None,
+                }
+                for _ in facts
+            ]
+
         results: list[dict[str, Any]] = []
 
         async with self._session_factory() as session:
+            self._bind_session_context(session)
             async with session.begin():
                 update_engine = MemoryUpdateEngine(
                     session,
@@ -457,6 +483,7 @@ class ClaraMemory:
             A :class:`RetrievalResult` grouped by memory type.
         """
         async with self._session_factory() as session:
+            self._bind_session_context(session)
             retriever = RetrievalEngine(
                 session,
                 self._embedding_engine,
@@ -507,6 +534,7 @@ class ClaraMemory:
         interaction = self._interaction_layer.receive(message, user_id=user_id)
 
         async with self._session_factory() as session:
+            self._bind_session_context(session)
             async with session.begin():
                 reasoning = ReasoningEngine(
                     session,
@@ -574,6 +602,7 @@ class ClaraMemory:
             return
 
         async with self._session_factory() as session:
+            self._bind_session_context(session)
             retriever = RetrievalEngine(
                 session,
                 self._embedding_engine,
@@ -597,3 +626,9 @@ class ClaraMemory:
         if self._cache is None:
             return {"backend": "disabled", "ok": True}
         return await self._cache.health()
+
+    def _bind_session_context(self, session: AsyncSession) -> None:
+        session.sync_session.info.setdefault("_lance_engine", self._lance_engine)
+        session.sync_session.info.setdefault("_clara_embedding_engine", self._embedding_engine)
+        if self._cache is not None:
+            session.sync_session.info.setdefault("_clara_cache", self._cache)

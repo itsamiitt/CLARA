@@ -14,8 +14,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from clara.db.models import MemoryStatus, MemoryType
+from clara.db.models import Base, Memory, MemoryStatus, MemoryType
+from clara.retrieval.engine import LanceRetrievalEngine
 from clara.scheduler.decay import (
     ARCHIVAL_THRESHOLD,
     EVENT_STALE_DAYS,
@@ -482,6 +485,54 @@ class TestRunWeeklyPruning:
 
         assert skill.status == MemoryStatus.active
         assert summary["skills_deprecated"] == 0
+
+
+@pytest_asyncio.fixture
+async def pruning_db():
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
+
+
+class TestDecayLanceSync:
+    @pytest.mark.asyncio
+    async def test_weekly_pruning_enqueues_status_changes_to_bound_lance_engine(self, pruning_db):
+        lance = MagicMock(spec=LanceRetrievalEngine)
+        factory = async_sessionmaker(
+            pruning_db,
+            expire_on_commit=False,
+            info={"_lance_engine": lance},
+        )
+        old = datetime.now(timezone.utc) - timedelta(days=SKILL_UNUSED_DAYS + 5)
+
+        async with factory() as session:
+            session.add(
+                Memory(
+                    memory_type=MemoryType.skill,
+                    user_id="alice",
+                    content={"subject": "user", "relation": "knows", "object": "Docker"},
+                    embedding=[0.1, 0.2, 0.3],
+                    confidence=0.5,
+                    status=MemoryStatus.active,
+                    decay_rate=0.01,
+                    created_at=old,
+                    updated_at=old,
+                    metadata_={},
+                )
+            )
+            await session.commit()
+
+        lance.reset_mock()
+        scheduler = DecayScheduler(factory)
+        summary = await scheduler.run_weekly_pruning()
+
+        assert summary["skills_deprecated"] == 1
+        lance.enqueue_records.assert_called()
+        snapshots = lance.enqueue_records.call_args.args[0]
+        assert len(snapshots) == 1
+        assert snapshots[0].status == MemoryStatus.deprecated.value
 
     @pytest.mark.asyncio
     async def test_combined_pruning(self):

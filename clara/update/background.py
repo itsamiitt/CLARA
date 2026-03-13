@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from clara.extraction.extractor import ExtractedFact
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine
-from clara.retrieval.engine import RetrievalEngine
+from clara.retrieval.engine import LanceRetrievalEngine, RetrievalEngine
 from clara.update.engine import MemoryUpdateEngine
 
 logger = logging.getLogger(__name__)
@@ -27,11 +27,13 @@ class BackgroundWriter:
         embedding_engine: EmbeddingEngine,
         *,
         cache: MemoryCache | None = None,
+        lance_engine: LanceRetrievalEngine | None = None,
         max_queue_size: int = 0,
     ) -> None:
         self._session_factory = session_factory
         self._embedding_engine = embedding_engine
         self._cache = cache
+        self._lance_engine = lance_engine
         self._queue: asyncio.Queue[tuple[ExtractedFact, str | None] | None] = asyncio.Queue(
             maxsize=max_queue_size
         )
@@ -66,11 +68,17 @@ class BackgroundWriter:
             fact, user_id = item
             try:
                 async with self._session_factory() as session:
+                    session.sync_session.info.setdefault("_clara_embedding_engine", self._embedding_engine)
+                    if self._cache is not None:
+                        session.sync_session.info.setdefault("_clara_cache", self._cache)
+                    if self._lance_engine is not None:
+                        session.sync_session.info.setdefault("_lance_engine", self._lance_engine)
                     async with session.begin():
                         retriever = RetrievalEngine(
                             session,
                             self._embedding_engine,
                             cache=self._cache,
+                            lance_engine=self._lance_engine,
                         )
                         updater = MemoryUpdateEngine(
                             session,

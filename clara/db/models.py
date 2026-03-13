@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     DateTime,
     Enum,
+    event,
     Float,
     Index,
     MetaData,
@@ -24,7 +25,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, reconstructor
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +198,19 @@ class Memory(Base):
             "memory_type",
             "status",
         ),
+        Index(
+            "uq_memories_world_model_identity",
+            text("coalesce(user_id, '')"),
+            text("json_extract(content, '$.entity_type')"),
+            text("json_extract(content, '$.name')"),
+            unique=True,
+            sqlite_where=text("memory_type = 'world_model' AND status = 'active'"),
+        ),
     )
+
+    @reconstructor
+    def _init_on_load(self) -> None:
+        self._embedding_cache = None
 
     @hybrid_property
     def embedding(self) -> list[float] | None:
@@ -235,3 +248,13 @@ class Memory(Base):
             f"status={self.status.value}, "
             f"confidence={self.confidence})>"
         )
+
+
+@event.listens_for(Memory, "expire")
+def _clear_embedding_cache_on_expire(target: Memory, attrs) -> None:
+    target._embedding_cache = None
+
+
+@event.listens_for(Memory, "refresh")
+def _clear_embedding_cache_on_refresh(target: Memory, context, attrs) -> None:
+    target._embedding_cache = None

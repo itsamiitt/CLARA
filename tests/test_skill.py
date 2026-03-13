@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -17,6 +18,7 @@ from clara.memory.skill import (
     SUCCESS_REINFORCEMENT,
     SkillStore,
 )
+from clara.retrieval.engine import RetrievalResult, ScoredMemory
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +277,54 @@ class TestSkillQueries:
 
         matched = await store.match("I need to run tests")
         assert len(matched) == 0
+
+    @pytest.mark.asyncio
+    async def test_match_uses_semantic_retrieval_when_available(self, session: AsyncSession):
+        store = SkillStore(session)
+        skill = await store.create(name="deploy-api", trigger_conditions=["deploy"])
+        await session.commit()
+
+        retriever = AsyncMock()
+        retriever.search.return_value = RetrievalResult(
+            skills=[
+                ScoredMemory(
+                    memory=skill,
+                    score=0.95,
+                    similarity=0.9,
+                    confidence=skill.confidence,
+                    recency_score=1.0,
+                    usage_frequency=0.0,
+                )
+            ]
+        )
+
+        semantic_store = SkillStore(session, retrieval_engine=retriever)
+        matched = await semantic_store.match("Ship the API to production", user_id="alice")
+
+        assert matched == [skill]
+        retriever.search.assert_awaited_once_with(
+            "Ship the API to production",
+            top_k=10,
+            memory_types=[MemoryType.skill],
+            user_id="alice",
+            track_access=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_match_falls_back_to_substring_when_semantic_search_is_empty(self, session: AsyncSession):
+        retriever = AsyncMock()
+        retriever.search.return_value = RetrievalResult()
+        store = SkillStore(session, retrieval_engine=retriever)
+        await store.create(
+            name="deploy-api",
+            trigger_conditions=["deploy", "push to prod"],
+        )
+        await session.commit()
+
+        matched = await store.match("I need to deploy")
+
+        assert len(matched) == 1
+        assert matched[0].content["name"] == "deploy-api"
 
     @pytest.mark.asyncio
     async def test_get_active_skills(self, session: AsyncSession):

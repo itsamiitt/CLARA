@@ -41,7 +41,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest --tb=short -q
+        run: pytest --cov=clara --cov-report=term-missing --cov-fail-under=70 --tb=short -q
 
       - name: Run type check (optional)
         if: matrix.python-version == '3.12'

@@ -26,6 +26,7 @@ async def test_bridge_remember_turn_serializes_session_role_and_text():
     assert "role:user" in payload
     assert "text: I prefer Python." in payload
     assert "metadata: channel=whatsapp" in payload
+    assert memory.remember.await_args.kwargs["user_id"] == "session:s-1"
 
 
 @pytest.mark.asyncio
@@ -41,5 +42,13 @@ async def test_bridge_recall_and_context_are_scoped_to_session():
 
     assert result.total == 0
     assert ctx == "ctx"
-    memory.recall.assert_awaited_once_with("session:abc favorite language", top_k=8)
-    memory.context_for.assert_awaited_once_with("session:abc favorite language", top_k=8)
+    memory.recall.assert_awaited_once_with(
+        "session:abc favorite language",
+        top_k=8,
+        user_id="session:abc",
+    )
+    memory.context_for.assert_awaited_once_with(
+        "session:abc favorite language",
+        top_k=8,
+        user_id="session:abc",
+    )

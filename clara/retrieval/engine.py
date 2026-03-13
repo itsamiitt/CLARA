@@ -160,13 +160,10 @@ class LanceRetrievalEngine:
 
     def __init__(self, lance_path: str = DEFAULT_LANCE_PATH) -> None:
         self._lance_path = lance_path
-        self._records_lock = Lock()
         self._table_lock = Lock()
         self._sync_lock = Lock()
         self._pending_lock = Lock()
         self._pending: dict[str, LanceMemoryRecord] = {}
-        self._records: dict[str, LanceMemoryRecord] = {}
-        self._records_loaded = False
         self._flush_thread: Thread | None = None
         self._db = None
         self._table = None
@@ -244,7 +241,6 @@ class LanceRetrievalEngine:
     def enqueue_records(self, records: Sequence[LanceMemoryRecord]) -> None:
         if not records:
             return
-        self._merge_records(records)
         with self._pending_lock:
             for record in records:
                 if record.memory_id:
@@ -327,77 +323,6 @@ class LanceRetrievalEngine:
             parts.append(f"memory_type IN ({values})")
         return " AND ".join(parts)
 
-    def _merge_records(self, records: Sequence[LanceMemoryRecord]) -> None:
-        if not records:
-            return
-
-        with self._records_lock:
-            for record in records:
-                if not record.memory_id:
-                    continue
-                existing = self._records.get(record.memory_id)
-                vector = record.vector
-                if vector is None and existing is not None:
-                    vector = existing.vector
-                self._records[record.memory_id] = LanceMemoryRecord(
-                    memory_id=record.memory_id,
-                    vector=vector,
-                    user_id=record.user_id,
-                    memory_type=record.memory_type,
-                    status=record.status,
-                    is_new=record.is_new,
-                )
-
-    def _ensure_records_loaded_sync(self) -> None:
-        with self._records_lock:
-            if self._records_loaded:
-                return
-
-        loaded_records: dict[str, LanceMemoryRecord] = {}
-        try:
-            table = self._ensure_table_sync()
-            rows = table.to_arrow().to_pylist()
-        except Exception:
-            logger.exception("Failed to load LanceDB records into memory")
-            rows = []
-
-        for row in rows:
-            memory_id = row.get("memory_id")
-            if not memory_id:
-                continue
-            loaded_records[str(memory_id)] = LanceMemoryRecord(
-                memory_id=str(memory_id),
-                vector=RetrievalEngine._embedding_to_list(row.get("vector")),
-                user_id=row.get("user_id") or "",
-                memory_type=str(row.get("memory_type") or ""),
-                status=str(row.get("status") or ""),
-            )
-
-        with self._records_lock:
-            if self._records_loaded:
-                return
-            loaded_records.update(self._records)
-            self._records = loaded_records
-            self._records_loaded = True
-
-    @staticmethod
-    def _matches_filters(
-        record: LanceMemoryRecord,
-        *,
-        user_id: str | None,
-        memory_types: Sequence[MemoryType] | None,
-    ) -> bool:
-        if user_id is not None and record.user_id != user_id:
-            return False
-        if memory_types:
-            allowed_types = {
-                mem_type.value if isinstance(mem_type, MemoryType) else str(mem_type)
-                for mem_type in memory_types
-            }
-            if record.memory_type not in allowed_types:
-                return False
-        return True
-
     def _search_candidates_sync(
         self,
         *,
@@ -411,52 +336,49 @@ class LanceRetrievalEngine:
         if memory_types is not None and len(memory_types) == 0:
             return []
 
-        self._ensure_records_loaded_sync()
-        with self._records_lock:
-            records = list(self._records.values())
-
-        ranked = sorted(
-            (
-                (
-                    record.memory_id,
-                    RetrievalEngine._cosine_similarity(query_vector, record.vector),
-                )
-                for record in records
-                if record.vector is not None
-                and record.status == MemoryStatus.active.value
-                and self._matches_filters(record, user_id=user_id, memory_types=memory_types)
-            ),
-            key=lambda item: item[1],
-            reverse=True,
+        self.flush_pending_sync()
+        table = self._ensure_table_sync()
+        where_clause = self._build_where_clause(
+            user_id=user_id,
+            memory_types=memory_types,
         )
-        return ranked[:n_candidates]
+
+        try:
+            rows = (
+                table.search([float(value) for value in query_vector])
+                .metric("cosine")
+                .where(where_clause, prefilter=True)
+                .limit(n_candidates)
+                .select(["memory_id", "_distance"])
+                .to_list()
+            )
+        except Exception:
+            logger.exception("LanceDB ANN search failed")
+            return []
+
+        pairs: list[tuple[str, float]] = []
+        for row in rows:
+            memory_id = row.get("memory_id")
+            if not memory_id:
+                continue
+            try:
+                distance = float(row.get("_distance", 1.0))
+            except (TypeError, ValueError):
+                distance = 1.0
+            pairs.append((str(memory_id), 1.0 - distance))
+        return pairs
 
     def _sync_records_sync(self, records: Sequence[LanceMemoryRecord]) -> None:
         if not records:
             return
 
         with self._sync_lock:
-            self._merge_records(records)
             table = self._ensure_table_sync()
             deduped: dict[str, LanceMemoryRecord] = {
                 record.memory_id: record for record in records if record.memory_id
             }
             if not deduped:
                 return
-
-            inserts = [
-                {
-                    "memory_id": record.memory_id,
-                    "vector": [float(value) for value in record.vector],
-                    "user_id": record.user_id,
-                    "memory_type": record.memory_type,
-                    "status": record.status,
-                }
-                for record in deduped.values()
-                if record.vector is not None and record.is_new
-            ]
-            if inserts:
-                table.add(inserts)
 
             upserts = [
                 {
@@ -467,7 +389,7 @@ class LanceRetrievalEngine:
                     "status": record.status,
                 }
                 for record in deduped.values()
-                if record.vector is not None and not record.is_new
+                if record.vector is not None
             ]
             if upserts:
                 (
@@ -511,6 +433,12 @@ class RetrievalEngine:
         self._candidate_multiplier = candidate_multiplier
         self._cache = cache
         self._lance = lance_engine or LanceRetrievalEngine.get_default()
+        session_info = getattr(getattr(session, "sync_session", session), "info", None)
+        if isinstance(session_info, dict):
+            session_info.setdefault("_lance_engine", self._lance)
+            session_info.setdefault("_clara_embedding_engine", self._embedder)
+            if self._cache is not None:
+                session_info.setdefault("_clara_cache", self._cache)
 
     @property
     def lance(self) -> LanceRetrievalEngine:
@@ -842,7 +770,8 @@ def _install_lance_commit_sync() -> None:
             return
 
         try:
-            LanceRetrievalEngine.get_default().enqueue_records(snapshots)
+            lance = session.info.get("_lance_engine") or LanceRetrievalEngine.get_default()
+            lance.enqueue_records(snapshots)
         except Exception:
             logger.exception("Failed to sync memories into LanceDB after commit")
 

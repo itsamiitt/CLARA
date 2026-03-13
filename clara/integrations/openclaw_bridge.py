@@ -51,7 +51,10 @@ class OpenClawMemoryBridge:
             text=text,
             metadata=metadata or {},
         )
-        return await self.memory.remember(payload)
+        return await self.memory.remember(
+            payload,
+            user_id=self._session_user_id(session_id),
+        )
 
     async def recall_for(
         self,
@@ -63,7 +66,11 @@ class OpenClawMemoryBridge:
         """Recall memories biased to a given session by query prefixing."""
         k = top_k if top_k is not None else self.config.default_top_k
         scoped_query = f"session:{session_id} {query}".strip()
-        return await self.memory.recall(scoped_query, top_k=k)
+        return await self.memory.recall(
+            scoped_query,
+            top_k=k,
+            user_id=self._session_user_id(session_id),
+        )
 
     async def context_for(
         self,
@@ -75,7 +82,15 @@ class OpenClawMemoryBridge:
         """Return formatted memory context for a session/query."""
         k = top_k if top_k is not None else self.config.default_top_k
         scoped_query = f"session:{session_id} {query}".strip()
-        return await self.memory.context_for(scoped_query, top_k=k)
+        return await self.memory.context_for(
+            scoped_query,
+            top_k=k,
+            user_id=self._session_user_id(session_id),
+        )
+
+    @staticmethod
+    def _session_user_id(session_id: str) -> str:
+        return f"session:{session_id}"
 
     @staticmethod
     def _serialize_turn(

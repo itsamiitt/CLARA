@@ -63,6 +63,10 @@ class TestClaraConfigDefaults:
         cfg = ClaraConfig()
         assert cfg.cache_url is None
 
+    def test_default_auth_required(self):
+        cfg = ClaraConfig()
+        assert cfg.auth_required is False
+
 
 class TestClaraConfigExplicitOverride:
     """Verify that explicit keyword arguments override defaults."""
@@ -128,6 +132,12 @@ class TestClaraConfigFromEnv:
         with patch.dict(os.environ, env, clear=True):
             cfg = ClaraConfig.from_env()
         assert cfg.cache_url == "memory://"
+
+    def test_from_env_reads_auth_required(self):
+        env = {"CLARA_AUTH_REQUIRED": "true"}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = ClaraConfig.from_env()
+        assert cfg.auth_required is True
 
     def test_from_env_reads_int_value(self):
         env = {"CLARA_RETRIEVAL_TOP_K": "16"}
@@ -207,3 +217,4 @@ class TestClaraConfigFromEnv:
         assert cfg.skill_unused_days == 90
         assert cfg.start_scheduler is False
         assert cfg.cache_url == "memory://"
+        assert cfg.auth_required is False

@@ -31,6 +31,7 @@ from clara.agent import ClaraMemory, format_context
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import ExtractedFact
 from clara.retrieval.embeddings import EmbeddingEngine
+from clara.update.background import BackgroundWriter
 from clara.retrieval.engine import RetrievalEngine, RetrievalResult, ScoredMemory
 
 
@@ -209,6 +210,8 @@ async def _build_agent(
     factory,
     embedder,
     extractor,
+    *,
+    background_writer=None,
 ) -> ClaraMemory:
     """Construct a ClaraMemory with injected fakes (no scheduler)."""
     return ClaraMemory(
@@ -217,6 +220,7 @@ async def _build_agent(
         embedding_engine=embedder,
         extractor=extractor,
         decay_scheduler=None,  # no background scheduler in tests
+        background_writer=background_writer,
     )
 
 
@@ -374,6 +378,45 @@ class TestRemember:
         assert len(results) == 2
         assert results[0]["action"] == "created"
         assert results[1]["action"] in {"created", "retained_both"}
+
+    @pytest.mark.asyncio
+    async def test_remember_wait_false_queues_background_processing(
+        self, db_parts, fake_embedder, fake_extractor,
+    ):
+        engine, factory = db_parts
+        writer = BackgroundWriter(factory, fake_embedder)
+        agent = await _build_agent(
+            engine,
+            factory,
+            fake_embedder,
+            fake_extractor,
+            background_writer=writer,
+        )
+
+        with patch.object(
+            RetrievalEngine,
+            "_fetch_candidates",
+            _make_fetch_candidates_mock(fake_embedder),
+        ):
+            results = await agent.remember(
+                "I use Rust for systems work.",
+                user_id="alice",
+                wait=False,
+            )
+            await writer.join()
+
+        assert results == [{
+            "action": "queued",
+            "memory_id": None,
+            "conflict": False,
+            "superseded_id": None,
+        }]
+
+        async with factory() as session:
+            rows = (
+                await session.execute(select(Memory).where(Memory.user_id == "alice"))
+            ).scalars().all()
+        assert rows
 
 
 class TestRecall:

@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from clara.agent import ClaraMemory
+from clara.config import ClaraConfig
 from clara.db.models import Base, Memory
 from clara.extraction.extractor import ExtractedFact
 from clara.retrieval.embeddings import EmbeddingEngine
@@ -198,3 +199,52 @@ class TestMemoryRoutes:
         payload = response.json()
         assert len(payload["events"]) == 1
         assert payload["events"][0]["memory_type"] == "event"
+
+    @pytest.mark.asyncio
+    async def test_search_uses_authenticated_header_scope(self, client):
+        http, agent = client
+        await agent.remember("I use Rust for systems work.", user_id="alice")
+        await agent.remember("I use Rust for systems work.", user_id="bob")
+
+        response = await http.get(
+            "/memory/search",
+            params={"q": "systems language"},
+            headers={"X-User-ID": "alice"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] >= 1
+        assert all(item["user_id"] == "alice" for item in payload["beliefs"])
+
+    @pytest.mark.asyncio
+    async def test_search_rejects_header_and_query_user_mismatch(self, client):
+        http, agent = client
+        await agent.remember("I use Rust for systems work.", user_id="alice")
+
+        response = await http.get(
+            "/memory/search",
+            params={"q": "systems language", "user_id": "bob"},
+            headers={"X-User-ID": "alice"},
+        )
+
+        assert response.status_code == 403
+
+
+class TestAuthenticatedApi:
+    @pytest.mark.asyncio
+    async def test_auth_required_rejects_missing_header(self, api_agent: ClaraMemory):
+        from clara.api import create_app
+
+        app = create_app(
+            config=ClaraConfig(auth_required=True),
+            agent=api_agent,
+        )
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://testserver",
+            ) as http:
+                response = await http.get("/memory/search", params={"q": "Rust"})
+
+        assert response.status_code == 401

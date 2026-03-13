@@ -44,6 +44,7 @@ _DEFAULT_ARCHIVAL_THRESHOLD = 0.15
 _DEFAULT_EVENT_STALE_DAYS = 90
 _DEFAULT_SKILL_UNUSED_DAYS = 60
 _DEFAULT_CACHE_URL: str | None = None
+_DEFAULT_AUTH_REQUIRED = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,9 @@ class ClaraConfig:
         cache_url:
             Optional retrieval cache URL. Use ``"memory://"`` for the built-in
             in-process cache or a Redis URL for shared cache storage.
+        auth_required:
+            When ``True``, API routes require an ``X-User-ID`` header and
+            reject requests that try to act on a different ``user_id``.
     """
 
     # Database
@@ -119,6 +123,7 @@ class ClaraConfig:
     # Scheduler
     start_scheduler: bool = True
     cache_url: str | None = _DEFAULT_CACHE_URL
+    auth_required: bool = _DEFAULT_AUTH_REQUIRED
 
     # ------------------------------------------------------------------
     # Factory
@@ -147,6 +152,7 @@ class ClaraConfig:
         * ``CLARA_SKILL_UNUSED_DAYS``
         * ``CLARA_START_SCHEDULER``
         * ``CLARA_CACHE_URL``
+        * ``CLARA_AUTH_REQUIRED``
         """
         def _str(key: str, default: str) -> str:
             return os.environ.get(key, "").strip() or default
@@ -192,4 +198,5 @@ class ClaraConfig:
             skill_unused_days=_int("CLARA_SKILL_UNUSED_DAYS", _DEFAULT_SKILL_UNUSED_DAYS),
             start_scheduler=_bool("CLARA_START_SCHEDULER", True),
             cache_url=_str("CLARA_CACHE_URL", "memory://") if os.environ.get("CLARA_CACHE_URL") else None,
+            auth_required=_bool("CLARA_AUTH_REQUIRED", _DEFAULT_AUTH_REQUIRED),
         )

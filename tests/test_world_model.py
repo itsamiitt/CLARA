@@ -208,6 +208,40 @@ class TestWorldModelMerge:
         assert rec_a.content["properties"]["version"] == "16"
         assert rec_b.content["properties"]["version"] == "15"
 
+    @pytest.mark.asyncio
+    async def test_upsert_recovers_from_raced_insert(self, session: AsyncSession, monkeypatch):
+        store = WorldModelStore(session)
+        original = await store.upsert(
+            entity_type="tool",
+            name="PostgreSQL",
+            properties={"version": "16"},
+            user_id="alice",
+        )
+        await session.commit()
+
+        original_find_existing = store._find_existing
+        calls = {"count": 0}
+
+        async def _stale_then_real(entity_type, name, *, user_id=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return None
+            return await original_find_existing(entity_type, name, user_id=user_id)
+
+        monkeypatch.setattr(store, "_find_existing", _stale_then_real)
+
+        updated = await store.upsert(
+            entity_type="tool",
+            name="PostgreSQL",
+            properties={"version": "17", "replicas": 2},
+            user_id="alice",
+        )
+        await session.commit()
+
+        assert updated.memory_id == original.memory_id
+        assert updated.content["properties"]["version"] == "17"
+        assert updated.content["properties"]["replicas"] == 2
+
 
 # ---------------------------------------------------------------------------
 # update_property tests

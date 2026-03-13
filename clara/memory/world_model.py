@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Sequence
 
 from sqlalchemy import and_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.core.exceptions import MemoryNotFoundError
@@ -104,17 +105,41 @@ class WorldModelStore:
                 embedding=embedding,
             )
 
-        return await self._create_new(
-            entity_type=entity_type,
-            name=name,
-            properties=properties,
-            domain=domain,
-            user_id=user_id,
-            confidence=confidence,
-            source_type=source_type,
-            raw_text=raw_text,
-            embedding=embedding,
-        )
+        create_error: IntegrityError | None = None
+        try:
+            async with self._session.begin_nested():
+                return await self._create_new(
+                    entity_type=entity_type,
+                    name=name,
+                    properties=properties,
+                    domain=domain,
+                    user_id=user_id,
+                    confidence=confidence,
+                    source_type=source_type,
+                    raw_text=raw_text,
+                    embedding=embedding,
+                )
+        except IntegrityError as exc:
+            create_error = exc
+            logger.debug(
+                "World-model upsert raced for %s/%s (user_id=%r); retrying merge",
+                entity_type,
+                name,
+                user_id,
+            )
+
+        existing = await self._find_existing(entity_type, name, user_id=user_id)
+        if existing is not None:
+            return await self._merge_properties(
+                existing,
+                properties,
+                source_type=source_type,
+                raw_text=raw_text,
+                embedding=embedding,
+            )
+        if create_error is None:
+            raise RuntimeError("World-model upsert failed without an IntegrityError cause")
+        raise create_error
 
     # ------------------------------------------------------------------
     # update_property — single property mutation
