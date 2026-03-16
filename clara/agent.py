@@ -411,7 +411,7 @@ class ClaraMemory:
 
         interaction = self._interaction_layer.receive(text, user_id=user_id)
 
-        facts = self._extractor.extract(interaction.raw_text)
+        facts = await self._extractor.extract(interaction.raw_text)
         if not facts:
             logger.debug("No facts extracted from text: %r", text[:120])
             return []

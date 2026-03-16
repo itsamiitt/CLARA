@@ -336,7 +336,9 @@ class LanceRetrievalEngine:
         if memory_types is not None and len(memory_types) == 0:
             return []
 
-        self.flush_pending_sync()
+        # Note: flush_pending_sync() was removed here. The background flush
+        # worker already persists pending writes asynchronously — calling it
+        # synchronously on every search was blocking recall() needlessly.
         table = self._ensure_table_sync()
         where_clause = self._build_where_clause(
             user_id=user_id,
