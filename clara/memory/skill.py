@@ -41,6 +41,7 @@ from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine
 from clara.retrieval.engine import LanceRetrievalEngine, RetrievalEngine
+from clara.retrieval.lexical import LexicalRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +207,9 @@ class SkillStore:
         record.metadata_ = meta
         record.updated_at = now
 
-        # Auto-deprecation check
-        if record.confidence < DEPRECATION_THRESHOLD:
+        # Auto-deprecation check (inclusive: a skill that lands exactly on the
+        # threshold is deprecated, matching the documented "< 0.15" intent).
+        if record.confidence <= DEPRECATION_THRESHOLD:
             record.status = MemoryStatus.deprecated
             logger.info(
                 "Skill %s auto-deprecated (confidence=%.3f < %.3f)",
@@ -262,6 +264,17 @@ class SkillStore:
             )
             if semantic.skills:
                 return [sm.memory for sm in semantic.skills[:limit]]
+
+        # No embedding engine bound (e.g. the zero-backend LocalMemory path):
+        # fall back to keyword search over SQLite rather than substring-only.
+        lexical = await LexicalRetriever(self._session).search(
+            context,
+            top_k=limit,
+            memory_types=[MemoryType.skill],
+            user_id=user_id,
+        )
+        if lexical.skills:
+            return [sm.memory for sm in lexical.skills[:limit]]
 
         all_skills = await self.get_active_skills(user_id=user_id, limit=200)
         context_lower = context.lower()

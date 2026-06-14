@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool, StaticPool
 
+from clara.core.text import sanitize_memory_text as _s
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import (
     DEFAULT_OLLAMA_BASE_URL,
@@ -119,13 +120,13 @@ def _format_belief(sm: ScoredMemory) -> str:
     """One-line summary of a belief for the context block."""
     c = sm.memory.content
     domain = c.get("domain")
-    core = f"{c.get('subject', '?')} {c.get('relation', '?')} {c.get('object', '?')}"
+    core = f"{_s(c.get('subject', '?'))} {_s(c.get('relation', '?'))} {_s(c.get('object', '?'))}"
     if c.get("is_negation"):
         core = f"not ({core})"
     line = f"- {core}"
     line += f" (confidence: {sm.memory.confidence:.2f}"
     if domain:
-        line += f", domain: {domain}"
+        line += f", domain: {_s(domain)}"
     line += ")"
     return line
 
@@ -133,15 +134,15 @@ def _format_belief(sm: ScoredMemory) -> str:
 def _format_event(sm: ScoredMemory) -> str:
     c = sm.memory.content
     ts = sm.memory.created_at.strftime("%Y-%m-%d") if sm.memory.created_at else "?"
-    desc = c.get("object", c.get("description", ""))
-    subj = c.get("subject", "")
-    rel = c.get("relation", "")
+    desc = _s(c.get("object", c.get("description", "")))
+    subj = _s(c.get("subject", ""))
+    rel = _s(c.get("relation", ""))
     return f"- {ts}: {subj} {rel} {desc}"
 
 
 def _format_skill(sm: ScoredMemory) -> str:
     c = sm.memory.content
-    name = c.get("name", c.get("object", "unnamed skill"))
+    name = _s(c.get("name", c.get("object", "unnamed skill")))
     return f"- {name} (confidence: {sm.memory.confidence:.2f})"
 
 
@@ -150,15 +151,15 @@ def _format_world_model(sm: ScoredMemory) -> str:
     parts = []
     for key in ("name", "subject", "object"):
         if key in c and c[key]:
-            parts.append(c[key])
+            parts.append(_s(c[key]))
             break
     # Show properties if available
     props = c.get("properties", {})
     if props and isinstance(props, dict):
-        prop_strs = [f"{k}: {v}" for k, v in props.items()]
+        prop_strs = [f"{_s(k)}: {_s(v)}" for k, v in props.items()]
         parts.append(" | ".join(prop_strs))
     elif c.get("relation") and c.get("object"):
-        parts.append(f"{c.get('relation', '')} {c.get('object', '')}")
+        parts.append(f"{_s(c.get('relation', ''))} {_s(c.get('object', ''))}")
     return f"- {' | '.join(parts)}" if parts else "- (world model entry)"
 
 
@@ -555,6 +556,7 @@ class ClaraMemory:
         return {
             "response": response.text,
             "memory_context": response.memory_context,
+            "facts_considered": response.facts_considered,
             "facts_stored": [
                 {
                     "action": item.action_taken.value,

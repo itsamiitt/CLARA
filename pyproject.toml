@@ -40,7 +40,7 @@ dependencies = [
     "sqlalchemy>=2.0,<3.0",
     "apscheduler>=3.10,<4.0",
     "openai>=1.0,<3.0",
-    "lancedb>=0.20",
+    "lancedb>=0.20,<1.0",
     "aiosqlite>=0.20,<1.0",
 ]
 
@@ -61,6 +61,9 @@ anthropic = [
 ollama = [
     "ollama>=0.3",
 ]
+mcp = [
+    "mcp>=1.2",
+]
 dev = [
     "pytest>=8.0,<10.0",
     "pytest-asyncio>=0.23,<1.0",
@@ -70,8 +73,11 @@ dev = [
     "hypothesis>=6.0,<7.0",
 ]
 all = [
-    "clara-memory[api,cache,local,anthropic,ollama,dev]",
+    "clara-memory[api,cache,local,anthropic,ollama,mcp,dev]",
 ]
+
+[project.scripts]
+clara-mcp = "clara.integrations.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/itsamiitt/CLARA"

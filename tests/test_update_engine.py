@@ -32,6 +32,18 @@ from clara.update.engine import (
 from clara.memory.belief import SourceType
 
 
+class TestClassifyNormalization:
+    """Relations are normalised before keyword matching (P1 hardening)."""
+
+    def test_multiword_and_hyphen_relations_match(self):
+        assert classify_memory_type(_make_fact(relation="proficient in")) == MemoryType.skill
+        assert classify_memory_type(_make_fact(relation="runs on")) == MemoryType.world_model
+        assert classify_memory_type(_make_fact(relation="DEPLOYED")) == MemoryType.event
+
+    def test_unknown_relation_defaults_to_belief(self):
+        assert classify_memory_type(_make_fact(relation="prefers")) == MemoryType.belief
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from clara.agent import ClaraMemory
 from clara.api.routes_admin import router as admin_router
 from clara.api.routes_interaction import router as interaction_router
 from clara.api.routes_memory import router as memory_router
 from clara.config import ClaraConfig
+
+logger = logging.getLogger(__name__)
+
+# Warn at most once per process so test suites that build many apps stay quiet.
+_AUTH_WARNED = False
 
 
 def create_app(
@@ -20,6 +28,15 @@ def create_app(
     agent: ClaraMemory | None = None,
 ) -> FastAPI:
     config = config or ClaraConfig.from_env()
+
+    global _AUTH_WARNED
+    if not config.auth_required and not _AUTH_WARNED:
+        _AUTH_WARNED = True
+        logger.warning(
+            "CLARA API is starting with auth_required=False: requests may act on "
+            "any user_id without an X-User-ID header. Set CLARA_AUTH_REQUIRED=true "
+            "(or put the API behind an authenticating gateway) before exposing it."
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -45,6 +62,23 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # Opt-in CORS: set CLARA_CORS_ORIGINS to a comma-separated origin list
+    # (use "*" for any origin). Off by default to stay safe for local use.
+    cors_origins = [
+        origin.strip()
+        for origin in os.environ.get("CLARA_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
     app.include_router(interaction_router)
     app.include_router(memory_router)
     app.include_router(admin_router)

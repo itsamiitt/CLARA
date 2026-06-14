@@ -80,30 +80,42 @@ class UpdateResult:
 # ---------------------------------------------------------------------------
 
 # Keywords used as heuristics for classifying the fact into a memory type.
+# Relations are normalised (lowercased, spaces/hyphens → underscores) before
+# matching, so "proficient in" and "proficient-in" both match "proficient_in".
 _EVENT_RELATIONS: frozenset[str] = frozenset({
     "started", "completed", "failed", "updated", "finished",
     "began", "launched", "deployed", "shipped", "released",
     "created", "deleted", "migrated", "installed", "upgraded",
+    "ran", "fixed", "merged", "pushed", "removed", "abandoned",
 })
 
 _SKILL_RELATIONS: frozenset[str] = frozenset({
     "knows", "learned", "studies", "proficient_in", "certified_in",
     "can_do", "trained_in", "experienced_with", "mastered",
+    "skilled_in", "specializes_in", "able_to", "good_at",
 })
 
 _WORLD_MODEL_RELATIONS: frozenset[str] = frozenset({
     "is", "has", "contains", "belongs_to", "located_in",
     "consists_of", "type_of", "instance_of", "part_of",
+    "runs_on", "depends_on", "configured_with",
 })
+
+
+def _normalize_relation(relation: str) -> str:
+    """Canonicalise a relation for keyword matching."""
+    return relation.lower().strip().replace(" ", "_").replace("-", "_")
 
 
 def classify_memory_type(fact: ExtractedFact) -> MemoryType:
     """Classify a fact into one of the four memory types.
 
-    Uses the ``relation`` field as the primary signal.  Falls back to
-    :attr:`MemoryType.belief` for general subject–relation–object triples.
+    Uses the ``relation`` field as the primary signal, with a fixed precedence
+    of **event > skill > world_model > belief**: the first keyword set that the
+    (normalised) relation matches wins, and anything unmatched falls back to
+    :attr:`MemoryType.belief` — the default for general preference/usage triples.
     """
-    rel = fact.relation.lower().strip()
+    rel = _normalize_relation(fact.relation)
 
     if rel in _EVENT_RELATIONS:
         return MemoryType.event

@@ -10,7 +10,12 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from clara.db.models import Base, VECTOR_DIMENSIONS
-from clara.extraction.extractor import ENV_OPENAI_KEY, ExtractedFact
+from clara.extraction.extractor import (
+    ENV_OPENAI_KEY,
+    LLM_MAX_RETRIES,
+    LLM_TIMEOUT_SECONDS,
+    ExtractedFact,
+)
 from clara.memory.belief import BeliefMemory, SourceType
 from clara.reasoning import ContextAssembler, ReasoningEngine
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
@@ -201,5 +206,7 @@ class TestReasoningEngine:
                 response = await engine._call_openai("system prompt", "hello")
 
         assert response == "Async answer"
-        mock_openai_module.AsyncOpenAI.assert_called_once_with(api_key="sk-test")
+        mock_openai_module.AsyncOpenAI.assert_called_once_with(
+            api_key="sk-test", timeout=LLM_TIMEOUT_SECONDS, max_retries=LLM_MAX_RETRIES
+        )
         mock_client.chat.completions.create.assert_awaited_once()

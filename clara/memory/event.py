@@ -162,6 +162,11 @@ class EventStore:
         try:
             current_status = EventStatus(current_status_str)
         except ValueError:
+            logger.warning(
+                "Event %s has unrecognized event_status %r; treating it as "
+                "%r for transition validation.",
+                event_id, current_status_str, EventStatus.created.value,
+            )
             current_status = EventStatus.created
 
         if not validate_event_transition(current_status, new_status):

@@ -54,6 +54,30 @@ async def session():
     await engine.dispose()
 
 
+class TestLexicalMatch:
+    """With no embedding engine bound, match() uses keyword search (P1)."""
+
+    @pytest.mark.asyncio
+    async def test_match_finds_skill_by_keyword(self, session: AsyncSession):
+        store = SkillStore(session)
+        await store.create(
+            name="deploy-api",
+            trigger_conditions=["deploy", "ship"],
+            steps=["build image", "kubectl apply"],
+            description="deploy the api service to production",
+        )
+        await store.create(
+            name="run-tests",
+            trigger_conditions=["test"],
+            steps=["pytest"],
+            description="run the unit test suite",
+        )
+
+        matched = await store.match("how do I deploy the api to production")
+        assert matched
+        assert matched[0].content["name"] == "deploy-api"
+
+
 # ---------------------------------------------------------------------------
 # Create tests
 # ---------------------------------------------------------------------------

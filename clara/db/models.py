@@ -198,6 +198,10 @@ class Memory(Base):
             "memory_type",
             "status",
         ),
+        # Enforces one active world-model record per (user, entity_type, name)
+        # so concurrent upserts collide with an IntegrityError instead of
+        # duplicating. Both dialect-specific partial-index predicates are given
+        # so the guard behaves identically on SQLite and PostgreSQL.
         Index(
             "uq_memories_world_model_identity",
             text("coalesce(user_id, '')"),
@@ -205,6 +209,7 @@ class Memory(Base):
             text("json_extract(content, '$.name')"),
             unique=True,
             sqlite_where=text("memory_type = 'world_model' AND status = 'active'"),
+            postgresql_where=text("memory_type = 'world_model' AND status = 'active'"),
         ),
     )
 

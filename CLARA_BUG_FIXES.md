@@ -1,5 +1,10 @@
 # CLARA v2 — Bug Fix Guide
 
+> ✅ **HISTORICAL — all resolved (verified 2026-06-14).** Every bug in this v2
+> guide has since been fixed in the codebase. It is kept as a reference for the
+> fixes that were applied. For the current state of the project, see
+> **[AUDIT_2026-06-14.md](AUDIT_2026-06-14.md)**.
+
 8 bugs · 3 critical · 3 medium · 2 low  
 Fixes ordered by priority: fix critical first, in order.
 

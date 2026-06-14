@@ -24,6 +24,8 @@ from clara.extraction.extractor import (
     ENV_OLLAMA_BASE_URL,
     ENV_OLLAMA_MODEL,
     ENV_OPENAI_KEY,
+    LLM_MAX_RETRIES,
+    LLM_TIMEOUT_SECONDS,
     ExtractedFact,
     FactExtractor,
     _anthropic,
@@ -53,12 +55,18 @@ ResponseGenerator: TypeAlias = Callable[[str, str, str], str | Awaitable[str]]
 
 @dataclass(frozen=True, slots=True)
 class ReasoningResponse:
-    """Result of the reasoning loop."""
+    """Result of the reasoning loop.
+
+    ``facts_considered`` is the number of facts the extractor pulled from the
+    response (each yields one entry in ``facts_stored``); it lets callers see
+    how much was processed without inspecting every result.
+    """
 
     text: str
     memory_context: str
     facts_stored: list[UpdateResult]
     memories_used: list[ScoredMemory]
+    facts_considered: int = 0
 
 
 class ReasoningEngine:
@@ -117,7 +125,8 @@ class ReasoningEngine:
 
         stored: list[UpdateResult] = []
         if response_text.strip():
-            for fact in self._extractor.extract(response_text):
+            facts = self._extractor.extract(response_text)
+            for fact in facts:
                 stored.append(await self._updater.process(fact, user_id=user_id))
 
         return ReasoningResponse(
@@ -125,6 +134,7 @@ class ReasoningEngine:
             memory_context=memory_context,
             facts_stored=stored,
             memories_used=retrieval_result.all,
+            facts_considered=len(stored),
         )
 
     async def _generate_response(
@@ -185,7 +195,11 @@ class ReasoningEngine:
                 f"Environment variable {ENV_OPENAI_KEY!r} is not set."
             )
 
-        client = _openai.AsyncOpenAI(api_key=api_key)
+        client = _openai.AsyncOpenAI(
+            api_key=api_key,
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=LLM_MAX_RETRIES,
+        )
         response = await client.chat.completions.create(
             model=self._model_name(),
             messages=[
@@ -207,7 +221,11 @@ class ReasoningEngine:
                 f"Environment variable {ENV_ANTHROPIC_KEY!r} is not set."
             )
 
-        client = _anthropic.AsyncAnthropic(api_key=api_key)
+        client = _anthropic.AsyncAnthropic(
+            api_key=api_key,
+            timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=LLM_MAX_RETRIES,
+        )
         response = await client.messages.create(
             model=self._model_name(),
             max_tokens=2048,

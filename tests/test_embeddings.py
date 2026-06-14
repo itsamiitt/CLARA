@@ -26,8 +26,27 @@ from clara.retrieval.embeddings import (
     _OpenAIBackend,
     _create_backend,
     get_engine,
+    normalize_embedding_dimensions,
     reset_engine,
 )
+
+
+class TestNormalizeDimensions:
+    def test_pads_short_vector(self):
+        out = normalize_embedding_dimensions([1.0, 2.0], target_dimensions=5)
+        assert out == [1.0, 2.0, 0.0, 0.0, 0.0]
+
+    def test_truncates_oversize_vector(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="clara.retrieval.embeddings"):
+            out = normalize_embedding_dimensions([0.1] * 2000, target_dimensions=1536)
+        assert len(out) == 1536
+        assert any("Truncating" in rec.message for rec in caplog.records)
+
+    def test_exact_length_unchanged(self):
+        vec = [0.5] * 4
+        assert normalize_embedding_dimensions(vec, target_dimensions=4) is vec
 
 
 # ---------------------------------------------------------------------------

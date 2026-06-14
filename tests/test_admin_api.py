@@ -180,3 +180,38 @@ class TestAdminRoutes:
         payload = response.json()
         assert payload["status"] == "ok"
         assert payload["cache"]["backend"] == "memory"
+
+
+class TestAdminAuth:
+    @pytest.mark.asyncio
+    async def test_data_routes_require_header_when_auth_required(self):
+        from clara.api import create_app
+        from clara.config import ClaraConfig
+
+        engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        agent = ClaraMemory(
+            engine=engine,
+            session_factory=factory,
+            embedding_engine=EmbeddingEngine(_FakeBackend()),
+            extractor=_EmptyExtractor(),  # type: ignore[arg-type]
+            decay_scheduler=None,
+        )
+
+        app = create_app(config=ClaraConfig(auth_required=True), agent=agent)
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://testserver",
+            ) as http:
+                # Data route blocked without the header...
+                stats = await http.get("/admin/stats")
+                # ...but liveness probe stays open.
+                health = await http.get("/admin/health")
+
+        assert stats.status_code == 401
+        assert health.status_code == 200
+
+        await agent.close()

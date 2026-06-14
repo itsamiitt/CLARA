@@ -744,6 +744,10 @@ def _install_lance_commit_sync() -> None:
 
     @event.listens_for(Session, "before_flush")
     def _capture_memory_objects(session, flush_context, instances) -> None:
+        # No-backend mode (e.g. LocalMemory / clara-mcp) never writes vectors,
+        # so skip tracking entirely and keep LanceDB completely dormant.
+        if session.info.get("_clara_disable_lance"):
+            return
         tracked = session.info.setdefault("_lance_tracked_objects", {})
         for obj in list(session.new) + list(session.dirty):
             is_new = obj in session.new
@@ -764,6 +768,10 @@ def _install_lance_commit_sync() -> None:
 
     @event.listens_for(Session, "after_commit")
     def _sync_lance_after_commit(session) -> None:
+        if session.info.get("_clara_disable_lance"):
+            session.info.pop("_lance_pending_snapshots", None)
+            session.info.pop("_lance_tracked_objects", None)
+            return
         snapshots = list(session.info.pop("_lance_pending_snapshots", {}).values())
         session.info.pop("_lance_tracked_objects", None)
         if not snapshots:

@@ -196,6 +196,21 @@ LanceDB stores:
 
 This keeps setup simple while avoiding Python-side full-table scans for semantic retrieval.
 
+### SQLite vs PostgreSQL
+
+CLARA is **SQLite-first** and the test suite runs on SQLite. Concurrent
+`world_model` upserts are made safe by a partial unique index on
+`(user_id, entity_type, name)` for active rows: a racing insert hits an
+`IntegrityError` and retries as a merge rather than duplicating. SQLite enforces
+this partial unique index natively.
+
+PostgreSQL is not yet a supported target out of the box: that unique index is
+defined with SQLite's `json_extract(...)` expression (the partial-index `WHERE`
+predicate is already dialect-portable via `postgresql_where`). Running on
+Postgres additionally requires a dialect-aware index expression
+(`content->>'entity_type'`, `content->>'name'`). Until then, prefer single-writer
+or SQLite deployments for the upsert race guarantee.
+
 ## Memory Flow
 
 1. `remember(text)` extracts structured facts.

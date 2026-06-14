@@ -45,6 +45,12 @@ DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
 CONFIDENCE_FLOOR = 0.4
 
+# Network resilience for hosted LLM providers. The OpenAI/Anthropic SDKs apply
+# their own exponential backoff up to max_retries and abort after timeout, so a
+# transient blip doesn't silently lose the extraction.
+LLM_TIMEOUT_SECONDS = 30.0
+LLM_MAX_RETRIES = 2
+
 # ---------------------------------------------------------------------------
 # Optional dependency imports (guarded)
 # ---------------------------------------------------------------------------
@@ -161,7 +167,11 @@ def _call_openai(text: str, model: str) -> str:
             f"Environment variable {ENV_OPENAI_KEY!r} is not set."
         )
 
-    client = _openai.OpenAI(api_key=api_key)
+    client = _openai.OpenAI(
+        api_key=api_key,
+        timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=LLM_MAX_RETRIES,
+    )
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -187,7 +197,11 @@ def _call_anthropic(text: str, model: str) -> str:
             f"Environment variable {ENV_ANTHROPIC_KEY!r} is not set."
         )
 
-    client = _anthropic.Anthropic(api_key=api_key)
+    client = _anthropic.Anthropic(
+        api_key=api_key,
+        timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=LLM_MAX_RETRIES,
+    )
     response = client.messages.create(
         model=model,
         max_tokens=2048,
@@ -253,6 +267,10 @@ def _call_ollama(text: str, model: str, base_url: str) -> str:
         payload = response.get("message", {})
         if isinstance(payload, dict):
             return str(payload.get("content", "") or "")
+    logger.warning(
+        "Unexpected Ollama chat response shape (%s); extracting no facts.",
+        type(response).__name__,
+    )
     return ""
 
 

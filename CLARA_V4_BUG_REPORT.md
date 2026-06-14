@@ -1,12 +1,37 @@
 # CLARA v4 — Complete Bug Report
 
-**Codebase audited:** `CLARA-main__4_.zip`  
-**Audit date:** 2026-03-13  
-**Total bugs found:** 13 (3 from original audit fixed · 5 original still open · 5 new bugs introduced)
+> ⚠️ **SUPERSEDED — re-audited 2026-06-14.** The "Status" column below was
+> accurate on 2026-03-13 but is now **out of date**. A fresh, code-verified
+> audit found that **every bug listed here is fixed or mitigated** in the
+> current codebase. The corrected table is immediately below; see
+> **[AUDIT_2026-06-14.md](AUDIT_2026-06-14.md)** for the authoritative current
+> state. The per-bug detail further down is retained as historical record only.
+
+**Original audit:** 2026-03-13 · **Re-verified:** 2026-06-14
 
 ---
 
-## Summary Table
+## Summary Table (corrected 2026-06-14)
+
+| # | Bug | Severity | Status (2026-06-14) | Evidence |
+|---|---|---|---|---|
+| 1 | Sync blocking LLM calls | Critical | ✅ Fixed | async clients in `reasoning/engine.py` |
+| 2 | Stress test segfault | Critical | ✅ Fixed | semaphore + `-m 'not stress'` |
+| 3 | WorldModelStore TOCTOU race | Critical | ✅ Fixed | `begin_nested()`+`IntegrityError` retry + partial unique index (`models.py`) |
+| 4 | SkillStore.match() full table scan | Medium | ✅ Fixed | semantic-first; lexical fallback added (`memory/skill.py`) |
+| 5 | BackgroundWriter never used | Medium | ✅ Fixed | wired via `remember(wait=False)` (`agent.py`) |
+| 6 | fastapi optional dep breaks CI | Medium | ✅ Fixed | `[api]` extra + `importorskip` |
+| 7 | API user_id unauthenticated | Low | ✅ Fixed | `get_current_user`/`resolve_user_scope` (`api/dependencies.py`) |
+| 8 | OpenClaw session isolation text-prefix only | Low | ✅ Fixed | scoped by `user_id` (`openclaw_bridge.py`) |
+| 9 | LanceDB search is a full in-memory scan | Critical | ✅ Fixed | native `table.search().metric("cosine")` (`engine.py`) |
+| 10 | Decay scheduler bypasses LanceDB sync | Critical | ✅ Fixed | ORM-tracked status changes fire sync listeners |
+| 11 | `after_commit` routes to wrong LanceDB instance | High | ✅ Fixed | reads `session.info["_lance_engine"]` |
+| 12 | `_embedding_cache` not cleared on ORM expiry | Medium | ✅ Fixed | `@reconstructor` + expire/refresh listeners |
+| 13 | `pytest-cov` missing | Low | ✅ Fixed | in `[dev]` + `--cov-fail-under=70` |
+
+_The original (uncorrected) summary table and per-bug detail follow below as history._
+
+### Original Summary Table (2026-03-13, historical)
 
 | # | Bug | Severity | Status | File(s) |
 |---|---|---|---|---|

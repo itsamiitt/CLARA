@@ -248,3 +248,26 @@ class TestAuthenticatedApi:
                 response = await http.get("/memory/search", params={"q": "Rust"})
 
         assert response.status_code == 401
+
+
+class TestCors:
+    @pytest.mark.asyncio
+    async def test_cors_header_emitted_when_origin_configured(
+        self, api_agent: ClaraMemory, monkeypatch
+    ):
+        monkeypatch.setenv("CLARA_CORS_ORIGINS", "https://example.com")
+        from clara.api import create_app
+
+        app = create_app(agent=api_agent)
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://testserver",
+            ) as http:
+                response = await http.get(
+                    "/memory/search",
+                    params={"q": "Rust", "user_id": "alice"},
+                    headers={"Origin": "https://example.com"},
+                )
+
+        assert response.headers.get("access-control-allow-origin") == "https://example.com"

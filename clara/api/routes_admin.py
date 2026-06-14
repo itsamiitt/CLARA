@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.agent import ClaraMemory
-from clara.api.dependencies import get_agent, get_session
+from clara.api.dependencies import get_agent, get_current_user, get_session
 from clara.db.models import Memory, MemoryStatus, MemoryType
 
 router = APIRouter()
@@ -27,7 +27,10 @@ def _memory_payload(memory: Memory) -> dict[str, object]:
 
 
 @router.get("/admin/stats")
-async def stats(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+async def stats(
+    session: AsyncSession = Depends(get_session),
+    current_user: str | None = Depends(get_current_user),
+) -> dict[str, object]:
     rows = (
         await session.execute(
             select(Memory.memory_type, Memory.status, func.count())
@@ -47,6 +50,7 @@ async def stats(session: AsyncSession = Depends(get_session)) -> dict[str, objec
 async def conflicts(
     limit: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
+    current_user: str | None = Depends(get_current_user),
 ) -> dict[str, object]:
     rows = (
         await session.execute(
@@ -72,6 +76,7 @@ async def decay_report(
     threshold: float = Query(0.25, gt=0.0, lt=1.0),
     limit: int = Query(100, ge=1, le=500),
     session: AsyncSession = Depends(get_session),
+    current_user: str | None = Depends(get_current_user),
 ) -> dict[str, object]:
     rows = (
         await session.execute(
@@ -90,6 +95,7 @@ async def decay_report(
 async def skills_leaderboard(
     limit: int = Query(20, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
+    current_user: str | None = Depends(get_current_user),
 ) -> dict[str, object]:
     rows = (
         await session.execute(

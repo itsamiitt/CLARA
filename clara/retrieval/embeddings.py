@@ -16,12 +16,19 @@ called.  Use :func:`reset_engine` in tests to tear down the singleton.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
 from clara.db.models import VECTOR_DIMENSIONS
+
+logger = logging.getLogger(__name__)
+
+# Track oversize lengths we've already warned about so truncation is logged
+# once per distinct source dimension rather than on every embed call.
+_TRUNCATION_WARNED: set[int] = set()
 
 # Optional dependency imports — guarded so the module can load even if
 # only one backend's dependencies are installed.
@@ -77,6 +84,14 @@ def normalize_embedding_dimensions(
     if len(vector) == target_dimensions:
         return vector
     if len(vector) > target_dimensions:
+        source_len = len(vector)
+        if source_len not in _TRUNCATION_WARNED:
+            _TRUNCATION_WARNED.add(source_len)
+            logger.warning(
+                "Truncating %d-dim embedding to %d dims; the tail is discarded. "
+                "This is lossy — prefer a model whose dimension is <= %d.",
+                source_len, target_dimensions, target_dimensions,
+            )
         return vector[:target_dimensions]
     return vector + ([0.0] * (target_dimensions - len(vector)))
 
