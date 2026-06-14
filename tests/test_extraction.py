@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -268,17 +268,17 @@ class TestFactExtractorOpenAI:
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test", ENV_LLM_PROVIDER: "openai"})
     @patch("clara.extraction.extractor._openai")
-    def test_extract_returns_facts(self, mock_openai):
+    async def test_extract_returns_facts(self, mock_openai):
         mock_client = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = SAMPLE_FACTS_JSON
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[mock_choice]
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[mock_choice])
         )
-        mock_openai.OpenAI.return_value = mock_client
+        mock_openai.AsyncOpenAI.return_value = mock_client
 
         extractor = FactExtractor()
-        facts = extractor.extract(SAMPLE_TEXT)
+        facts = await extractor.extract(SAMPLE_TEXT)
 
         assert len(facts) == 2
         assert facts[0].object == "Rust"
@@ -287,42 +287,44 @@ class TestFactExtractorOpenAI:
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test", ENV_LLM_PROVIDER: "openai"})
     @patch("clara.extraction.extractor._openai")
-    def test_extract_empty_text_returns_empty(self, mock_openai):
+    async def test_extract_empty_text_returns_empty(self, mock_openai):
         extractor = FactExtractor()
-        assert extractor.extract("") == []
-        assert extractor.extract("   ") == []
+        assert await extractor.extract("") == []
+        assert await extractor.extract("   ") == []
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test", ENV_LLM_PROVIDER: "openai"})
     @patch("clara.extraction.extractor._openai")
-    def test_extract_llm_error_returns_empty(self, mock_openai):
+    async def test_extract_llm_error_returns_empty(self, mock_openai):
         mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = RuntimeError("API down")
-        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("API down")
+        )
+        mock_openai.AsyncOpenAI.return_value = mock_client
 
         extractor = FactExtractor()
-        facts = extractor.extract("Some text about Rust")
+        facts = await extractor.extract("Some text about Rust")
 
         assert facts == []
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test", ENV_LLM_PROVIDER: "openai"})
     @patch("clara.extraction.extractor._openai")
-    def test_extract_unparseable_response_returns_empty(self, mock_openai):
+    async def test_extract_unparseable_response_returns_empty(self, mock_openai):
         mock_client = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = "I cannot extract facts from this."
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[mock_choice]
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[mock_choice])
         )
-        mock_openai.OpenAI.return_value = mock_client
+        mock_openai.AsyncOpenAI.return_value = mock_client
 
         extractor = FactExtractor()
-        facts = extractor.extract("Some text")
+        facts = await extractor.extract("Some text")
 
         assert facts == []
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test", ENV_LLM_PROVIDER: "openai"})
     @patch("clara.extraction.extractor._openai")
-    def test_extract_filters_low_confidence(self, mock_openai):
+    async def test_extract_filters_low_confidence(self, mock_openai):
         low_and_high = json.dumps([
             {
                 "subject": "user", "relation": "uses", "object": "Rust",
@@ -338,30 +340,30 @@ class TestFactExtractorOpenAI:
         mock_client = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = low_and_high
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[mock_choice]
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[mock_choice])
         )
-        mock_openai.OpenAI.return_value = mock_client
+        mock_openai.AsyncOpenAI.return_value = mock_client
 
         extractor = FactExtractor()
-        facts = extractor.extract("I use Rust, might try Zig")
+        facts = await extractor.extract("I use Rust, might try Zig")
 
         assert len(facts) == 1
         assert facts[0].object == "Rust"
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test", ENV_LLM_PROVIDER: "openai"})
     @patch("clara.extraction.extractor._openai")
-    def test_system_prompt_included_in_call(self, mock_openai):
+    async def test_system_prompt_included_in_call(self, mock_openai):
         mock_client = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = "[]"
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[mock_choice]
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[mock_choice])
         )
-        mock_openai.OpenAI.return_value = mock_client
+        mock_openai.AsyncOpenAI.return_value = mock_client
 
         extractor = FactExtractor()
-        extractor.extract("test input")
+        await extractor.extract("test input")
 
         call_args = mock_client.chat.completions.create.call_args
         messages = call_args.kwargs.get("messages", call_args[1].get("messages", []))
@@ -371,7 +373,7 @@ class TestFactExtractorOpenAI:
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test", ENV_LLM_PROVIDER: "openai"})
     @patch("clara.extraction.extractor._openai")
-    def test_negation_facts_preserved(self, mock_openai):
+    async def test_negation_facts_preserved(self, mock_openai):
         negation_json = json.dumps([
             {
                 "subject": "user", "relation": "uses", "object": "Python",
@@ -382,13 +384,13 @@ class TestFactExtractorOpenAI:
         mock_client = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = negation_json
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[mock_choice]
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[mock_choice])
         )
-        mock_openai.OpenAI.return_value = mock_client
+        mock_openai.AsyncOpenAI.return_value = mock_client
 
         extractor = FactExtractor()
-        facts = extractor.extract("I no longer use Python for systems work")
+        facts = await extractor.extract("I no longer use Python for systems work")
 
         assert len(facts) == 1
         assert facts[0].is_negation is True
@@ -407,17 +409,17 @@ class TestFactExtractorAnthropic:
         ENV_LLM_PROVIDER: "anthropic",
     })
     @patch("clara.extraction.extractor._anthropic")
-    def test_extract_returns_facts(self, mock_anthropic):
+    async def test_extract_returns_facts(self, mock_anthropic):
         mock_client = MagicMock()
         mock_block = MagicMock()
         mock_block.text = SAMPLE_FACTS_JSON
-        mock_client.messages.create.return_value = MagicMock(
-            content=[mock_block]
+        mock_client.messages.create = AsyncMock(
+            return_value=MagicMock(content=[mock_block])
         )
-        mock_anthropic.Anthropic.return_value = mock_client
+        mock_anthropic.AsyncAnthropic.return_value = mock_client
 
         extractor = FactExtractor()
-        facts = extractor.extract(SAMPLE_TEXT)
+        facts = await extractor.extract(SAMPLE_TEXT)
 
         assert len(facts) == 2
         mock_client.messages.create.assert_called_once()
@@ -427,17 +429,17 @@ class TestFactExtractorAnthropic:
         ENV_LLM_PROVIDER: "anthropic",
     })
     @patch("clara.extraction.extractor._anthropic")
-    def test_anthropic_system_prompt_passed(self, mock_anthropic):
+    async def test_anthropic_system_prompt_passed(self, mock_anthropic):
         mock_client = MagicMock()
         mock_block = MagicMock()
         mock_block.text = "[]"
-        mock_client.messages.create.return_value = MagicMock(
-            content=[mock_block]
+        mock_client.messages.create = AsyncMock(
+            return_value=MagicMock(content=[mock_block])
         )
-        mock_anthropic.Anthropic.return_value = mock_client
+        mock_anthropic.AsyncAnthropic.return_value = mock_client
 
         extractor = FactExtractor()
-        extractor.extract("hello")
+        await extractor.extract("hello")
 
         call_args = mock_client.messages.create.call_args
         assert call_args.kwargs.get("system") == SYSTEM_PROMPT
@@ -473,55 +475,55 @@ class TestProviderSelection:
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test"})
     @patch("clara.extraction.extractor._openai", None)
-    def test_missing_openai_package_raises_in_call(self):
+    async def test_missing_openai_package_raises_in_call(self):
         """Calling the internal _call_openai when the package is None raises."""
         from clara.extraction.extractor import _call_openai
         with pytest.raises(ImportError, match="openai"):
-            _call_openai("test", "gpt-4o-mini")
+            await _call_openai("test", "gpt-4o-mini")
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test"})
     @patch("clara.extraction.extractor._openai", None)
-    def test_missing_openai_package_extract_returns_empty(self):
+    async def test_missing_openai_package_extract_returns_empty(self):
         """extract() should catch ImportError and return [] gracefully."""
         extractor = FactExtractor(provider="openai")
-        assert extractor.extract("test text") == []
+        assert await extractor.extract("test text") == []
 
     @patch.dict(os.environ, {ENV_ANTHROPIC_KEY: "sk-ant-test"})
     @patch("clara.extraction.extractor._anthropic", None)
-    def test_missing_anthropic_package_raises_in_call(self):
+    async def test_missing_anthropic_package_raises_in_call(self):
         from clara.extraction.extractor import _call_anthropic
         with pytest.raises(ImportError, match="anthropic"):
-            _call_anthropic("test", "claude-3-5-haiku-20241022")
+            await _call_anthropic("test", "claude-3-5-haiku-20241022")
 
     @patch.dict(os.environ, {ENV_ANTHROPIC_KEY: "sk-ant-test"})
     @patch("clara.extraction.extractor._anthropic", None)
-    def test_missing_anthropic_package_extract_returns_empty(self):
+    async def test_missing_anthropic_package_extract_returns_empty(self):
         extractor = FactExtractor(provider="anthropic")
-        assert extractor.extract("test text") == []
+        assert await extractor.extract("test text") == []
 
     @patch.dict(os.environ, {}, clear=True)
     @patch("clara.extraction.extractor._openai", MagicMock())
-    def test_missing_openai_key_raises_in_call(self):
+    async def test_missing_openai_key_raises_in_call(self):
         from clara.extraction.extractor import _call_openai
         with pytest.raises(EnvironmentError, match="OPENAI_API_KEY"):
-            _call_openai("test", "gpt-4o-mini")
+            await _call_openai("test", "gpt-4o-mini")
 
     @patch.dict(os.environ, {}, clear=True)
     @patch("clara.extraction.extractor._openai", MagicMock())
-    def test_missing_openai_key_extract_returns_empty(self):
+    async def test_missing_openai_key_extract_returns_empty(self):
         extractor = FactExtractor(provider="openai")
-        assert extractor.extract("test text") == []
+        assert await extractor.extract("test text") == []
 
     @patch.dict(os.environ, {}, clear=True)
     @patch("clara.extraction.extractor._anthropic", MagicMock())
-    def test_missing_anthropic_key_raises_in_call(self):
+    async def test_missing_anthropic_key_raises_in_call(self):
         from clara.extraction.extractor import _call_anthropic
         with pytest.raises(EnvironmentError, match="ANTHROPIC_API_KEY"):
-            _call_anthropic("test", "claude-3-5-haiku-20241022")
+            await _call_anthropic("test", "claude-3-5-haiku-20241022")
 
     @patch.dict(os.environ, {}, clear=True)
     @patch("clara.extraction.extractor._anthropic", MagicMock())
-    def test_missing_anthropic_key_extract_returns_empty(self):
+    async def test_missing_anthropic_key_extract_returns_empty(self):
         extractor = FactExtractor(provider="anthropic")
-        assert extractor.extract("test text") == []
+        assert await extractor.extract("test text") == []
 

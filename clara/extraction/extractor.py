@@ -12,6 +12,8 @@ explanation.  The module enforces the CONTEXT.md extraction rules:
 * Negations are flagged explicitly via ``is_negation=True``.
 * Candidates with ``confidence < 0.4`` are discarded.
 * JSON parse failures are handled gracefully (empty list + logged error).
+
+All LLM calls are async to avoid blocking the event loop.
 """
 
 from __future__ import annotations
@@ -70,7 +72,7 @@ try:
 except ImportError:
     _ollama_lib: Any = None  # type: ignore[assignment]
 
-_OLLAMA_MODELS_READY: set[tuple[str, str]] = set()
+from clara.core.ollama import ensure_model as _ensure_ollama_model_shared
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +156,8 @@ If no facts can be extracted, return: {"facts": []}
 # LLM client wrappers
 # ---------------------------------------------------------------------------
 
-def _call_openai(text: str, model: str) -> str:
-    """Call OpenAI chat completion and return the raw response content."""
+async def _call_openai(text: str, model: str) -> str:
+    """Call OpenAI chat completion asynchronously and return the raw response content."""
     if _openai is None:
         raise ImportError(
             "The 'openai' package is required for the OpenAI LLM provider. "
@@ -167,12 +169,12 @@ def _call_openai(text: str, model: str) -> str:
             f"Environment variable {ENV_OPENAI_KEY!r} is not set."
         )
 
-    client = _openai.OpenAI(
+    client = _openai.AsyncOpenAI(
         api_key=api_key,
         timeout=LLM_TIMEOUT_SECONDS,
         max_retries=LLM_MAX_RETRIES,
     )
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -184,8 +186,8 @@ def _call_openai(text: str, model: str) -> str:
     return response.choices[0].message.content or "[]"
 
 
-def _call_anthropic(text: str, model: str) -> str:
-    """Call Anthropic messages API and return the raw response content."""
+async def _call_anthropic(text: str, model: str) -> str:
+    """Call Anthropic messages API asynchronously and return the raw response content."""
     if _anthropic is None:
         raise ImportError(
             "The 'anthropic' package is required for the Anthropic LLM provider. "
@@ -197,12 +199,12 @@ def _call_anthropic(text: str, model: str) -> str:
             f"Environment variable {ENV_ANTHROPIC_KEY!r} is not set."
         )
 
-    client = _anthropic.Anthropic(
+    client = _anthropic.AsyncAnthropic(
         api_key=api_key,
         timeout=LLM_TIMEOUT_SECONDS,
         max_retries=LLM_MAX_RETRIES,
     )
-    response = client.messages.create(
+    response = await client.messages.create(
         model=model,
         max_tokens=2048,
         system=SYSTEM_PROMPT,
@@ -214,29 +216,8 @@ def _call_anthropic(text: str, model: str) -> str:
 
 
 def _ensure_ollama_model(base_url: str, model: str) -> None:
-    if _ollama_lib is None:
-        raise ImportError(
-            "The 'ollama' package is required for the Ollama extraction provider. "
-            "Install it with: pip install 'clara-memory[ollama]'"
-        )
-
-    key = (base_url, model)
-    if key in _OLLAMA_MODELS_READY:
-        return
-
-    client = _ollama_lib.Client(host=base_url)
-    listing = client.list()
-    models = listing.get("models", []) if isinstance(listing, dict) else getattr(
-        listing, "models", []
-    )
-    names = {
-        str(item.get("name") or item.get("model") or "")
-        for item in models
-        if isinstance(item, dict)
-    }
-    if model not in names:
-        client.pull(model)
-    _OLLAMA_MODELS_READY.add(key)
+    """Ensure an Ollama model is available — delegates to shared module."""
+    _ensure_ollama_model_shared(base_url, model)
 
 
 def _call_ollama(text: str, model: str, base_url: str) -> str:
@@ -369,13 +350,15 @@ class FactExtractor:
     Usage::
 
         extractor = FactExtractor()
-        facts = extractor.extract("I switched from Python to Rust for systems work.")
+        facts = await extractor.extract("I switched from Python to Rust for systems work.")
         for f in facts:
             print(f.subject, f.relation, f.object, f.is_negation)
 
     The LLM provider is selected via:
     * ``CLARA_LLM_PROVIDER`` env var: ``"openai"`` (default) or ``"anthropic"``
     * ``CLARA_OPENAI_MODEL`` / ``CLARA_ANTHROPIC_MODEL`` override the model name.
+
+    All extraction calls are async to avoid blocking the event loop.
     """
 
     def __init__(
@@ -397,12 +380,10 @@ class FactExtractor:
             self._model = model or os.environ.get(
                 ENV_OPENAI_MODEL, DEFAULT_OPENAI_MODEL
             )
-            self._call_fn = _call_openai
         elif self._provider == "anthropic":
             self._model = model or os.environ.get(
                 ENV_ANTHROPIC_MODEL, DEFAULT_ANTHROPIC_MODEL
             )
-            self._call_fn = _call_anthropic
         elif self._provider == "ollama":
             if _ollama_lib is None:
                 raise ImportError(
@@ -412,19 +393,14 @@ class FactExtractor:
             self._model = model or os.environ.get(
                 ENV_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL
             )
-            self._call_fn = lambda text, selected_model: _call_ollama(
-                text,
-                selected_model,
-                self._ollama_base_url,
-            )
         else:
             raise ValueError(
                 f"Unknown LLM provider {self._provider!r}. "
                 f"Supported: 'openai', 'anthropic', 'ollama'."
             )
 
-    def extract(self, text: str) -> list[ExtractedFact]:
-        """Extract structured facts from *text*.
+    async def extract(self, text: str) -> list[ExtractedFact]:
+        """Extract structured facts from *text* asynchronously.
 
         Args:
             text: Raw natural-language input.
@@ -438,7 +414,19 @@ class FactExtractor:
             return []
 
         try:
-            raw_response = self._call_fn(text, self._model)
+            if self._provider == "openai":
+                raw_response = await _call_openai(text, self._model)
+            elif self._provider == "anthropic":
+                raw_response = await _call_anthropic(text, self._model)
+            elif self._provider == "ollama":
+                # Ollama client is synchronous — run in executor
+                import asyncio
+                loop = asyncio.get_running_loop()
+                raw_response = await loop.run_in_executor(
+                    None, _call_ollama, text, self._model, self._ollama_base_url,
+                )
+            else:
+                return []
         except Exception:
             logger.exception("LLM call failed for text: %r", text[:200])
             return []

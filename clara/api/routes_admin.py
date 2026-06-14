@@ -102,6 +102,8 @@ async def skills_leaderboard(
             select(Memory)
             .where(Memory.memory_type == MemoryType.skill)
             .where(Memory.status == MemoryStatus.active)
+            .order_by(Memory.confidence.desc())
+            .limit(limit * 10)
         )
     ).scalars().all()
 
@@ -129,6 +131,7 @@ async def skills_leaderboard(
 async def health(
     agent: ClaraMemory = Depends(get_agent),
     session: AsyncSession = Depends(get_session),
+    current_user: str | None = Depends(get_current_user),
 ) -> dict[str, object]:
     await session.execute(select(1))
     return {

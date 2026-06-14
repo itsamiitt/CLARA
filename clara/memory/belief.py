@@ -11,7 +11,6 @@ time decay, as described in CONTEXT.md §4 (Belief Memory → Confidence Scoring
 from __future__ import annotations
 
 import enum
-import inspect
 import math
 import uuid
 from datetime import datetime, timezone
@@ -258,15 +257,7 @@ class BeliefMemory:
             .limit(limit)
         )
         result = await self._session.execute(stmt)
-        scalars = result.scalars()
-        if inspect.isawaitable(scalars):
-            scalars = await scalars
-
-        rows = scalars.all()
-        if inspect.isawaitable(rows):
-            rows = await rows
-
-        return rows if isinstance(rows, list) else []
+        return list(result.scalars().all())
 
     # ------------------------------------------------------------------
     # update

@@ -49,7 +49,7 @@ class _FixedExtractor:
     def __init__(self, facts: list[ExtractedFact]) -> None:
         self._facts = facts
 
-    def extract(self, text: str) -> list[ExtractedFact]:
+    async def extract(self, text: str) -> list[ExtractedFact]:
         return list(self._facts)
 
 
@@ -97,6 +97,9 @@ async def agent_with_scheduler(tmp_path):
 
 
 async def _recall_objects(agent: ClaraMemory, query: str) -> set[str]:
+    # Search no longer flushes synchronously, so drain pending vector writes
+    # (e.g. decay/prune status changes) before asserting on recall results.
+    agent._lance_engine.flush_pending_sync()
     result = await agent.recall(query, top_k=10)
     return {sm.memory.content.get("object") for sm in result.all}
 

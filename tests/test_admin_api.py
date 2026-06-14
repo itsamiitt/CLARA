@@ -42,7 +42,7 @@ class _FakeBackend:
 
 
 class _EmptyExtractor:
-    def extract(self, text: str):
+    async def extract(self, text: str):
         return []
 
 
@@ -206,12 +206,12 @@ class TestAdminAuth:
                 transport=ASGITransport(app=app),
                 base_url="http://testserver",
             ) as http:
-                # Data route blocked without the header...
                 stats = await http.get("/admin/stats")
-                # ...but liveness probe stays open.
                 health = await http.get("/admin/health")
 
+        # All admin routes (including /admin/health) require the header when
+        # auth is enabled.
         assert stats.status_code == 401
-        assert health.status_code == 200
+        assert health.status_code == 401
 
         await agent.close()

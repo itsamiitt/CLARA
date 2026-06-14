@@ -44,7 +44,7 @@ try:
 except ImportError:
     _ollama_lib: Any = None  # type: ignore[assignment]
 
-_OLLAMA_MODELS_READY: set[tuple[str, str]] = set()
+from clara.core.ollama import ensure_model as _ensure_ollama_model
 
 DEFAULT_REFLECTION_WINDOW_DAYS = 7
 DEFAULT_MIN_OCCURRENCES = 3
@@ -346,21 +346,7 @@ class ReflectionEngine:
             )
 
         model = self._model_name()
-        key = (self._ollama_base_url, model)
-        if key not in _OLLAMA_MODELS_READY:
-            client = _ollama_lib.Client(host=self._ollama_base_url)
-            listing = client.list()
-            models = listing.get("models", []) if isinstance(listing, dict) else getattr(
-                listing, "models", []
-            )
-            names = {
-                str(item.get("name") or item.get("model") or "")
-                for item in models
-                if isinstance(item, dict)
-            }
-            if model not in names:
-                client.pull(model)
-            _OLLAMA_MODELS_READY.add(key)
+        _ensure_ollama_model(self._ollama_base_url, model)
 
         client = _ollama_lib.Client(host=self._ollama_base_url)
         response = client.chat(

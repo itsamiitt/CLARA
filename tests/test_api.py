@@ -43,7 +43,7 @@ class _FakeBackend:
 
 
 class _FakeExtractor:
-    def extract(self, text: str) -> list[ExtractedFact]:
+    async def extract(self, text: str) -> list[ExtractedFact]:
         text_lower = text.lower()
         facts: list[ExtractedFact] = []
         if "rust" in text_lower and "systems" in text_lower:
@@ -159,6 +159,7 @@ class TestMemoryRoutes:
     async def test_search_route(self, client):
         http, agent = client
         await agent.remember("I use Rust for systems work.", user_id="alice")
+        agent._lance_engine.flush_pending_sync()  # search no longer flushes itself
 
         response = await http.get("/memory/search", params={
             "q": "What language for systems?",
@@ -205,6 +206,7 @@ class TestMemoryRoutes:
         http, agent = client
         await agent.remember("I use Rust for systems work.", user_id="alice")
         await agent.remember("I use Rust for systems work.", user_id="bob")
+        agent._lance_engine.flush_pending_sync()  # search no longer flushes itself
 
         response = await http.get(
             "/memory/search",

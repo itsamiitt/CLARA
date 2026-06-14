@@ -93,7 +93,7 @@ class _SemanticFakeBackend:
 
 
 class _StressExtractor:
-    def extract(self, text: str) -> list[ExtractedFact]:
+    async def extract(self, text: str) -> list[ExtractedFact]:
         cleaned = text.strip().lower()
         match = NEGATED_USE_RE.match(cleaned)
         if match:

@@ -106,7 +106,7 @@ class _SemanticConversationBackend:
 
 
 class _RealisticConversationExtractor:
-    def extract(self, text: str) -> list[ExtractedFact]:
+    async def extract(self, text: str) -> list[ExtractedFact]:
         facts: list[ExtractedFact] = []
         for sentence in self._sentences(text):
             match = NEGATED_USE_RE.match(sentence)

@@ -25,17 +25,12 @@ class _FakeBackend:
 
 @pytest.fixture(autouse=True)
 def _reset_ollama_state():
-    from clara.extraction import extractor as extractor_module
-    from clara.reasoning import engine as reasoning_module
-    from clara.reflection import pipeline as reflection_module
+    # The per-module ready-sets were consolidated into clara.core.ollama.
+    from clara.core import ollama as ollama_module
 
-    extractor_module._OLLAMA_MODELS_READY.clear()
-    reasoning_module._OLLAMA_MODELS_READY.clear()
-    reflection_module._OLLAMA_MODELS_READY.clear()
+    ollama_module._models_ready.clear()
     yield
-    extractor_module._OLLAMA_MODELS_READY.clear()
-    reasoning_module._OLLAMA_MODELS_READY.clear()
-    reflection_module._OLLAMA_MODELS_READY.clear()
+    ollama_module._models_ready.clear()
 
 
 class TestOllamaEmbeddingBackend:
@@ -73,7 +68,7 @@ class TestOllamaExtractor:
             with pytest.raises(ImportError, match="ollama"):
                 FactExtractor(provider="ollama")
 
-    def test_extractor_calls_ollama_with_json_format(self):
+    async def test_extractor_calls_ollama_with_json_format(self):
         mock_client = MagicMock()
         mock_client.list.return_value = {"models": [{"model": "llama3.2"}]}
         mock_client.chat.return_value = MagicMock(
@@ -87,10 +82,11 @@ class TestOllamaExtractor:
             )
         )
 
-        with patch("clara.extraction.extractor._ollama_lib") as mock_lib:
+        with patch("clara.extraction.extractor._ollama_lib") as mock_lib, \
+                patch("clara.core.ollama._ollama_lib", mock_lib):
             mock_lib.Client.return_value = mock_client
             extractor = FactExtractor(provider="ollama", model="llama3.2")
-            facts = extractor.extract("I use Python for data work.")
+            facts = await extractor.extract("I use Python for data work.")
 
         call_kwargs = mock_client.chat.call_args.kwargs
         assert call_kwargs["format"] == "json"
@@ -136,7 +132,8 @@ class TestOllamaReasoningEngine:
             message=MagicMock(content="Response using Ollama.")
         )
 
-        with patch("clara.reasoning.engine._ollama_lib") as mock_lib:
+        with patch("clara.reasoning.engine._ollama_lib") as mock_lib, \
+                patch("clara.core.ollama._ollama_lib", mock_lib):
             mock_lib.Client.return_value = mock_client
             response = engine._call_ollama("system prompt", "hello")
 

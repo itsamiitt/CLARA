@@ -47,7 +47,7 @@ class _SeqExtractor:
     def __init__(self) -> None:
         self._n = 0
 
-    def extract(self, text: str) -> list[ExtractedFact]:
+    async def extract(self, text: str) -> list[ExtractedFact]:
         self._n += 1
         return [
             ExtractedFact(
@@ -89,6 +89,9 @@ class TestRetrievalConcurrency:
     async def test_many_concurrent_recalls(self, agent):
         for _ in range(20):
             await agent.remember("seed")
+        # Search no longer flushes synchronously; drain pending writes so every
+        # concurrent recall sees the seeded memories.
+        agent._lance_engine.flush_pending_sync()
 
         results = await asyncio.gather(
             *[agent.recall("topic preference", top_k=5) for _ in range(40)]

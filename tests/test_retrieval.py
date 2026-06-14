@@ -542,7 +542,9 @@ class TestLanceRetrievalEngine:
         assert [memory_id for memory_id, _similarity in pairs] == ["abc", "def"]
         assert pairs[0][1] == pytest.approx(0.9)
         assert pairs[1][1] == pytest.approx(0.6)
-        lance.flush_pending_sync.assert_called_once_with()
+        # Search no longer flushes synchronously: the background worker persists
+        # pending writes asynchronously, so recall() isn't blocked on a flush.
+        lance.flush_pending_sync.assert_not_called()
         assert table.search_calls == [[0.1, 0.2]]
         assert table.query.metric_name == "cosine"
         assert table.query.prefilter is True

@@ -133,7 +133,7 @@ def fake_extractor():
     """Return a FactExtractor mock that extracts canned facts."""
     extractor = MagicMock()
 
-    def _extract(text: str) -> list[ExtractedFact]:
+    async def _extract(text: str) -> list[ExtractedFact]:
         """Simple rule-based extraction for testing."""
         facts = []
         text_lower = text.lower()

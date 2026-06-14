@@ -19,7 +19,7 @@ from clara.extraction.extractor import (
 from clara.memory.belief import BeliefMemory, SourceType
 from clara.reasoning import ContextAssembler, ReasoningEngine
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
-from clara.retrieval.engine import RetrievalResult, ScoredMemory
+from clara.retrieval.engine import LanceRetrievalEngine, RetrievalResult, ScoredMemory
 
 
 FAKE_DIM = 8
@@ -41,7 +41,7 @@ class _FakeBackend:
 
 
 class _ResponseExtractor:
-    def extract(self, text: str) -> list[ExtractedFact]:
+    async def extract(self, text: str) -> list[ExtractedFact]:
         if "Rust" not in text:
             return []
         return [
@@ -138,6 +138,9 @@ class TestReasoningEngine:
             ),
         )
         await session.commit()
+        # Search no longer flushes synchronously; drain the pending vector write
+        # so the just-stored belief is searchable during respond().
+        LanceRetrievalEngine.get_default().flush_pending_sync()
 
         async def _respond(system_prompt: str, query: str, model: str) -> str:
             return "The user uses Rust for systems work."
