@@ -64,6 +64,9 @@ ollama = [
 mcp = [
     "mcp>=1.2",
 ]
+cli = [
+    "mcp>=1.2",
+]
 dev = [
     "pytest>=8.0,<10.0",
     "pytest-asyncio>=0.23,<1.0",
@@ -77,6 +80,7 @@ all = [
 ]
 
 [project.scripts]
+clara = "clara.cli:main"
 clara-mcp = "clara.integrations.mcp_server:main"
 
 [project.urls]

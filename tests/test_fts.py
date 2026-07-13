@@ -54,6 +54,16 @@ class TestFtsSearch:
         result = await memory.search("deploying payments")
         assert result["total"] == 1
 
+    async def test_prefix_match(self, memory: LocalMemory):
+        """Prefix recall parity with the old ILIKE scan:
+        query 'postgres' must find 'PostgreSQL'."""
+        await memory.save(
+            mem_type="belief", subject="user", relation="uses",
+            object="PostgreSQL",
+        )
+        result = await memory.search("postgres")
+        assert result["total"] == 1
+
     async def test_bm25_prefers_more_matching_terms(self, memory: LocalMemory):
         await memory.save(
             mem_type="belief", subject="user", relation="uses", object="Rust",
@@ -88,5 +98,5 @@ class TestFtsSearch:
 
 
 class TestMatchExpression:
-    def test_tokens_are_quoted(self):
-        assert build_match_expression(["rust", "http2"]) == '"rust" OR "http2"'
+    def test_tokens_are_quoted_prefix_queries(self):
+        assert build_match_expression(["rust", "http2"]) == '"rust"* OR "http2"*'

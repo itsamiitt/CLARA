@@ -105,7 +105,10 @@ def build_match_expression(tokens: list[str]) -> str:
 
     Tokens come from :func:`clara.retrieval.lexical.tokenize` (``[a-z0-9]+``
     only), and are additionally quoted so nothing can be interpreted as FTS5
-    query syntax. Terms are OR-ed: BM25 ranks rows matching more/rarer terms
-    higher without requiring every term to be present.
+    query syntax. Each term is a prefix query (``"postgres"*`` matches
+    "postgresql") — the ILIKE scan this replaces did substring matching, and
+    losing "postgres" → "PostgreSQL" recall would be a regression. Terms are
+    OR-ed: BM25 ranks rows matching more/rarer terms higher without
+    requiring every term to be present.
     """
-    return " OR ".join(f'"{token}"' for token in tokens)
+    return " OR ".join(f'"{token}"*' for token in tokens)

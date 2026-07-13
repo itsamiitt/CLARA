@@ -49,6 +49,7 @@ from clara.extraction.extractor import (
     ExtractedFact,
     FactExtractor,
 )
+from clara.extraction.heuristic import HeuristicExtractor
 from clara.interaction import InteractionLayer
 from clara.memory.belief import BeliefMemory
 from clara.reasoning.engine import ReasoningEngine
@@ -75,6 +76,16 @@ from clara.update.engine import MemoryUpdateEngine
 logger = logging.getLogger(__name__)
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+
+_heuristic_fallback: HeuristicExtractor | None = None
+
+
+def _fallback_extractor() -> HeuristicExtractor:
+    """Shared rule-based extractor used when the LLM provider is down."""
+    global _heuristic_fallback
+    if _heuristic_fallback is None:
+        _heuristic_fallback = HeuristicExtractor()
+    return _heuristic_fallback
 
 
 def _is_in_memory_sqlite(db_url: str) -> bool:
@@ -336,11 +347,16 @@ class ClaraMemory:
         embedding_engine = EmbeddingEngine(backend)
 
         # --- Extraction ---
-        extractor = FactExtractor(
-            provider=llm_provider,
-            model=resolved_ollama_llm_model if llm_provider == "ollama" else None,
-            ollama_base_url=resolved_ollama_base_url,
-        )
+        if llm_provider == "none":
+            # Zero-LLM tier: deterministic rule-based extraction. interact()
+            # degrades to memory-only mode (no reply generation).
+            extractor: FactExtractor | HeuristicExtractor = HeuristicExtractor()
+        else:
+            extractor = FactExtractor(
+                provider=llm_provider,
+                model=resolved_ollama_llm_model if llm_provider == "ollama" else None,
+                ollama_base_url=resolved_ollama_base_url,
+            )
         cache = MemoryCache(cache_url) if cache_url else None
         session_factory = async_sessionmaker(
             engine,
@@ -415,8 +431,18 @@ class ClaraMemory:
         interaction = self._interaction_layer.receive(text, user_id=user_id)
 
         facts = await self._extractor.extract(interaction.raw_text)
+        degraded = False
+        if not facts and getattr(facts, "status", "ok") in (
+            "llm_unavailable", "llm_error",
+        ):
+            # The provider is down/misconfigured — fall back to rule-based
+            # extraction so memory keeps working (degraded, and said so).
+            facts = await _fallback_extractor().extract(interaction.raw_text)
+            degraded = True
         if not facts:
             status = getattr(facts, "status", "ok")
+            if degraded:
+                status = "llm_unavailable"
             if status not in ("ok", "empty"):
                 # The extraction *pipeline* failed (missing API key, provider
                 # down, unparseable LLM output). This used to be silently
@@ -476,14 +502,17 @@ class ClaraMemory:
                         fact,
                         user_id=interaction.user_id,
                     )
-                    results.append({
+                    entry = {
                         "action": outcome.action_taken.value,
                         "memory_id": str(outcome.memory_id) if outcome.memory_id else None,
                         "conflict": outcome.conflict_detected,
                         "superseded_id": (
                             str(outcome.superseded_id) if outcome.superseded_id else None
                         ),
-                    })
+                    }
+                    if degraded:
+                        entry["status"] = "degraded_heuristic"
+                    results.append(entry)
 
         logger.info("Remembered %d fact(s) from text (%d chars)", len(results), len(text))
         return results
@@ -552,8 +581,32 @@ class ClaraMemory:
         system_prompt: str | None = None,
         top_k: int = 8,
     ) -> dict[str, Any]:
-        """Run the full reasoning loop over memory context and return a response."""
+        """Run the full reasoning loop over memory context and return a response.
+
+        With ``llm_provider="none"`` (the zero-LLM tier) CLARA does not
+        generate a reply — the host agent's own model is the generator.
+        interact() then degrades to memory-only mode: it returns the memory
+        context plus whatever facts the rule-based extractor stored from the
+        *user's* message, with ``"response": None`` and
+        ``"status": "memory_only"``.
+        """
         interaction = self._interaction_layer.receive(message, user_id=user_id)
+
+        if self._llm_provider == "none":
+            context = await self.context_for(
+                interaction.raw_text, top_k=top_k, user_id=interaction.user_id,
+            )
+            stored = await self.remember(
+                interaction.raw_text, user_id=interaction.user_id,
+            )
+            return {
+                "response": None,
+                "status": "memory_only",
+                "memory_context": context,
+                "facts_considered": len(stored),
+                "facts_stored": stored,
+                "memories_used": [],
+            }
 
         async with self._session_factory() as session:
             self._bind_session_context(session)
