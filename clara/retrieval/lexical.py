@@ -14,13 +14,16 @@ SQLite source of truth.
 from __future__ import annotations
 
 import logging
+import math
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
-from sqlalchemy import String, and_, cast, or_, select
+from sqlalchemy import String, and_, cast, or_, select, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clara.db.fts import FTS_TABLE, build_match_expression
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.retrieval.engine import (
     RetrievalEngine,
@@ -34,7 +37,7 @@ from clara.retrieval.engine import (
 logger = logging.getLogger(__name__)
 
 # Default ceiling on how many active rows we pull before re-ranking in Python.
-# Fine at personal scale; a FTS5 index is the upgrade path past this.
+# Used by the ILIKE fallback; the FTS5 path is index-ranked and needs no cap.
 DEFAULT_CANDIDATE_LIMIT = 1000
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -99,6 +102,7 @@ class LexicalRetriever:
     ) -> None:
         self._session = session
         self._candidate_limit = candidate_limit
+        self._fts_available: bool | None = None
 
     async def search(
         self,
@@ -108,35 +112,58 @@ class LexicalRetriever:
         memory_types: Sequence[MemoryType] | None = None,
         user_id: str | None = None,
     ) -> RetrievalResult:
-        """Return ranked, grouped memories matching *query* by keyword overlap.
+        """Return ranked, grouped memories matching *query* lexically.
 
-        An empty/blank query falls back to a recency + confidence ranking, which
-        makes this usable as a "most relevant recent memories" feed.
+        Uses the porter-stemmed FTS5/BM25 index when present (see
+        :mod:`clara.db.fts`), degrading to the token-overlap ILIKE scan when
+        it is not. An empty/blank query falls back to a recency + confidence
+        ranking, which makes this usable as a "most relevant recent
+        memories" feed.
         """
         if memory_types is not None and len(memory_types) == 0:
             return RetrievalResult()
 
         query_tokens = tokenize(query or "")
-        candidates = await self._fetch_candidates(
-            query_tokens,
-            memory_types=memory_types,
-            user_id=user_id,
-        )
-        if not candidates:
+
+        weighted: list[tuple[Memory, float]] | None = None
+        if query_tokens and await self._has_fts():
+            try:
+                weighted = await self._fetch_fts_candidates(
+                    query_tokens,
+                    limit=max(top_k * 4, 32),
+                    memory_types=memory_types,
+                    user_id=user_id,
+                )
+            except Exception:  # noqa: BLE001 — degrade to the scan path
+                logger.exception("FTS5 search failed; falling back to scan")
+                self._fts_available = False
+                weighted = None
+
+        if weighted is None:
+            candidates = await self._fetch_candidates(
+                query_tokens,
+                memory_types=memory_types,
+                user_id=user_id,
+            )
+            weighted = [
+                (memory, self._similarity(query_tokens, memory))
+                for memory in candidates
+            ]
+            # When the user typed real terms, drop rows that match nothing.
+            if query_tokens:
+                weighted = [(m, sim) for m, sim in weighted if sim > 0.0]
+
+        if not weighted:
             return RetrievalResult()
 
         now = datetime.now(timezone.utc)
         max_access = max(
-            (RetrievalEngine._get_access_count(m) for m in candidates),
+            (RetrievalEngine._get_access_count(m) for m, _ in weighted),
             default=0,
         )
 
         scored: list[ScoredMemory] = []
-        for memory in candidates:
-            similarity = self._similarity(query_tokens, memory)
-            # When the user typed real terms, drop rows that match nothing.
-            if query_tokens and similarity <= 0.0:
-                continue
+        for memory, similarity in weighted:
             access = RetrievalEngine._get_access_count(memory)
             recency = compute_recency_score(memory.updated_at, now)
             usage = compute_usage_frequency(access, max_access)
@@ -160,6 +187,98 @@ class LexicalRetriever:
         scored.sort(key=lambda item: item.score, reverse=True)
         scored = scored[:top_k]
         return RetrievalEngine._group_scored(scored)
+
+    async def _has_fts(self) -> bool:
+        """Probe (once per retriever) whether the FTS5 index exists."""
+        if self._fts_available is not None:
+            return self._fts_available
+        bind = self._session.get_bind()
+        if bind is None or bind.dialect.name != "sqlite":
+            self._fts_available = False
+            return False
+        try:
+            result = await self._session.execute(
+                sa_text(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :n"
+                ),
+                {"n": FTS_TABLE},
+            )
+            self._fts_available = result.first() is not None
+        except Exception:  # noqa: BLE001
+            self._fts_available = False
+        return self._fts_available
+
+    async def _fetch_fts_candidates(
+        self,
+        query_tokens: Sequence[str],
+        *,
+        limit: int,
+        memory_types: Sequence[MemoryType] | None,
+        user_id: str | None,
+    ) -> list[tuple[Memory, float]]:
+        """BM25-ranked candidates from the FTS5 index, hydrated from SQLite.
+
+        BM25 rank (lower = better, typically negative) is mapped to a (0, 1)
+        similarity with a sigmoid — the same normalization trick Mem0 uses —
+        so it slots into the shared composite score's 0.65 similarity term.
+        """
+        match_expr = build_match_expression(list(dict.fromkeys(query_tokens)))
+        clauses = [f"{FTS_TABLE} MATCH :match", "status = 'active'"]
+        params: dict[str, Any] = {"match": match_expr, "limit": limit}
+        if user_id is not None:
+            clauses.append("user_id = :user_id")
+            params["user_id"] = user_id
+        if memory_types:
+            names = sorted({mt.value for mt in memory_types})
+            placeholders = ", ".join(f":mt{i}" for i in range(len(names)))
+            clauses.append(f"memory_type IN ({placeholders})")
+            params.update({f"mt{i}": name for i, name in enumerate(names)})
+
+        rows = (
+            await self._session.execute(
+                sa_text(
+                    f"SELECT memory_id, bm25({FTS_TABLE}) AS rank "
+                    f"FROM {FTS_TABLE} WHERE {' AND '.join(clauses)} "
+                    f"ORDER BY rank LIMIT :limit"
+                ),
+                params,
+            )
+        ).all()
+        if not rows:
+            return []
+
+        similarity_by_id: dict[str, float] = {}
+        ordered_ids: list[uuid.UUID] = []
+        for memory_id, rank in rows:
+            try:
+                parsed = uuid.UUID(str(memory_id))
+            except (TypeError, ValueError):
+                continue
+            clamped = max(-50.0, min(50.0, float(rank if rank is not None else 0.0)))
+            similarity_by_id[str(parsed)] = 1.0 / (1.0 + math.exp(clamped))
+            ordered_ids.append(parsed)
+
+        if not ordered_ids:
+            return []
+
+        # Hydrate from the memories table — the source of truth — re-checking
+        # status/tenant/type in case the FTS row is momentarily stale.
+        filters: list[Any] = [
+            Memory.memory_id.in_(ordered_ids),
+            Memory.status == MemoryStatus.active,
+        ]
+        if user_id is not None:
+            filters.append(Memory.user_id == user_id)
+        if memory_types:
+            filters.append(Memory.memory_type.in_(list(memory_types)))
+        result = await self._session.execute(select(Memory).where(and_(*filters)))
+        by_id = {str(m.memory_id): m for m in result.scalars().all()}
+
+        return [
+            (by_id[key], similarity_by_id[key])
+            for key in (str(mid) for mid in ordered_ids)
+            if key in by_id
+        ]
 
     @staticmethod
     def _similarity(query_tokens: Sequence[str], memory: Memory) -> float:

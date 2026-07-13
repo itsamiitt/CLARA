@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool, StaticPool
 
 from clara.core.text import sanitize_memory_text as _s
+from clara.db.fts import ensure_fts
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import (
     DEFAULT_OLLAMA_BASE_URL,
@@ -300,6 +301,7 @@ class ClaraMemory:
         engine = _make_engine(db_url)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await ensure_fts(engine)
         resolved_lance_path = lance_path
         if lance_path == DEFAULT_LANCE_PATH:
             resolved_lance_path = os.environ.get("CLARA_LANCE_PATH", lance_path)

@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from clara.agent import _make_engine, format_context
+from clara.db.fts import ensure_fts
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.memory.belief import BeliefMemory, SourceType
 from clara.memory.event import EventStore
@@ -96,6 +97,7 @@ class LocalMemory:
         engine = _make_engine(db_url)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await ensure_fts(engine)
 
         # The info dict is shared by every session this factory makes, so the
         # LanceDB commit listeners short-circuit and never touch a vector store.
