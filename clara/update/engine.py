@@ -254,12 +254,15 @@ class MemoryUpdateEngine:
         embedding_engine: EmbeddingEngine,
         retrieval_engine: RetrievalEngine,
         cache: MemoryCache | None = None,
+        *,
+        similarity_threshold: float = SIMILARITY_THRESHOLD,
     ) -> None:
         self._session = session
         self._embedder = embedding_engine
         self._retriever = retrieval_engine
         self._belief_memory = BeliefMemory(session)
         self._cache = cache
+        self._similarity_threshold = similarity_threshold
 
     # ------------------------------------------------------------------
     # process — main entry point
@@ -303,7 +306,7 @@ class MemoryUpdateEngine:
         typed_candidates = [
             c for c in candidates
             if c.memory.memory_type == memory_type
-            and c.similarity >= SIMILARITY_THRESHOLD
+            and c.similarity >= self._similarity_threshold
         ]
 
         # [4] Conflict detection

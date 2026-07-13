@@ -176,6 +176,8 @@ class ClaraMemory:
         interaction_layer: InteractionLayer | None = None,
         cache: MemoryCache | None = None,
         background_writer: BackgroundWriter | None = None,
+        similarity_threshold: float | None = None,
+        retrieval_top_k: int | None = None,
     ) -> None:
         self._engine = engine
         self._session_factory = session_factory
@@ -188,6 +190,8 @@ class ClaraMemory:
         self._llm_model = getattr(extractor, "_model", None)
         self._cache = cache
         self._background_writer = background_writer
+        self._similarity_threshold = similarity_threshold
+        self._default_top_k = retrieval_top_k or 8
 
     @classmethod
     async def create(
@@ -202,14 +206,25 @@ class ClaraMemory:
         lance_path: str = "./clara_vectors",
         start_scheduler: bool = True,
         cache_url: str | None = None,
+        similarity_threshold: float | None = None,
+        retrieval_top_k: int | None = None,
+        archival_threshold: float | None = None,
+        event_stale_days: int | None = None,
+        skill_unused_days: int | None = None,
     ) -> ClaraMemory:
         """Async factory — creates the engine, tables, and all subsystems.
 
         Args:
             db_url: SQLAlchemy async DB URL.
             embedding_backend: ``"openai"``, ``"local"``, or ``"ollama"``.
-            llm_provider: ``"openai"``, ``"anthropic"``, or ``"ollama"``.
+            llm_provider: ``"openai"``, ``"anthropic"``, ``"ollama"``, or
+                ``"none"`` (rule-based extraction, memory-only interact()).
             start_scheduler: Whether to start the decay scheduler.
+            similarity_threshold: Conflict/reinforce similarity gate
+                (default 0.82).
+            retrieval_top_k: Default ``top_k`` for recall()/context_for().
+            archival_threshold / event_stale_days / skill_unused_days:
+                Decay-scheduler tuning (defaults 0.15 / 90 / 60).
 
         Returns:
             A fully-initialised :class:`ClaraMemory` instance.
@@ -277,11 +292,19 @@ class ClaraMemory:
         # --- Decay Scheduler ---
         decay_scheduler: DecayScheduler | None = None
         if start_scheduler:
+            scheduler_kwargs: dict[str, Any] = {}
+            if archival_threshold is not None:
+                scheduler_kwargs["archival_threshold"] = archival_threshold
+            if event_stale_days is not None:
+                scheduler_kwargs["event_stale_days"] = event_stale_days
+            if skill_unused_days is not None:
+                scheduler_kwargs["skill_unused_days"] = skill_unused_days
             decay_scheduler = DecayScheduler(
                 session_factory,
                 embedding_engine=embedding_engine,
                 llm_provider=llm_provider,
                 llm_model=getattr(extractor, "_model", None),
+                **scheduler_kwargs,
             )
             decay_scheduler.start()
 
@@ -300,6 +323,8 @@ class ClaraMemory:
                 cache=cache,
                 lance_engine=lance_engine,
             ),
+            similarity_threshold=similarity_threshold,
+            retrieval_top_k=retrieval_top_k,
         )
         logger.info(
             "ClaraMemory initialised (db=%s, embeddings=%s, llm=%s, scheduler=%s)",
@@ -391,6 +416,9 @@ class ClaraMemory:
         async with self._session_factory() as session:
             self._bind_session_context(session)
             async with session.begin():
+                update_kwargs: dict[str, Any] = {}
+                if self._similarity_threshold is not None:
+                    update_kwargs["similarity_threshold"] = self._similarity_threshold
                 update_engine = MemoryUpdateEngine(
                     session,
                     self._embedding_engine,
@@ -401,6 +429,7 @@ class ClaraMemory:
                         lance_engine=self._lance_engine,
                     ),
                     cache=self._cache,
+                    **update_kwargs,
                 )
 
                 for fact in facts:
@@ -426,7 +455,7 @@ class ClaraMemory:
     async def recall(
         self,
         query: str,
-        top_k: int = 8,
+        top_k: int | None = None,
         *,
         user_id: str | None = None,
     ) -> RetrievalResult:
@@ -434,11 +463,13 @@ class ClaraMemory:
 
         Args:
             query: Natural language query.
-            top_k: Maximum number of results.
+            top_k: Maximum number of results (default: the agent's
+                ``retrieval_top_k``, normally 8).
 
         Returns:
             A :class:`RetrievalResult` grouped by memory type.
         """
+        top_k = top_k or self._default_top_k
         async with self._session_factory() as session:
             self._bind_session_context(session)
             retriever = RetrievalEngine(
@@ -461,7 +492,7 @@ class ClaraMemory:
         self,
         query: str,
         *,
-        top_k: int = 8,
+        top_k: int | None = None,
         user_id: str | None = None,
     ) -> str:
         """Build a formatted context string for LLM injection.

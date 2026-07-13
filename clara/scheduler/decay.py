@@ -141,12 +141,19 @@ class DecayScheduler:
         llm_provider: str | None = None,
         llm_model: str | None = None,
         reflection_generator=None,
+        *,
+        archival_threshold: float = ARCHIVAL_THRESHOLD,
+        event_stale_days: int = EVENT_STALE_DAYS,
+        skill_unused_days: int = SKILL_UNUSED_DAYS,
     ) -> None:
         self._session_factory = session_factory
         self._embedding_engine = embedding_engine
         self._llm_provider = llm_provider
         self._llm_model = llm_model
         self._reflection_generator = reflection_generator
+        self._archival_threshold = archival_threshold
+        self._event_stale_days = event_stale_days
+        self._skill_unused_days = skill_unused_days
         self._scheduler = AsyncIOScheduler(timezone="UTC")
 
     # ------------------------------------------------------------------
@@ -227,7 +234,10 @@ class DecayScheduler:
                     meta["last_decay_at"] = now.isoformat()
                     record.metadata_ = meta
 
-                    if should_archive(new_confidence) and record.memory_type != MemoryType.skill:
+                    if (
+                        new_confidence < self._archival_threshold
+                        and record.memory_type != MemoryType.skill
+                    ):
                         record.status = MemoryStatus.archived
                         record.confidence = new_confidence
                         record.updated_at = now
@@ -267,7 +277,7 @@ class DecayScheduler:
         async with self._session_factory() as session:
             async with session.begin():
                 # --- 1. Stale events ----------------------------------
-                event_cutoff = now - timedelta(days=EVENT_STALE_DAYS)
+                event_cutoff = now - timedelta(days=self._event_stale_days)
                 stmt = (
                     select(Memory)
                     .where(Memory.memory_type == MemoryType.event)
@@ -297,7 +307,7 @@ class DecayScheduler:
                 # become immortal. Real usage lives in ``metadata.last_used``
                 # (stamped by SkillStore.record_outcome), falling back to
                 # ``created_at`` for skills that were never exercised.
-                skill_cutoff = now - timedelta(days=SKILL_UNUSED_DAYS)
+                skill_cutoff = now - timedelta(days=self._skill_unused_days)
                 stmt = (
                     select(Memory)
                     .where(Memory.memory_type == MemoryType.skill)

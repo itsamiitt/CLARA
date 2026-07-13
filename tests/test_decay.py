@@ -284,6 +284,23 @@ class TestRunDailyDecay:
         assert summary["archived"] == 0
 
     @pytest.mark.asyncio
+    async def test_archival_threshold_is_configurable(self):
+        """Regression: CLARA_ARCHIVAL_THRESHOLD used to be parsed and then
+        ignored — the scheduler ctor param must actually gate archival."""
+        record = FakeMemory(
+            confidence=0.40,
+            decay_rate=0.001,
+            updated_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        factory = _make_session_factory([record])
+        scheduler = DecayScheduler(factory, archival_threshold=0.5)
+
+        summary = await scheduler.run_daily_decay()
+
+        assert record.status == MemoryStatus.archived
+        assert summary["archived"] == 1
+
+    @pytest.mark.asyncio
     async def test_archives_when_below_threshold(self):
         """Record that decays below 0.15 should be archived."""
         long_ago = datetime.now(timezone.utc) - timedelta(days=200)

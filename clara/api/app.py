@@ -48,6 +48,11 @@ def create_app(
                 llm_provider=config.llm_provider,
                 start_scheduler=config.start_scheduler,
                 cache_url=config.cache_url,
+                similarity_threshold=config.similarity_threshold,
+                retrieval_top_k=config.retrieval_top_k,
+                archival_threshold=config.archival_threshold,
+                event_stale_days=config.event_stale_days,
+                skill_unused_days=config.skill_unused_days,
             )
         app.state.agent = managed_agent
         app.state.config = config
