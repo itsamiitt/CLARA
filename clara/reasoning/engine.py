@@ -10,7 +10,7 @@ import asyncio
 import inspect
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, Sequence, TypeAlias
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,6 +127,14 @@ class ReasoningEngine:
         if response_text.strip():
             facts = await self._extractor.extract(response_text)
             for fact in facts:
+                # These facts come from the assistant's own generated reply,
+                # not from the user. The extractor's default source_type is
+                # "user_direct" (trust weight 1.0), which would let a
+                # hallucinated claim supersede a genuine user-stated belief
+                # at the >0.6 confidence threshold. Downgrade to
+                # agent_inference (0.5) so model output can never outrank
+                # what the user actually said.
+                fact = replace(fact, source_type="agent_inference")
                 stored.append(await self._updater.process(fact, user_id=user_id))
 
         return ReasoningResponse(

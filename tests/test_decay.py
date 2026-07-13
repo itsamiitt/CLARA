@@ -115,12 +115,13 @@ def _make_session_factory(
                     matching.append(r)
 
             # --- weekly: unused skills ---
+            # Production selects ALL active skills and applies the
+            # last-used cutoff in Python (updated_at is unusable — the
+            # daily decay job resets it every night via onupdate).
             elif "'skill'" in where:
-                skill_cutoff = now - timedelta(days=skill_cutoff_days)
                 if (
                     r.memory_type == MemoryType.skill
                     and r.status == MemoryStatus.active
-                    and r.updated_at < skill_cutoff
                 ):
                     matching.append(r)
 
@@ -454,12 +455,16 @@ class TestRunWeeklyPruning:
 
     @pytest.mark.asyncio
     async def test_deprecates_unused_skills(self):
-        """Skills not updated in 60+ days → deprecated."""
-        old = datetime.now(timezone.utc) - timedelta(days=SKILL_UNUSED_DAYS + 5)
+        """Skills not *used* in 60+ days → deprecated (keyed on
+        metadata.last_used, not updated_at — the daily decay job bumps
+        updated_at every night via the ORM onupdate hook)."""
+        now = datetime.now(timezone.utc)
+        old = now - timedelta(days=SKILL_UNUSED_DAYS + 5)
         skill = FakeMemory(
             memory_type=MemoryType.skill,
             decay_rate=0.01,
-            updated_at=old,
+            updated_at=now,  # freshly touched by last night's decay pass
+            metadata_={"last_used": old.isoformat()},
         )
         factory = _make_session_factory([skill])
         scheduler = DecayScheduler(factory)
@@ -468,6 +473,26 @@ class TestRunWeeklyPruning:
 
         assert skill.status == MemoryStatus.deprecated
         assert summary["skills_deprecated"] == 1
+
+    @pytest.mark.asyncio
+    async def test_recently_used_skill_survives_pruning(self):
+        """Regression (immortal-skills inverse): a skill with a recent
+        metadata.last_used stays active regardless of created_at age."""
+        now = datetime.now(timezone.utc)
+        skill = FakeMemory(
+            memory_type=MemoryType.skill,
+            decay_rate=0.01,
+            created_at=now - timedelta(days=365),
+            updated_at=now - timedelta(days=365),
+            metadata_={"last_used": (now - timedelta(days=3)).isoformat()},
+        )
+        factory = _make_session_factory([skill])
+        scheduler = DecayScheduler(factory)
+
+        summary = await scheduler.run_weekly_pruning()
+
+        assert skill.status == MemoryStatus.active
+        assert summary["skills_deprecated"] == 0
 
     @pytest.mark.asyncio
     async def test_keeps_recently_used_skills(self):
@@ -548,6 +573,7 @@ class TestDecayLanceSync:
         skill = FakeMemory(
             memory_type=MemoryType.skill,
             decay_rate=0.01,
+            created_at=now - timedelta(days=90),  # never used since creation
             updated_at=now - timedelta(days=90),
         )
         factory = _make_session_factory([event, skill])
@@ -568,6 +594,7 @@ class TestDecayLanceSync:
             memory_type=MemoryType.skill,
             confidence=0.20,
             decay_rate=0.03,
+            created_at=old,  # never exercised since creation
             updated_at=old,
         )
         factory = _make_session_factory([skill])

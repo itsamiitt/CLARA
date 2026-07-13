@@ -414,6 +414,25 @@ class ClaraMemory:
 
         facts = await self._extractor.extract(interaction.raw_text)
         if not facts:
+            status = getattr(facts, "status", "ok")
+            if status not in ("ok", "empty"):
+                # The extraction *pipeline* failed (missing API key, provider
+                # down, unparseable LLM output). This used to be silently
+                # indistinguishable from "the text contained no facts",
+                # which meant a misconfigured install stored nothing forever
+                # while reporting success.
+                logger.error(
+                    "Extraction failed (%s): %s — nothing stored for %r",
+                    status, getattr(facts, "detail", None), text[:120],
+                )
+                return [{
+                    "action": "extraction_failed",
+                    "status": status,
+                    "detail": getattr(facts, "detail", None),
+                    "memory_id": None,
+                    "conflict": False,
+                    "superseded_id": None,
+                }]
             logger.debug("No facts extracted from text: %r", text[:120])
             return []
 

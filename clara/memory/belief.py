@@ -76,17 +76,24 @@ def compute_confidence(
 ) -> float:
     """Source-weighted Bayesian confidence update with exponential decay.
 
-    Implements the formula from CONTEXT.md §4:
-
         decay_factor    = e^(−decay_rate × days_since_last_seen)
-        confidence_new  = (prior × decay_factor + source_weight × observation_strength)
+        confidence_new  = (prior × prior_weight × decay_factor
+                           + source_weight × observation_strength)
                           / (prior_weight + 1)
+
+    The prior is scaled by ``prior_weight`` (the number of prior
+    observations) so the update is a proper weighted mean: confirming an
+    already-confident belief keeps confidence high instead of diluting it
+    toward zero as the observation count grows.
 
     Returns:
         The updated confidence, clamped to [0.0, 1.0].
     """
     decay_factor = math.exp(-decay_rate * days_since_last_seen)
-    numerator = prior_confidence * decay_factor + source_weight * observation_strength
+    numerator = (
+        prior_confidence * prior_weight * decay_factor
+        + source_weight * observation_strength
+    )
     denominator = prior_weight + 1.0
     return max(0.0, min(1.0, numerator / denominator))
 

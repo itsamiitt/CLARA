@@ -60,6 +60,17 @@ LANCE_SCHEMA = pa.schema([
 
 
 # ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+class LanceSearchError(RuntimeError):
+    """Raised when the LanceDB vector search itself fails (corrupt/locked
+    index, missing table) — as opposed to legitimately finding nothing.
+    ``RetrievalEngine.search`` catches this and degrades to lexical
+    retrieval instead of silently returning zero results."""
+
+
+# ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
@@ -197,7 +208,13 @@ class LanceRetrievalEngine:
 
     def close(self) -> None:
         thread = self._flush_thread
-        self.flush_pending_sync()
+        try:
+            self.flush_pending_sync()
+        except Exception:
+            # Shutdown must not raise; the failure is already logged and the
+            # records stay in _pending (lost with the process, but close()
+            # crashing would take the host session down with it).
+            logger.exception("Final LanceDB flush failed during close()")
         if thread is not None and thread.is_alive():
             thread.join(timeout=30)
         # LanceDB embedded connections do not currently expose a close() API.
@@ -255,7 +272,19 @@ class LanceRetrievalEngine:
             if not records:
                 with self._sync_lock:
                     return
-            self._sync_records_sync(records)
+            try:
+                self._sync_records_sync(records)
+            except Exception:
+                # Put the drained records back so a transient Lance failure
+                # (locked dir, disk hiccup) does not permanently orphan them:
+                # they used to be popped before syncing, which meant rows
+                # existed in SQLite but were invisible to vector recall
+                # forever, with no backfill path.
+                with self._pending_lock:
+                    for record in records:
+                        if record.memory_id:
+                            self._pending.setdefault(record.memory_id, record)
+                raise
 
     def _ensure_background_flush(self) -> None:
         with self._pending_lock:
@@ -269,11 +298,22 @@ class LanceRetrievalEngine:
             self._flush_thread.start()
 
     def _background_flush_worker(self) -> None:
+        failures = 0
         while True:
             try:
                 self.flush_pending_sync()
+                failures = 0
             except Exception:
-                logger.exception("Background LanceDB sync failed")
+                failures += 1
+                logger.exception(
+                    "Background LanceDB sync failed (attempt %d)", failures,
+                )
+                if failures >= 3:
+                    # Leave the records in _pending for the next enqueue (or
+                    # an explicit flush/close) to retry, instead of spinning.
+                    with self._pending_lock:
+                        self._flush_thread = None
+                    return
             with self._pending_lock:
                 if not self._pending:
                     self._flush_thread = None
@@ -354,9 +394,12 @@ class LanceRetrievalEngine:
                 .select(["memory_id", "_distance"])
                 .to_list()
             )
-        except Exception:
+        except Exception as exc:
+            # Do NOT return [] here — an empty result is indistinguishable
+            # from "no matches" and used to make recall() silently return
+            # nothing whenever the Lance dir was corrupt or locked.
             logger.exception("LanceDB ANN search failed")
-            return []
+            raise LanceSearchError(str(exc)) from exc
 
         pairs: list[tuple[str, float]] = []
         for row in rows:
@@ -471,17 +514,34 @@ class RetrievalEngine:
                         await self._increment_access_counts([sm.memory for sm in cached_result.all])
                     return cached_result
 
-        query_vector = normalize_embedding_dimensions(
-            self._embedder.embed(query),
-            target_dimensions=VECTOR_DIMENSIONS,
-        )
-        n_candidates = top_k * self._candidate_multiplier
-        candidates = await self._fetch_candidates(
-            query_vector,
-            n_candidates=n_candidates,
-            memory_types=memory_types,
-            user_id=user_id,
-        )
+        try:
+            # embed() is a synchronous provider call (HTTP round-trip or
+            # local torch inference) — keep it off the event loop.
+            loop = asyncio.get_running_loop()
+            raw_vector = await loop.run_in_executor(None, self._embedder.embed, query)
+            query_vector = normalize_embedding_dimensions(
+                raw_vector,
+                target_dimensions=VECTOR_DIMENSIONS,
+            )
+            n_candidates = top_k * self._candidate_multiplier
+            candidates = await self._fetch_candidates(
+                query_vector,
+                n_candidates=n_candidates,
+                memory_types=memory_types,
+                user_id=user_id,
+            )
+        except ValueError:
+            # Caller error (e.g. empty query) — not a degradation case.
+            raise
+        except Exception as exc:  # noqa: BLE001 — degrade, never dark
+            logger.warning(
+                "Vector retrieval unavailable (%s: %s) — falling back to "
+                "lexical search",
+                type(exc).__name__, exc,
+            )
+            return await self._lexical_fallback(
+                query, top_k=top_k, memory_types=memory_types, user_id=user_id,
+            )
 
         if not candidates:
             return RetrievalResult()
@@ -521,6 +581,30 @@ class RetrievalEngine:
         if self._cache is not None and cache_key is not None:
             await self._cache.set(user_id, cache_key, self._to_cached_hits(scored))
         return result
+
+    async def _lexical_fallback(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        memory_types: Sequence[MemoryType] | None,
+        user_id: str | None,
+    ) -> RetrievalResult:
+        """Degraded-mode retrieval when embeddings/LanceDB are unavailable.
+
+        Results are not cached: their scores come from keyword overlap, not
+        vector similarity, and must not poison the cache for the healthy path.
+        """
+        # Local import — lexical.py imports scoring helpers from this module.
+        from clara.retrieval.lexical import LexicalRetriever
+
+        retriever = LexicalRetriever(self._session)
+        return await retriever.search(
+            query,
+            top_k=top_k,
+            memory_types=memory_types,
+            user_id=user_id,
+        )
 
     async def record_accesses(self, memory_ids: Sequence[Any]) -> None:
         """Fetch memories by ID and bump their access metadata."""

@@ -101,6 +101,20 @@ _WORLD_MODEL_RELATIONS: frozenset[str] = frozenset({
     "runs_on", "depends_on", "configured_with",
 })
 
+# Relations whose object names what the subject *is* — these map onto the
+# world-model store's entity_type field directly.
+_IDENTITY_RELATIONS: frozenset[str] = frozenset({
+    "is", "is_a", "type_of", "instance_of",
+})
+
+# Per-type decay rates, matching the dedicated stores
+# (EventStore: 0.0, SkillStore: 0.02, WorldModelStore: 0.005).
+_DECAY_RATE_BY_TYPE: dict[MemoryType, float] = {
+    MemoryType.event: 0.0,
+    MemoryType.skill: 0.02,
+    MemoryType.world_model: 0.005,
+}
+
 
 def _normalize_relation(relation: str) -> str:
     """Canonicalise a relation for keyword matching."""
@@ -265,11 +279,19 @@ class MemoryUpdateEngine:
         Returns:
             An :class:`UpdateResult` describing the action taken.
         """
-        # [1] Similarity search
-        # [2] Classify memory type
+        # [1] Classify memory type
         memory_type = classify_memory_type(fact)
 
-        # [1] Similarity search
+        # Events are an append-only timeline: two similar events are two
+        # occurrences, never a conflict or a reinforcement. Routing them
+        # through conflict resolution used to mark older events superseded
+        # and silently rewrite get_timeline() history.
+        if memory_type == MemoryType.event:
+            result = await self._create_new(fact, memory_type, user_id=user_id)
+            await self._invalidate_cache(user_id)
+            return result
+
+        # [2] Similarity search
         candidates = await self._find_similar(fact, user_id=user_id)
         if memory_type == MemoryType.belief:
             candidates = self._merge_candidates(
@@ -548,7 +570,11 @@ class MemoryUpdateEngine:
                 embedding=embedding,
             )
 
-        # Non-belief types: create directly
+        # Non-belief types: create directly, but with the same content
+        # shape the dedicated stores produce, so the rows are visible to
+        # WorldModelStore/EventStore/SkillStore queries and — critically —
+        # world_model rows carry the entity_type/name keys the partial
+        # unique index `uq_memories_world_model_identity` guards on.
         now = datetime.now(timezone.utc)
         content: dict[str, Any] = {
             "subject": fact.subject,
@@ -560,6 +586,24 @@ class MemoryUpdateEngine:
         if fact.is_negation:
             content["is_negation"] = True
 
+        if memory_type == MemoryType.world_model:
+            content["name"] = fact.subject
+            if _normalize_relation(fact.relation) in _IDENTITY_RELATIONS:
+                content["entity_type"] = fact.object
+                content["properties"] = {}
+            else:
+                content["entity_type"] = "entity"
+                content["properties"] = {fact.relation: fact.object}
+        elif memory_type == MemoryType.event:
+            content["event_type"] = fact.relation
+            content["event_status"] = "created"
+        elif memory_type == MemoryType.skill:
+            content["name"] = fact.object
+            content["trigger_conditions"] = []
+            content["steps"] = []
+
+        decay_rate = _DECAY_RATE_BY_TYPE.get(memory_type, 0.02)
+
         record = Memory(
             memory_type=memory_type,
             user_id=user_id,
@@ -567,7 +611,7 @@ class MemoryUpdateEngine:
             embedding=embedding,
             confidence=fact.confidence,
             status=MemoryStatus.active,
-            decay_rate=0.0 if memory_type == MemoryType.event else 0.02,
+            decay_rate=decay_rate,
             created_at=now,
             updated_at=now,
             metadata_={

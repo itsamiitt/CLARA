@@ -77,6 +77,23 @@ def _decay_anchor(record: Memory) -> datetime:
             pass
     return _ensure_aware(record.updated_at)
 
+def _skill_last_used(record: Memory) -> datetime:
+    """Last real usage of a skill: ``metadata.last_used`` (stamped by
+    SkillStore.record_outcome) when parseable, else ``created_at``.
+
+    Deliberately ignores ``updated_at``, which the daily decay job resets
+    every night via the ORM ``onupdate`` hook.
+    """
+    meta = dict(record.metadata_) if record.metadata_ else {}
+    last_used_raw = meta.get("last_used")
+    if isinstance(last_used_raw, str):
+        try:
+            return _ensure_aware(datetime.fromisoformat(last_used_raw))
+        except ValueError:
+            pass
+    return _ensure_aware(record.created_at)
+
+
 def compute_decayed_confidence(
     confidence_0: float,
     decay_rate: float,
@@ -273,24 +290,33 @@ class DecayScheduler:
                         )
 
                 # --- 2. Unused skills ---------------------------------
+                # NOTE: the cutoff must NOT use ``updated_at`` — the daily
+                # decay job dirties every skill row each night, which fires
+                # the ORM ``onupdate`` hook and resets ``updated_at``, so an
+                # ``updated_at``-based predicate can never match and skills
+                # become immortal. Real usage lives in ``metadata.last_used``
+                # (stamped by SkillStore.record_outcome), falling back to
+                # ``created_at`` for skills that were never exercised.
                 skill_cutoff = now - timedelta(days=SKILL_UNUSED_DAYS)
                 stmt = (
                     select(Memory)
                     .where(Memory.memory_type == MemoryType.skill)
                     .where(Memory.status == MemoryStatus.active)
-                    .where(Memory.updated_at < skill_cutoff)
                 )
                 result = await session.execute(stmt)
-                unused_skills: Sequence[Memory] = result.scalars().all()
+                active_skills: Sequence[Memory] = result.scalars().all()
 
-                for skill in unused_skills:
+                for skill in active_skills:
+                    last_used = _skill_last_used(skill)
+                    if last_used >= skill_cutoff:
+                        continue
                     skill.status = MemoryStatus.deprecated
                     skill.updated_at = now
                     skills_deprecated += 1
                     logger.info(
-                        "Deprecated unused skill %s (last updated=%s)",
+                        "Deprecated unused skill %s (last used=%s)",
                         skill.memory_id,
-                        skill.updated_at.isoformat(),
+                        last_used.isoformat(),
                     )
 
         summary = {

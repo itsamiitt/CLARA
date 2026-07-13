@@ -104,6 +104,40 @@ class ExtractedFact:
     raw_text: str
 
 
+class ExtractionResult(list):
+    """A list of :class:`ExtractedFact` carrying an extraction status.
+
+    Subclasses ``list`` so every existing caller and test that treats the
+    return value of :meth:`FactExtractor.extract` as a plain list keeps
+    working, while callers that care can distinguish "the text contained
+    no facts" from "the extraction pipeline failed":
+
+    * ``ok``                 — extraction ran; facts (possibly zero) parsed.
+    * ``empty``              — input text was empty/whitespace.
+    * ``llm_unavailable``    — provider missing key/package/connection.
+    * ``llm_error``          — provider call failed at runtime.
+    * ``malformed_response`` — LLM output could not be parsed as facts.
+    """
+
+    __slots__ = ("status", "detail")
+
+    def __init__(
+        self,
+        facts: list[ExtractedFact] | None = None,
+        *,
+        status: str = "ok",
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(facts or [])
+        self.status = status
+        self.detail = detail
+
+    @property
+    def failed(self) -> bool:
+        """True when the pipeline failed (as opposed to finding no facts)."""
+        return self.status in {"llm_unavailable", "llm_error", "malformed_response"}
+
+
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
@@ -259,7 +293,7 @@ def _call_ollama(text: str, model: str, base_url: str) -> str:
 # JSON parsing
 # ---------------------------------------------------------------------------
 
-def _parse_llm_response(raw: str, original_text: str) -> list[ExtractedFact]:
+def _parse_llm_response(raw: str, original_text: str) -> ExtractionResult:
     """Parse the LLM's JSON response into ExtractedFact objects.
 
     Handles:
@@ -267,7 +301,8 @@ def _parse_llm_response(raw: str, original_text: str) -> list[ExtractedFact]:
     * JSON objects wrapping an array ``{"facts": [...]}``
     * Markdown-fenced JSON (strips ` ```json ... ``` `)
 
-    Returns an empty list and logs a warning on any parse failure.
+    Returns an empty ``ExtractionResult`` with ``status="malformed_response"``
+    (and logs a warning) on any parse failure.
     """
     cleaned = raw.strip()
 
@@ -285,7 +320,7 @@ def _parse_llm_response(raw: str, original_text: str) -> list[ExtractedFact]:
             "Failed to parse LLM response as JSON: %s — raw=%r",
             exc, raw[:200],
         )
-        return []
+        return ExtractionResult(status="malformed_response", detail=str(exc))
 
     # Handle {"facts": [...]} wrapper
     if isinstance(parsed, dict):
@@ -298,20 +333,36 @@ def _parse_llm_response(raw: str, original_text: str) -> list[ExtractedFact]:
                 "LLM returned a JSON object without a recognized list key: %r",
                 list(parsed.keys()),
             )
-            return []
+            return ExtractionResult(
+                status="malformed_response",
+                detail=f"no list key in {sorted(parsed.keys())!r}",
+            )
 
     if not isinstance(parsed, list):
         logger.warning("LLM returned non-list JSON: %s", type(parsed).__name__)
-        return []
+        return ExtractionResult(
+            status="malformed_response",
+            detail=f"non-list JSON: {type(parsed).__name__}",
+        )
 
     facts: list[ExtractedFact] = []
     for item in parsed:
+        if not isinstance(item, dict):
+            # e.g. {"facts": ["user uses Rust"]} — used to raise
+            # AttributeError on item.get and crash remember()/interact().
+            logger.warning("Skipping non-object fact item: %r", item)
+            continue
+        domain = item.get("domain")
+        if domain is not None and not isinstance(domain, str):
+            # Non-string domains used to leak into conflict resolution and
+            # crash _domains_differ with an AttributeError.
+            domain = str(domain)
         try:
             fact = ExtractedFact(
                 subject=str(item.get("subject", "")),
                 relation=str(item.get("relation", "")),
                 object=str(item.get("object", "")),
-                domain=item.get("domain"),
+                domain=domain,
                 source_type=str(item.get("source_type", "user_direct")),
                 confidence=float(item.get("confidence", 0.0)),
                 is_negation=bool(item.get("is_negation", False)),
@@ -337,7 +388,7 @@ def _parse_llm_response(raw: str, original_text: str) -> list[ExtractedFact]:
 
         facts.append(fact)
 
-    return facts
+    return ExtractionResult(facts)
 
 
 # ---------------------------------------------------------------------------
@@ -399,19 +450,22 @@ class FactExtractor:
                 f"Supported: 'openai', 'anthropic', 'ollama'."
             )
 
-    async def extract(self, text: str) -> list[ExtractedFact]:
+    async def extract(self, text: str) -> ExtractionResult:
         """Extract structured facts from *text* asynchronously.
 
         Args:
             text: Raw natural-language input.
 
         Returns:
-            A list of :class:`ExtractedFact` objects.  Returns an empty list
-            if the text is empty, the LLM returns unparseable output, or no
-            facts meet the confidence threshold.
+            An :class:`ExtractionResult` (a ``list`` of
+            :class:`ExtractedFact` plus a ``status`` attribute). The list is
+            empty when the text is empty, the LLM call fails, the output is
+            unparseable, or no facts meet the confidence threshold — the
+            ``status`` field distinguishes those cases so callers can
+            surface pipeline failures instead of silently storing nothing.
         """
         if not text or not text.strip():
-            return []
+            return ExtractionResult(status="empty")
 
         try:
             if self._provider == "openai":
@@ -426,9 +480,15 @@ class FactExtractor:
                     None, _call_ollama, text, self._model, self._ollama_base_url,
                 )
             else:
-                return []
-        except Exception:
+                return ExtractionResult(
+                    status="llm_unavailable",
+                    detail=f"unknown provider {self._provider!r}",
+                )
+        except (EnvironmentError, ImportError) as exc:
+            logger.error("LLM provider unavailable: %s", exc)
+            return ExtractionResult(status="llm_unavailable", detail=str(exc))
+        except Exception as exc:
             logger.exception("LLM call failed for text: %r", text[:200])
-            return []
+            return ExtractionResult(status="llm_error", detail=str(exc))
 
         return _parse_llm_response(raw_response, text)

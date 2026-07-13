@@ -189,9 +189,28 @@ class TestComputeConfidence:
             source_weight=0.0,
             observation_strength=0.0,
         )
-        # numerator = 1.0 * decay_factor + 0 = decay_factor
+        # numerator = 1.0 * 1.0 * decay_factor + 0 = decay_factor
         # denominator = 1.0 + 1.0 = 2
         assert result == pytest.approx(expected_decay / 2.0)
+
+    def test_repeated_confirmation_does_not_dilute(self):
+        """Regression: N identical max-trust confirmations must not erode
+        confidence (the pre-fix formula halved it from the third one on)."""
+        confidence = 0.0
+        prior_weight = 0.0
+        for _ in range(10):
+            new_confidence = compute_confidence(
+                prior_confidence=confidence,
+                prior_weight=prior_weight,
+                decay_rate=0.0,
+                days_since_last_seen=0.0,
+                source_weight=1.0,
+                observation_strength=1.0,
+            )
+            assert new_confidence >= confidence - 1e-9
+            confidence = new_confidence
+            prior_weight += 1.0
+        assert confidence == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
