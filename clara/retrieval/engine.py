@@ -21,8 +21,6 @@ from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Sequence
 
-import lancedb
-import pyarrow as pa
 from sqlalchemy import and_, event, inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -30,6 +28,17 @@ from sqlalchemy.orm import Session
 from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
 from clara.retrieval.cache import CachedScoredMemory, MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
+
+# lancedb (and its pyarrow dependency) belong to the optional [vector]
+# extra — the zero-key tier (LocalMemory, clara-mcp, clara CLI) must import
+# this module without them. Vector operations raise LanceSearchError when
+# they are missing, and RetrievalEngine.search degrades to lexical.
+try:  # pragma: no cover - exercised implicitly by both install profiles
+    import lancedb
+    import pyarrow as pa
+except ImportError:  # pragma: no cover
+    lancedb = None  # type: ignore[assignment]
+    pa = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +59,22 @@ DEFAULT_CANDIDATE_MULTIPLIER: int = 4  # top_k × this = ANN candidates
 
 DEFAULT_LANCE_PATH = "./clara_vectors"
 LANCE_TABLE_NAME = "memories"
-LANCE_SCHEMA = pa.schema([
-    pa.field("memory_id", pa.string()),
-    pa.field("vector", pa.list_(pa.float32(), VECTOR_DIMENSIONS)),
-    pa.field("user_id", pa.string()),
-    pa.field("memory_type", pa.string()),
-    pa.field("status", pa.string()),
-])
+
+
+def _lance_schema():
+    """Build the Lance table schema (requires the [vector] extra)."""
+    if pa is None:
+        raise LanceSearchError(
+            "lancedb/pyarrow are not installed — vector search needs "
+            "pip install 'clara-memory[vector]'"
+        )
+    return pa.schema([
+        pa.field("memory_id", pa.string()),
+        pa.field("vector", pa.list_(pa.float32(), VECTOR_DIMENSIONS)),
+        pa.field("user_id", pa.string()),
+        pa.field("memory_type", pa.string()),
+        pa.field("status", pa.string()),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +345,11 @@ class LanceRetrievalEngine:
             if self._table is not None:
                 return self._table
 
+            if lancedb is None:
+                raise LanceSearchError(
+                    "lancedb is not installed — vector search needs "
+                    "pip install 'clara-memory[vector]'"
+                )
             Path(self._lance_path).mkdir(parents=True, exist_ok=True)
             db = lancedb.connect(self._lance_path)
             if hasattr(db, "list_tables"):
@@ -337,7 +360,7 @@ class LanceRetrievalEngine:
             else:
                 tables = set(getattr(db.list_tables(), "tables", []) or [])
             if LANCE_TABLE_NAME not in tables:
-                table = db.create_table(LANCE_TABLE_NAME, schema=LANCE_SCHEMA)
+                table = db.create_table(LANCE_TABLE_NAME, schema=_lance_schema())
             else:
                 table = db.open_table(LANCE_TABLE_NAME)
 
