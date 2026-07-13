@@ -23,7 +23,7 @@ from typing import Any, Sequence
 
 import lancedb
 import pyarrow as pa
-from sqlalchemy import and_, event, inspect as sa_inspect, literal, select
+from sqlalchemy import and_, event, inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -115,7 +115,6 @@ class LanceMemoryRecord:
     user_id: str
     memory_type: str
     status: str
-    is_new: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -693,15 +692,6 @@ class RetrievalEngine:
         return None
 
     @staticmethod
-    def _cosine_similarity(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
-        mag_a = math.sqrt(sum(x * x for x in a))
-        mag_b = math.sqrt(sum(x * x for x in b))
-        if mag_a == 0.0 or mag_b == 0.0:
-            return 0.0
-        return dot / (mag_a * mag_b)
-
-    @staticmethod
     def _get_access_count(memory: Memory) -> int:
         meta = memory.metadata_ or {}
         return int(meta.get("access_count", 0))
@@ -792,7 +782,7 @@ class RetrievalEngine:
 # Automatic SQLite → LanceDB sync on successful commit
 # ---------------------------------------------------------------------------
 
-def _snapshot_memory(memory: Memory, *, is_new: bool) -> LanceMemoryRecord | None:
+def _snapshot_memory(memory: Memory) -> LanceMemoryRecord | None:
     memory_id = getattr(memory, "memory_id", None)
     memory_type = getattr(memory, "memory_type", None)
     status = getattr(memory, "status", None)
@@ -806,7 +796,6 @@ def _snapshot_memory(memory: Memory, *, is_new: bool) -> LanceMemoryRecord | Non
         user_id=memory.user_id or "",
         memory_type=memory_type.value if hasattr(memory_type, "value") else str(memory_type),
         status=status.value if hasattr(status, "value") else str(status),
-        is_new=is_new,
     )
 
 
@@ -847,8 +836,8 @@ def _install_lance_commit_sync() -> None:
             return
 
         snapshots = session.info.setdefault("_lance_pending_snapshots", {})
-        for obj, is_new in tracked.values():
-            snapshot = _snapshot_memory(obj, is_new=is_new)
+        for obj, _is_new in tracked.values():
+            snapshot = _snapshot_memory(obj)
             if snapshot is not None:
                 snapshots[snapshot.memory_id] = snapshot
 

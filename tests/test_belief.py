@@ -36,28 +36,7 @@ from clara.memory.belief import (
 async def engine():
     """Create an in-memory async SQLite engine for testing.
 
-    Registers custom type compilations so PostgreSQL-specific types
-    (JSONB, UUID, Vector) map to SQLite-compatible equivalents.
     """
-    from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
-
-    # Teach SQLite's compiler how to render PostgreSQL-only types.
-    from sqlalchemy.ext.compiler import compiles
-
-    @compiles(JSONB, "sqlite")
-    def _compile_jsonb_sqlite(type_, compiler, **kw):
-        return "TEXT"
-
-    # pgvector's Vector type — render as TEXT in SQLite (we don't run
-    # vector operations in these tests).
-    try:
-        from pgvector.sqlalchemy import Vector
-
-        @compiles(Vector, "sqlite")
-        def _compile_vector_sqlite(type_, compiler, **kw):
-            return "TEXT"
-    except Exception:
-        pass
 
     eng = create_async_engine("sqlite+aiosqlite://", echo=False)
 

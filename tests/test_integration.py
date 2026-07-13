@@ -92,21 +92,6 @@ async def db_parts():
     Registers custom type compilations so PostgreSQL-specific types
     (JSONB, Vector) map to SQLite-compatible ``TEXT`` columns.
     """
-    from sqlalchemy.dialects.postgresql import JSONB
-    from sqlalchemy.ext.compiler import compiles
-
-    @compiles(JSONB, "sqlite")
-    def _compile_jsonb_sqlite(type_, compiler, **kw):
-        return "TEXT"
-
-    try:
-        from pgvector.sqlalchemy import Vector
-
-        @compiles(Vector, "sqlite")
-        def _compile_vector_sqlite(type_, compiler, **kw):
-            return "TEXT"
-    except Exception:
-        pass
 
     engine = create_async_engine(
         "sqlite+aiosqlite://",

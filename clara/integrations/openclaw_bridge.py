@@ -1,5 +1,12 @@
 ﻿"""OpenClaw-friendly memory bridge on top of ClaraMemory.
 
+.. deprecated::
+    This adapter hard-partitions memory per session
+    (``user_id="session:<id>"``), so nothing learned in one session is
+    recallable in another — the opposite of long-term memory. The MCP
+    server (``clara-mcp``) + :class:`~clara.integrations.local_memory.LocalMemory`
+    superseded it for agent integrations. Scheduled for removal.
+
 This adapter gives a thin, ergonomic layer for chat/session workflows:
 - remember_turn(session, role, text, metadata)
 - recall_for(session, query)
@@ -10,6 +17,7 @@ serialized into memory text so they can be recalled later.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -30,6 +38,13 @@ class OpenClawMemoryBridge:
     """Session-oriented adapter for storing and retrieving past memory."""
 
     def __init__(self, memory: ClaraMemory, config: BridgeConfig | None = None) -> None:
+        warnings.warn(
+            "OpenClawMemoryBridge is deprecated: its per-session user_id "
+            "partitioning defeats cross-session memory. Use the clara-mcp "
+            "server / LocalMemory instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.memory = memory
         self.config = config or BridgeConfig()
 

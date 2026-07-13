@@ -46,8 +46,7 @@ SOURCE_WEIGHTS: dict[SourceType, float] = {
     SourceType.agent_reflection: 0.5,
 }
 
-# Default decay rates for belief sub-types (per day)
-STABLE_DECAY_RATE = 0.005
+# Default decay rate for beliefs (per day)
 VOLATILE_DECAY_RATE = 0.02
 DEFAULT_DECAY_RATE = VOLATILE_DECAY_RATE
 

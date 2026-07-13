@@ -234,21 +234,6 @@ def _has_match(
 
 @pytest_asyncio.fixture
 async def realistic_agent() -> ClaraMemory:
-    from sqlalchemy.dialects.postgresql import JSONB
-    from sqlalchemy.ext.compiler import compiles
-
-    @compiles(JSONB, "sqlite")
-    def _compile_jsonb_sqlite(type_, compiler, **kw):
-        return "TEXT"
-
-    try:
-        from pgvector.sqlalchemy import Vector
-
-        @compiles(Vector, "sqlite")
-        def _compile_vector_sqlite(type_, compiler, **kw):
-            return "TEXT"
-    except Exception:
-        pass
 
     with patch("clara.agent._create_backend", return_value=_SemanticConversationBackend()):
         agent = await ClaraMemory.create(

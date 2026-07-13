@@ -20,17 +20,10 @@ from clara.core.enums import (
 )
 from clara.core.exceptions import (
     ClaraError,
-    ConfigurationError,
-    ConflictError,
     InvalidTransitionError,
     MemoryNotFoundError,
-    TenantViolationError,
 )
-from clara.core.schemas import (
-    ExtractionCandidate,
-    InteractionRecord,
-    MemorySummary,
-)
+from clara.interaction.layer import InteractionRecord
 
 
 # ===================================================================
@@ -126,23 +119,10 @@ class TestSkillOutcome:
 
 
 # ===================================================================
-# Schemas
+# Schemas — the live InteractionRecord (clara/interaction/layer.py)
 # ===================================================================
 
 class TestInteractionRecord:
-    def test_create_minimal(self):
-        record = InteractionRecord(
-            interaction_id=uuid.uuid4(),
-            raw_text="Hello world",
-            source=SourceType.user_direct,
-        )
-        assert record.raw_text == "Hello world"
-        assert record.source == SourceType.user_direct
-        assert record.session_id is None
-        assert record.user_id is None
-        assert isinstance(record.timestamp, datetime)
-        assert record.metadata == {}
-
     def test_create_full(self):
         ts = datetime(2026, 3, 11, 12, 0, 0, tzinfo=timezone.utc)
         record = InteractionRecord(
@@ -164,82 +144,13 @@ class TestInteractionRecord:
             interaction_id=uuid.uuid4(),
             raw_text="test",
             source=SourceType.user_direct,
+            session_id=None,
+            user_id=None,
+            timestamp=datetime.now(timezone.utc),
+            metadata={},
         )
         with pytest.raises(AttributeError):
             record.raw_text = "modified"  # type: ignore[misc]
-
-
-class TestExtractionCandidate:
-    def test_create_belief_candidate(self):
-        candidate = ExtractionCandidate(
-            candidate_type="belief",
-            subject="user",
-            relation="uses",
-            object="Rust",
-            confidence=0.9,
-            raw_evidence="I use Rust for systems work",
-            domain="systems",
-        )
-        assert candidate.candidate_type == "belief"
-        assert candidate.subject == "user"
-        assert candidate.domain == "systems"
-        assert candidate.is_negation is False
-        assert candidate.negates is None
-
-    def test_create_negation_candidate(self):
-        candidate = ExtractionCandidate(
-            candidate_type="belief",
-            subject="user",
-            relation="uses",
-            object="Python",
-            confidence=0.8,
-            raw_evidence="I stopped using Python",
-            is_negation=True,
-            negates="user uses Python",
-        )
-        assert candidate.is_negation is True
-        assert candidate.negates == "user uses Python"
-
-    def test_create_event_candidate(self):
-        candidate = ExtractionCandidate(
-            candidate_type="event",
-            subject="user",
-            relation="deployed",
-            object="API",
-            confidence=0.85,
-            raw_evidence="I deployed the API yesterday",
-            event_type="deployed",
-        )
-        assert candidate.candidate_type == "event"
-        assert candidate.event_type == "deployed"
-
-
-class TestMemorySummary:
-    def test_create_summary(self):
-        summary = MemorySummary(
-            memory_id="abc-123",
-            memory_type="belief",
-            content={"subject": "user", "relation": "uses", "object": "Rust"},
-            confidence=0.85,
-            status="active",
-            user_id="user-001",
-            created_at="2026-03-11T12:00:00Z",
-        )
-        assert summary.memory_id == "abc-123"
-        assert summary.memory_type == "belief"
-        assert summary.user_id == "user-001"
-
-    def test_optional_fields_default_to_none(self):
-        summary = MemorySummary(
-            memory_id="abc-123",
-            memory_type="belief",
-            content={},
-            confidence=0.5,
-            status="active",
-        )
-        assert summary.user_id is None
-        assert summary.created_at is None
-        assert summary.updated_at is None
 
 
 # ===================================================================
@@ -250,9 +161,6 @@ class TestExceptionHierarchy:
     def test_all_inherit_from_clara_error(self):
         assert issubclass(MemoryNotFoundError, ClaraError)
         assert issubclass(InvalidTransitionError, ClaraError)
-        assert issubclass(ConflictError, ClaraError)
-        assert issubclass(TenantViolationError, ClaraError)
-        assert issubclass(ConfigurationError, ClaraError)
 
     def test_clara_error_inherits_from_exception(self):
         assert issubclass(ClaraError, Exception)
@@ -278,24 +186,3 @@ class TestInvalidTransitionError:
         assert err.target_status == "in_progress"
 
 
-class TestConflictError:
-    def test_default_message(self):
-        err = ConflictError("direct_replacement", existing_id="mem-001")
-        assert "direct_replacement" in str(err)
-        assert err.conflict_type == "direct_replacement"
-        assert err.existing_id == "mem-001"
-
-
-class TestTenantViolationError:
-    def test_default_message(self):
-        err = TenantViolationError("user-A", "user-B")
-        assert "user-A" in str(err)
-        assert "user-B" in str(err)
-        assert err.requesting_user == "user-A"
-        assert err.owning_user == "user-B"
-
-
-class TestConfigurationError:
-    def test_can_raise_with_message(self):
-        with pytest.raises(ConfigurationError, match="Missing API key"):
-            raise ConfigurationError("Missing API key")

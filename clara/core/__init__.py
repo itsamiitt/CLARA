@@ -1,1 +1,1 @@
-"""CLARA core package — shared schemas, enums, and exceptions."""
+"""CLARA core package — shared enums, exceptions, and text sanitization."""

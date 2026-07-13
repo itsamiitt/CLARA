@@ -38,28 +38,22 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool, StaticPool
 
-from clara.core.text import sanitize_memory_text as _s
 from clara.db.fts import ensure_fts
-from clara.db.models import Base, Memory, MemoryStatus, MemoryType
+from clara.db.models import Base
 from clara.extraction.extractor import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
     ENV_OLLAMA_BASE_URL,
     ENV_OLLAMA_MODEL,
-    ExtractedFact,
     FactExtractor,
 )
 from clara.extraction.heuristic import HeuristicExtractor
 from clara.interaction import InteractionLayer
-from clara.memory.belief import BeliefMemory
 from clara.reasoning.engine import ReasoningEngine
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import (
     EmbeddingEngine,
     ENV_OLLAMA_EMBED_MODEL,
-    _EmbeddingBackend,
-    _LocalBackend,
-    _OpenAIBackend,
     _create_backend,
 )
 from clara.retrieval.engine import (
@@ -125,101 +119,13 @@ def _make_engine(db_url: str) -> AsyncEngine:
 
 
 # ---------------------------------------------------------------------------
-# Context formatting
+# Context formatting — single canonical implementation lives in
+# clara.reasoning.context; re-exported here because the public import path
+# `from clara.agent import format_context` is established API. (Two live
+# copies previously existed and were a divergence hazard.)
 # ---------------------------------------------------------------------------
 
-def _format_belief(sm: ScoredMemory) -> str:
-    """One-line summary of a belief for the context block."""
-    c = sm.memory.content
-    domain = c.get("domain")
-    core = f"{_s(c.get('subject', '?'))} {_s(c.get('relation', '?'))} {_s(c.get('object', '?'))}"
-    if c.get("is_negation"):
-        core = f"not ({core})"
-    line = f"- {core}"
-    line += f" (confidence: {sm.memory.confidence:.2f}"
-    if domain:
-        line += f", domain: {_s(domain)}"
-    line += ")"
-    return line
-
-
-def _format_event(sm: ScoredMemory) -> str:
-    c = sm.memory.content
-    ts = sm.memory.created_at.strftime("%Y-%m-%d") if sm.memory.created_at else "?"
-    desc = _s(c.get("object", c.get("description", "")))
-    subj = _s(c.get("subject", ""))
-    rel = _s(c.get("relation", ""))
-    return f"- {ts}: {subj} {rel} {desc}"
-
-
-def _format_skill(sm: ScoredMemory) -> str:
-    c = sm.memory.content
-    name = _s(c.get("name", c.get("object", "unnamed skill")))
-    return f"- {name} (confidence: {sm.memory.confidence:.2f})"
-
-
-def _format_world_model(sm: ScoredMemory) -> str:
-    c = sm.memory.content
-    parts = []
-    for key in ("name", "subject", "object"):
-        if key in c and c[key]:
-            parts.append(_s(c[key]))
-            break
-    # Show properties if available
-    props = c.get("properties", {})
-    if props and isinstance(props, dict):
-        prop_strs = [f"{_s(k)}: {_s(v)}" for k, v in props.items()]
-        parts.append(" | ".join(prop_strs))
-    elif c.get("relation") and c.get("object"):
-        parts.append(f"{_s(c.get('relation', ''))} {_s(c.get('object', ''))}")
-    return f"- {' | '.join(parts)}" if parts else "- (world model entry)"
-
-
-def format_context(result: RetrievalResult) -> str:
-    """Build the ``=== MEMORY CONTEXT ===`` block from a retrieval result.
-
-    Follows the CONTEXT.md §Reasoning Engine context injection format.
-    """
-    sections: list[str] = ["=== MEMORY CONTEXT ===", ""]
-
-    # [BELIEFS]
-    sections.append("[BELIEFS]")
-    if result.beliefs:
-        for sm in result.beliefs:
-            sections.append(_format_belief(sm))
-    else:
-        sections.append("- (none)")
-    sections.append("")
-
-    # [WORLD MODEL]
-    sections.append("[WORLD MODEL]")
-    if result.world_model:
-        for sm in result.world_model:
-            sections.append(_format_world_model(sm))
-    else:
-        sections.append("- (none)")
-    sections.append("")
-
-    # [RECENT EVENTS]
-    sections.append("[RECENT EVENTS]")
-    if result.events:
-        for sm in result.events:
-            sections.append(_format_event(sm))
-    else:
-        sections.append("- (none)")
-    sections.append("")
-
-    # [RELEVANT SKILLS]
-    sections.append("[RELEVANT SKILLS]")
-    if result.skills:
-        for sm in result.skills:
-            sections.append(_format_skill(sm))
-    else:
-        sections.append("- (none)")
-    sections.append("")
-
-    sections.append("=== END MEMORY CONTEXT ===")
-    return "\n".join(sections)
+from clara.reasoning.context import format_context  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
