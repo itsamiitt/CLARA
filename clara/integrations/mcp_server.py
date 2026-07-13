@@ -23,14 +23,23 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from clara.integrations.local_memory import LocalMemory
 
+logger = logging.getLogger(__name__)
+
 SERVER_NAME = "clara-memory"
+
+# Opportunistic maintenance cadence: there is no cron/daemon in the CLI
+# profile, so decay + pruning run inline (bounded, sub-second at CLI scale)
+# when the store is opened and the last pass is older than this.
+MAINTENANCE_INTERVAL_SECONDS = 24 * 3600
 
 # ---------------------------------------------------------------------------
 # Store location + lazy singleton
@@ -59,7 +68,35 @@ async def _get_memory() -> LocalMemory:
         async with _memory_lock:
             if _memory is None:
                 _memory = await LocalMemory.create(default_db_path())
+                await _run_maintenance_if_due(_memory, default_db_path())
     return _memory
+
+
+async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
+    """Run decay + pruning inline when the last pass is stale.
+
+    Replaces the APScheduler cron jobs for the zero-backend profile: no
+    daemon, no timer — maintenance rides the first store access of the day.
+    All failures are logged and swallowed; memory availability must never
+    depend on housekeeping.
+    """
+    marker = Path(db_path + ".maintenance")
+    try:
+        if marker.exists():
+            age = time.time() - marker.stat().st_mtime
+            if age < MAINTENANCE_INTERVAL_SECONDS:
+                return
+        from clara.scheduler.decay import DecayScheduler
+
+        scheduler = DecayScheduler(memory._session_factory)
+        decay_summary = await scheduler.run_daily_decay()
+        prune_summary = await scheduler.run_weekly_pruning()
+        marker.touch()
+        logger.info(
+            "Opportunistic maintenance: %s %s", decay_summary, prune_summary,
+        )
+    except Exception:  # noqa: BLE001 — housekeeping must never block memory
+        logger.exception("Opportunistic maintenance failed")
 
 
 # ---------------------------------------------------------------------------

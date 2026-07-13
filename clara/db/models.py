@@ -18,6 +18,7 @@ from sqlalchemy import (
     Enum,
     event,
     Float,
+    func,
     Index,
     MetaData,
     Uuid,
@@ -155,11 +156,14 @@ class Memory(Base):
     )
 
     # --- Timestamps ---
+    # server_default uses func.now() (compiles to CURRENT_TIMESTAMP on
+    # SQLite) rather than raw "now()", which SQLite rejects at runtime for
+    # non-ORM inserts — external tools writing rows directly would fail.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
-        server_default=text("now()"),
+        server_default=func.now(),
         comment="Timestamp when this record was first created.",
     )
 
@@ -167,7 +171,7 @@ class Memory(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
-        server_default=text("now()"),
+        server_default=func.now(),
         onupdate=lambda: datetime.now(timezone.utc),
         comment="Timestamp of the most recent update.",
     )
@@ -200,8 +204,10 @@ class Memory(Base):
         ),
         # Enforces one active world-model record per (user, entity_type, name)
         # so concurrent upserts collide with an IntegrityError instead of
-        # duplicating. Both dialect-specific partial-index predicates are given
-        # so the guard behaves identically on SQLite and PostgreSQL.
+        # duplicating. NOTE: SQLite-only — the json_extract() key expressions
+        # do not exist in PostgreSQL (which needs content->>'entity_type');
+        # only the WHERE predicate is dual-dialect. PostgreSQL is not a
+        # supported target yet (see README).
         Index(
             "uq_memories_world_model_identity",
             text("coalesce(user_id, '')"),

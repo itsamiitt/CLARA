@@ -103,7 +103,7 @@ That matters because retrieval failures under load can turn into hallucination-b
 
 ### Full automated suite
 
-- `pytest --tb=short -q` -> `371 passed`
+- `pytest --tb=short -q` -> `469 passed, 3 deselected` (2026-07-13; stress tier passes separately with `-m stress`)
 
 ### Dedicated stress test in `tests/test_agent_stress.py`
 
