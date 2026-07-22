@@ -1,0 +1,35 @@
+name: Plugin
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate plugin manifest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The plugin manifest lands in milestone 02. Every step below is gated
+      # on its presence so this workflow stays a green no-op until then.
+      - name: Set up Node.js
+        if: hashFiles('.claude-plugin/plugin.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Claude Code CLI
+        if: hashFiles('.claude-plugin/plugin.json') != ''
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate plugin (strict)
+        if: hashFiles('.claude-plugin/plugin.json') != ''
+        run: claude plugin validate --strict .

@@ -39,11 +39,12 @@ classifiers = [
 # Core stays tiny on purpose: the zero-key tier (LocalMemory, clara-mcp,
 # clara CLI) needs only SQLAlchemy + aiosqlite (+ APScheduler for the
 # library profile's maintenance jobs). LLM SDKs and the vector stack are
-# extras.
+# extras. PyYAML is core because it parses the repo policy file (clara.yml).
 dependencies = [
     "sqlalchemy>=2.0,<3.0",
     "apscheduler>=3.10,<4.0",
     "aiosqlite>=0.20,<1.0",
+    "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
@@ -87,6 +88,7 @@ dev = [
     # at the SDK boundary), so dev pulls the optional runtime deps too
     "openai>=1.0,<3.0",
     "lancedb>=0.20,<1.0",
+    "types-PyYAML>=6.0",
 ]
 all = [
     "clara-memory[full,dev,local]",
@@ -119,7 +121,6 @@ filterwarnings = [
 source = ["clara"]
 branch = true
 omit = [
-    "clara/db/migrations/*",
     "*/__init__.py",
 ]
 

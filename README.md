@@ -187,6 +187,12 @@ interface.
   0/1/2 so a host CLI can gate on it cheaply.
 - Failed LanceDB syncs re-queue instead of orphaning vectors.
 
+## Supported platforms
+
+The Claude Code plugin surface targets **macOS, Linux, and WSL** at launch.
+Native Windows is best-effort: the library, CLI, and test suite run on
+Windows, but plugin hooks are exercised only on POSIX shells.
+
 ## Development
 
 ```bash

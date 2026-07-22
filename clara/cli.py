@@ -35,6 +35,10 @@ from clara.update.engine import classify_memory_type
 # Store helpers
 # ---------------------------------------------------------------------------
 
+# Ignore only the store's own artifacts; everything else in .clara/ (policy
+# exports, the .gitignore itself) stays visible to git.
+_PROJECT_GITIGNORE = "clara.db*\n.maintenance\nquarantine/\n"
+
 
 def _resolve_db_path(project: bool) -> str:
     if project:
@@ -42,7 +46,15 @@ def _resolve_db_path(project: bool) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         gitignore = path.parent / ".gitignore"
         if not gitignore.exists():
-            gitignore.write_text("*\n", encoding="utf-8")
+            gitignore.write_text(_PROJECT_GITIGNORE, encoding="utf-8")
+        elif gitignore.read_text(encoding="utf-8").strip() == "*":
+            gitignore.write_text(_PROJECT_GITIGNORE, encoding="utf-8")
+            print(
+                "warning: rewrote .clara/.gitignore — the old '*' hid every future "
+                ".clara file from git; now only clara.db*, .maintenance and "
+                "quarantine/ are ignored",
+                file=sys.stderr,
+            )
         return str(path)
     return default_db_path()
 
