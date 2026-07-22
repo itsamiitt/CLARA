@@ -38,9 +38,11 @@ class TestEnsureSchema:
     def test_fresh_db_reaches_current_version(self, tmp_path):
         conn = sqlite3.connect(tmp_path / "m.db")
         assert ensure_schema(conn) == SCHEMA_VERSION
-        rows = conn.execute("SELECT version, migrated_at FROM schema_info").fetchall()
+        rows = conn.execute(
+            "SELECT version, migrated_at FROM schema_info ORDER BY version"
+        ).fetchall()
         conn.close()
-        assert [row[0] for row in rows] == [1]
+        assert [row[0] for row in rows] == list(range(1, SCHEMA_VERSION + 1))
         assert datetime.fromisoformat(rows[0][1]).tzinfo is not None
 
     def test_idempotent_second_run(self, tmp_path):
@@ -82,10 +84,14 @@ class TestEnsureSchema:
             c.execute("CREATE TABLE half_done (x INTEGER)")
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(migrations, "_MIGRATIONS", [*migrations._MIGRATIONS, (2, boom)])
+        monkeypatch.setattr(
+            migrations,
+            "_MIGRATIONS",
+            [*migrations._MIGRATIONS, (SCHEMA_VERSION + 1, boom)],
+        )
         with pytest.raises(RuntimeError, match="boom"):
             ensure_schema(conn)
-        assert get_version(conn) == 1
+        assert get_version(conn) == SCHEMA_VERSION
         tables = {
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")

@@ -96,6 +96,32 @@ class TestDoctor:
         assert capsys.readouterr().out == ""
 
 
+class TestGraphCli:
+    def test_graph_stats_and_show(self, capsys):
+        assert _run(["remember", "I use PostgreSQL for the backend"]) == 0
+        capsys.readouterr()
+        assert _run(["graph", "stats"]) == 0
+        out = capsys.readouterr().out
+        assert "nodes:" in out and "edges:" in out
+
+        assert _run(["graph", "show", "postgres"]) == 0
+        out = capsys.readouterr().out
+        assert "postgresql" in out.lower()
+
+    def test_graph_show_unknown_entity(self, capsys):
+        assert _run(["remember", "I use PostgreSQL for the backend"]) == 0
+        capsys.readouterr()
+        assert _run(["graph", "show", "definitely-not-there"]) == 1
+
+    def test_graph_rebuild_and_doctor(self, capsys):
+        assert _run(["remember", "I use PostgreSQL for the backend"]) == 0
+        capsys.readouterr()
+        assert _run(["graph", "rebuild"]) == 0
+        assert "graph rebuilt" in capsys.readouterr().out
+        assert _run(["graph", "doctor"]) == 0
+        assert "no issues" in capsys.readouterr().out
+
+
 class TestProjectGitignore:
     def test_init_writes_scoped_gitignore(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)

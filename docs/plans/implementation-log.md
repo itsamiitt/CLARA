@@ -2,6 +2,72 @@
 
 One entry per milestone of the CLARA → Claude Code plugin conversion.
 
+## 2026-07-22 — Milestone 03: knowledge graph layer (Prompt 03)
+
+Branch `feat/plugin-sprint0`, one commit
+(`feat: knowledge graph layer — projection, traversal, MCP tools`).
+
+**Built.**
+- Migration 2 (`clara/db/migrations.py`): `graph_nodes` (unique active
+  identity on coalesce(user_id,'')/entity_type/canonical_name),
+  `graph_aliases`, `graph_edges` (partial valid-edge indexes + belief index),
+  `graph_nodes_fts` (trigram, created fail-soft).
+- `clara/graph/normalize.py`: name normalization (keeps `+`/`#` so c++/c#
+  survive), ~40 seed dev aliases, ~30-lemma relation normalizer, in-tree
+  Jaro-Winkler + prefix_score (unit-tested against known pairs).
+- `clara/graph/resolve.py`: normalize → exact canonical → alias table →
+  seed+clara.yml aliases → trigram-FTS fuzzy (OR-of-sampled-trigrams for
+  recall; precision from name_sim ≥ 0.90). Multi-candidate ⇒ NEW node with
+  `properties.possible_duplicates`; `user`/`skill` singletons expandable=0.
+- `clara/graph/project.py`: fail-soft projection (decorator swallows + logs);
+  belief→edge, negation→invalidate matching, supersede→invalid_at +
+  provenance, confidence mirror, forget→invalidate, world_model→node upsert
+  linking world_model_id (+entity_type promotion from 'concept'); loud
+  `rebuild(from_scratch)` replaying active memories in insertion order with
+  `temporal_precision='reconstructed'` (idempotent, tested).
+- `clara/graph/traverse.py`: recursive CTE, fan-out capped in SQL via
+  ROW_NUMBER per src/dst (hub with 5,000 edges returns exactly `fanout`
+  edges in <50 ms — timed test), expandable gating, edge-id path cycle
+  guard, `as_of` temporal filter, score = decay^depth × confidence,
+  traversed-and-kept bumps (weight +0.05, mention_count +1), `find_path`.
+- `clara/graph/render.py`: `[GRAPH]` section, ✗ + date range for
+  invalidated, `~` for reconstructed dates, ≤400-token budget.
+- `clara/graph/maintain.py`: hub flags, decay mirror, belief-inactive +
+  below-threshold archiving, stale degree-0 prune (status change — never
+  delete); wired into the opportunistic maintenance pass in mcp_server.
+- Hooks: `BeliefMemory.store/update/supersede`, `WorldModelStore.upsert`,
+  `MemoryUpdateEngine._store_fact` (world_model branch), `LocalMemory`
+  forget/update; `LocalMemory.create` now runs versioned migrations
+  (fail-soft, via thread) — the milestone-02 wiring promise.
+- MCP: `graph_entity`, `graph_neighbors`, `graph_path`, `memory_link`;
+  `memory_search(graph_depth=1)` appends [GRAPH]; `memory_stats` graph
+  counts; `memory_forget` invalidates edges.
+- CLI `clara graph rebuild|stats|show|path|doctor`; `commands/graph.md`
+  (`/clara:graph`); SKILL.md gained the Linking section.
+- Tests: +42 (test_graph.py 38, TestGraphCli 3 in test_cli.py, migration
+  updates). All spec fixtures pass: postgres/postgresql one node, hub
+  stress, fault injection (projection exception never fails memory_save),
+  rebuild count parity, supersede invalid_at, as_of pre-supersede edge.
+
+**Deviations from the prompt.**
+1. Projection hooks live at the `BeliefMemory`/`WorldModelStore` layer (plus
+   the engine's direct world_model branch) instead of literally inside
+   `LocalMemory.save`/`MemoryUpdateEngine.process` — both named paths route
+   through these stores, so one hook surface covers CLI, MCP, and LLM
+   pipelines uniformly.
+2. Fuzzy FTS uses OR-of-sampled-trigrams rather than a phrase MATCH — a
+   phrase demands a contiguous substring and missed e.g.
+   authentification/authenticatio; precision still comes from the
+   name_sim ≥ 0.90 gate.
+3. Known sharp edge (spec-conformant): near-identical short names
+   (svc-a/svc-b) legitimately exceed 0.90 via the prefix rule and merge as
+   single-candidate matches. Graph tests document this; the merge-review
+   flow (possible_duplicates) is the escape hatch.
+4. `/clara:graph` full E2E (live MCP tools) needs a POSIX shell for the
+   plugin's .sh launcher; on this Windows dev box the DoD render was proven
+   by driving `graph_entity` + `graph_neighbors` directly (card + [GRAPH]
+   neighborhood for svelte) and the plugin load smoke stays green.
+
 ## 2026-07-22 — Milestone 02: base plugin (Prompt 02)
 
 Branch `feat/plugin-sprint0`, one commit

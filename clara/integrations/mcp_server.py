@@ -91,9 +91,26 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
         scheduler = DecayScheduler(memory._session_factory)
         decay_summary = await scheduler.run_daily_decay()
         prune_summary = await scheduler.run_weekly_pruning()
+        graph_summary = "graph: skipped"
+        try:
+            from clara.config import ClaraConfig
+            from clara.graph.maintain import maintenance_summary, run_graph_maintenance
+
+            config = ClaraConfig.from_env()
+            async with memory._session_factory() as session:
+                async with session.begin():
+                    graph_counts = await run_graph_maintenance(
+                        session,
+                        archival_threshold=config.archival_threshold,
+                        stale_days=config.event_stale_days,
+                    )
+            graph_summary = maintenance_summary(graph_counts)
+        except Exception:  # noqa: BLE001 — graph housekeeping is best-effort
+            logger.exception("Graph maintenance failed")
         marker.touch()
         logger.info(
-            "Opportunistic maintenance: %s %s", decay_summary, prune_summary,
+            "Opportunistic maintenance: %s %s %s",
+            decay_summary, prune_summary, graph_summary,
         )
     except Exception:  # noqa: BLE001 — housekeeping must never block memory
         logger.exception("Opportunistic maintenance failed")
@@ -179,6 +196,7 @@ def build_server():
         query: str,
         top_k: int = 8,
         types: list[str] | None = None,
+        graph_depth: int = 1,
     ) -> dict[str, Any]:
         """Search long-term memory by keywords and return matching memories.
 
@@ -187,9 +205,14 @@ def build_server():
         result includes a ready-to-read "MEMORY CONTEXT" block plus structured
         hits. Optionally filter types to any of:
         ["belief", "event", "skill", "world_model"].
+
+        graph_depth (default 1) also walks the knowledge graph from the top
+        hits' entities and appends a [GRAPH] relations section; set 0 to skip.
         """
         memory = await _get_memory()
-        return await memory.search(query, top_k=top_k, types=types)
+        return await memory.search(
+            query, top_k=top_k, types=types, graph_depth=graph_depth
+        )
 
     @server.tool()
     async def memory_recent(
@@ -225,9 +248,82 @@ def build_server():
 
     @server.tool()
     async def memory_stats() -> dict[str, Any]:
-        """Report where the store lives and how many active memories it holds."""
+        """Report where the store lives and how many active memories it holds,
+        plus knowledge-graph node/edge counts."""
         memory = await _get_memory()
         return await memory.stats()
+
+    @server.tool()
+    async def graph_entity(name: str, include_history: bool = False) -> dict[str, Any]:
+        """Look up one entity in the knowledge graph.
+
+        Returns its card: display/canonical name, entity type, aliases,
+        possible_duplicates (candidate merges — propose a merge to the user
+        instead of guessing), linked world-model id, and its top relations.
+        Set include_history=true to also see invalidated (✗) relations.
+        """
+        memory = await _get_memory()
+        return await memory.graph_entity(name, include_history=include_history)
+
+    @server.tool()
+    async def graph_neighbors(
+        name: str,
+        depth: int = 1,
+        relation: str | None = None,
+        as_of: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Walk the knowledge graph outward from an entity.
+
+        depth: hops to expand (1-2 typical). relation: filter to one relation
+        (free-form; normalized like edge relations). as_of: ISO date/time to
+        view the graph as it was then (includes edges since invalidated).
+        Returns a rendered [GRAPH] section plus structured edges.
+        """
+        memory = await _get_memory()
+        return await memory.graph_neighbors(
+            name, depth=depth, relation=relation, as_of=as_of, limit=limit
+        )
+
+    @server.tool()
+    async def graph_path(
+        from_name: str,
+        to_name: str,
+        max_hops: int = 4,
+        as_of: str | None = None,
+    ) -> dict[str, Any]:
+        """Find how two entities are connected (shortest/best relation path)."""
+        memory = await _get_memory()
+        return await memory.graph_path(
+            from_name, to_name, max_hops=max_hops, as_of=as_of
+        )
+
+    @server.tool()
+    async def memory_link(
+        src: str,
+        relation: str,
+        dst: str,
+        entity_types: list[str] | None = None,
+        confidence: float | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Save a belief AND get its graph edge in one call (linking sugar).
+
+        Use active-voice relations (uses, depends_on, deployed_to). Name code
+        entities by path ("src/api.py"), symbol ("src/api.py::handler"), or
+        decision slug ("decision:move-to-sqlite"). entity_types optionally
+        types the endpoints as [src_type, dst_type]. Returns belief_id,
+        edge_id, and the resolved node names.
+        """
+        memory = await _get_memory()
+        return await memory.memory_link(
+            src,
+            relation,
+            dst,
+            entity_types=entity_types,
+            confidence=confidence,
+            description=description,
+        )
 
     return server
 

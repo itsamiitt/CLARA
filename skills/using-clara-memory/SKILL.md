@@ -48,6 +48,22 @@ Add `tags`, a `domain`, and `confidence` (0..1) when useful. Use
   trivia. Save what was non-obvious and will matter again.
 - Prefer specific, atomic memories over long blobs.
 
+## Linking (knowledge graph)
+
+Beliefs project into a knowledge graph (nodes + edges) automatically; use
+`memory_link(src, relation, dst)` when you specifically want the graph edge
+back, and `graph_entity` / `graph_neighbors` / `graph_path` to explore.
+
+- **Entity naming**: name code entities by path (`src/api.py`), symbol
+  (`src/api.py::handler`), or decision slug (`decision:move-to-sqlite`).
+  Consistent names keep the graph connected.
+- **Relations in active voice**: `uses`, `depends_on`, `deployed_to`,
+  `prefers` — subject acts on object. Relations are normalized to
+  snake_case lemmas, so "Depends On" and "depends" land on `depends_on`.
+- **Propose merges, never pick silently**: when a node card shows
+  `possible_duplicates`, tell the user and ask which node wins instead of
+  guessing. Resolution creates a new node rather than merging on its own.
+
 ## Proportionality
 
 A `=== MEMORY CONTEXT ===` block is injected at session start. For trivial

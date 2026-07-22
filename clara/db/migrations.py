@@ -21,6 +21,7 @@ the store read-only with a single stderr warning.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import sys
@@ -28,7 +29,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _BUSY_TIMEOUT_MS = 30_000  # matches SQLITE_BUSY_TIMEOUT_MS in clara/agent.py
 
@@ -50,8 +51,78 @@ def _migration_1(conn: sqlite3.Connection) -> None:
     )
 
 
+# Knowledge-graph projection tables (see clara/graph/). The graph is derived
+# from the memories table — every row here is rebuildable via
+# `clara graph rebuild`, and edges are invalidated, never deleted.
+_GRAPH_DDL = [
+    """
+    CREATE TABLE graph_nodes (
+        node_id TEXT PRIMARY KEY,
+        user_id TEXT,
+        canonical_name TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        entity_type TEXT NOT NULL DEFAULT 'concept',
+        world_model_id TEXT,
+        properties TEXT DEFAULT '{}',
+        mention_count INTEGER DEFAULT 0,
+        expandable INTEGER NOT NULL DEFAULT 1,
+        status TEXT DEFAULT 'active',
+        merged_into TEXT,
+        created_at TIMESTAMP,
+        updated_at TIMESTAMP
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX uq_graph_nodes_identity
+        ON graph_nodes (coalesce(user_id, ''), entity_type, canonical_name)
+        WHERE status = 'active'
+    """,
+    """
+    CREATE TABLE graph_aliases (
+        alias_norm TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        user_id TEXT NOT NULL DEFAULT '',
+        source TEXT DEFAULT 'auto',
+        PRIMARY KEY (alias_norm, user_id)
+    )
+    """,
+    """
+    CREATE TABLE graph_edges (
+        edge_id TEXT PRIMARY KEY,
+        user_id TEXT,
+        src_id TEXT NOT NULL,
+        dst_id TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        belief_id TEXT,
+        confidence REAL DEFAULT 0.8,
+        weight REAL DEFAULT 1.0,
+        valid_from TIMESTAMP NOT NULL,
+        invalid_at TIMESTAMP,
+        temporal_precision TEXT DEFAULT 'exact',
+        metadata TEXT DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX ix_graph_edges_src_valid ON graph_edges (src_id) WHERE invalid_at IS NULL",
+    "CREATE INDEX ix_graph_edges_dst_valid ON graph_edges (dst_id) WHERE invalid_at IS NULL",
+    "CREATE INDEX ix_graph_edges_belief ON graph_edges (belief_id)",
+]
+
+
+def _migration_2(conn: sqlite3.Connection) -> None:
+    for statement in _GRAPH_DDL:
+        conn.execute(statement)
+    # FTS5/trigram may be unavailable in this SQLite build — entity resolution
+    # then degrades to a scan; the migration itself must still succeed.
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute(
+            "CREATE VIRTUAL TABLE graph_nodes_fts USING fts5("
+            "node_id UNINDEXED, names, entity_type, tokenize='trigram')"
+        )
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_1),
+    (2, _migration_2),
 ]
 
 

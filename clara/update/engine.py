@@ -624,6 +624,12 @@ class MemoryUpdateEngine:
         )
         self._session.add(record)
         await self._session.flush()
+        if memory_type == MemoryType.world_model:
+            # This branch bypasses WorldModelStore, so project directly
+            # (fail-soft inside the projection).
+            from clara.graph import project as graph_project
+
+            await graph_project.project_world_model_upserted(self._session, record)
         return record
 
     async def _mark_superseded(

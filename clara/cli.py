@@ -13,6 +13,7 @@ Commands:
     clara forget MEMORY_ID [--archive]      retire a memory (never deletes)
     clara stats                             store location + counts
     clara doctor [--quiet]                  health check (exit 0/1/2)
+    clara graph rebuild|stats|show|path|doctor   knowledge-graph tools
     clara mcp                               run the MCP stdio server
 """
 
@@ -293,6 +294,102 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# clara graph
+# ---------------------------------------------------------------------------
+
+
+async def _cmd_graph(args: argparse.Namespace) -> int:
+    from sqlalchemy import text as sa_text
+
+    memory = await _open()
+    try:
+        if args.graph_cmd == "rebuild":
+            counts = await memory.graph_rebuild(from_scratch=args.from_scratch)
+            print(
+                f"graph rebuilt: {counts['nodes']} nodes, {counts['edges']} edges "
+                f"({counts['edges_created']} created this run)"
+            )
+            return 0
+
+        if args.graph_cmd == "stats":
+            stats = await memory.stats()
+            graph = stats.get("graph")
+            if not graph:
+                print("graph: no graph tables (run `clara graph rebuild`)")
+                return 1
+            print(f"nodes: {graph['nodes']}")
+            print(f"edges: {graph['edges']}")
+            return 0
+
+        if args.graph_cmd == "show":
+            card = await memory.graph_entity(args.entity, include_history=args.history)
+            if not card.get("found"):
+                print(f"(no graph entity for {args.entity!r})")
+                return 1
+            print(f"{card['name']}  [{card['entity_type']}]")
+            print(f"  canonical: {card['canonical_name']}")
+            print(f"  mentions: {card['mention_count']}  "
+                  f"expandable: {'yes' if card['expandable'] else 'no'}")
+            if card["aliases"]:
+                print(f"  aliases: {', '.join(card['aliases'])}")
+            if card["possible_duplicates"]:
+                print(f"  possible duplicates: {', '.join(card['possible_duplicates'])}")
+            if card["world_model_id"]:
+                print(f"  world model: {card['world_model_id']}")
+            for line in card["edges"]:
+                print(f"  {line}")
+            return 0
+
+        if args.graph_cmd == "path":
+            result = await memory.graph_path(args.src, args.dst)
+            if not result.get("found"):
+                print("(no path found)")
+                return 1
+            print(f"path ({result['hops']} hops):")
+            for line in result["path"]:
+                print(f"  {line}")
+            return 0
+
+        # doctor
+        async with memory._session_factory() as session:
+            dup_rows = (
+                await session.execute(
+                    sa_text(
+                        "SELECT node_id, display_name, properties FROM graph_nodes "
+                        "WHERE status = 'active' "
+                        "AND properties LIKE '%possible_duplicates%'"
+                    )
+                )
+            ).all()
+            dangling = (
+                await session.execute(
+                    sa_text(
+                        "SELECT edge_id, belief_id FROM graph_edges "
+                        "WHERE invalid_at IS NULL AND belief_id IS NOT NULL "
+                        "AND NOT EXISTS (SELECT 1 FROM memories m WHERE "
+                        "replace(CAST(m.memory_id AS TEXT), '-', '') = "
+                        "replace(graph_edges.belief_id, '-', '') "
+                        "AND m.status = 'active')"
+                    )
+                )
+            ).all()
+        issues = 0
+        for node_id, display, props in dup_rows:
+            dupes = json.loads(props or "{}").get("possible_duplicates") or []
+            if dupes:
+                issues += 1
+                print(f"possible duplicate: {display} ({node_id}) ~ {', '.join(dupes)}")
+        for edge_id, belief_id in dangling:
+            issues += 1
+            print(f"dangling edge: {edge_id} -> belief {belief_id} (not active)")
+        if not issues:
+            print("graph doctor: no issues")
+        return 0 if not issues else 1
+    finally:
+        await memory.close()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -331,6 +428,20 @@ def main(argv: list[str] | None = None) -> None:
     p_doc = sub.add_parser("doctor", help="Health check (exit 0/1/2).")
     p_doc.add_argument("--quiet", action="store_true")
 
+    p_graph = sub.add_parser("graph", help="Knowledge-graph tools.")
+    gsub = p_graph.add_subparsers(dest="graph_cmd", required=True)
+    g_rebuild = gsub.add_parser("rebuild", help="Regenerate graph tables from memories.")
+    g_rebuild.add_argument("--from-scratch", action="store_true")
+    gsub.add_parser("stats", help="Node/edge counts.")
+    g_show = gsub.add_parser("show", help="Entity card + relations.")
+    g_show.add_argument("entity")
+    g_show.add_argument("--history", action="store_true",
+                        help="Include invalidated relations.")
+    g_path = gsub.add_parser("path", help="Best relation path between two entities.")
+    g_path.add_argument("src")
+    g_path.add_argument("dst")
+    gsub.add_parser("doctor", help="List possible duplicates and dangling edges.")
+
     sub.add_parser("mcp", help="Run the MCP stdio server (same as clara-mcp).")
 
     args = parser.parse_args(argv)
@@ -352,6 +463,7 @@ def main(argv: list[str] | None = None) -> None:
         "forget": _cmd_forget,
         "stats": _cmd_stats,
         "doctor": _cmd_doctor,
+        "graph": _cmd_graph,
     }[args.command]
     raise SystemExit(asyncio.run(handler(args)))
 
