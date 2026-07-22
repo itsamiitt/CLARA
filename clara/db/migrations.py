@@ -27,7 +27,6 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.request import pathname2url
 
 SCHEMA_VERSION = 1
 
@@ -105,6 +104,10 @@ def open_db(path: str | os.PathLike[str]) -> sqlite3.Connection:
     reopened read-only (URI ``mode=ro`` plus ``PRAGMA query_only``) and one
     warning line goes to stderr — the file is never written.
     """
+    # Lazy: urllib.request is comparatively heavy and only the too-new branch
+    # needs it — keeping it out of module import keeps clara.fastpath cheap.
+    from urllib.request import pathname2url
+
     resolved = Path(path).resolve()
     conn = sqlite3.connect(resolved, isolation_level=None)
     conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")

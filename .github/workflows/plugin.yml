@@ -18,18 +18,44 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # The plugin manifest lands in milestone 02. Every step below is gated
-      # on its presence so this workflow stays a green no-op until then.
       - name: Set up Node.js
-        if: hashFiles('.claude-plugin/plugin.json') != ''
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Install Claude Code CLI
-        if: hashFiles('.claude-plugin/plugin.json') != ''
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Validate plugin (strict)
-        if: hashFiles('.claude-plugin/plugin.json') != ''
         run: claude plugin validate --strict .
+
+  quality:
+    name: Scripts and fastpath
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Scripts are executable
+        run: |
+          for f in scripts/bootstrap.sh scripts/clara-mcp-launch.sh scripts/session-start.sh; do
+            test -x "$f" || { echo "::error::$f is not executable (git mode must be 100755)"; exit 1; }
+          done
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Fastpath import purity
+        run: python -c "import clara.fastpath.context, clara.fastpath.db, sys; bad = [m for m in ('sqlalchemy', 'asyncio', 'aiosqlite') if m in sys.modules]; assert not bad, f'heavy modules leaked into fastpath import: {bad}'"
+
+      - name: Fastpath and plugin tests
+        run: pytest tests/test_fastpath.py tests/test_plugin_layout.py -q

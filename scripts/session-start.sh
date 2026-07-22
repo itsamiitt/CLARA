@@ -1,0 +1,39 @@
+#!/bin/sh
+# CLARA plugin SessionStart hook: inject the memory context block.
+#
+# Contract: ALWAYS exits 0 — memory must never block a session. stdout is the
+# context Claude sees; stderr carries diagnostics. Runs exactly one fastpath
+# invocation and never execs before it.
+
+set -u
+
+# Keep in sync with bootstrap.sh.
+find_bin() {
+  for _cand in "$1/bin/$2" "$1/Scripts/$2" "$1/Scripts/$2.exe"; do
+    if [ -x "$_cand" ]; then
+      printf '%s' "$_cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-$HOME/.clara}/plugin}"
+
+sh "$SCRIPT_DIR/bootstrap.sh"
+rc=$?
+
+if [ "$rc" -eq 3 ]; then
+  printf '%s\n' 'CLARA is installing in the background — memory will be available next session.'
+  exit 0
+fi
+if [ "$rc" -ne 0 ]; then
+  # Bootstrap already explained itself on stderr; never block the session.
+  exit 0
+fi
+
+if PYBIN=$(find_bin "$DATA_DIR/current" python); then
+  "$PYBIN" -m clara.fastpath.context --cwd "$PWD" || true
+fi
+exit 0

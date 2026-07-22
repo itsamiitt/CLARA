@@ -31,12 +31,26 @@ from clara.memory.belief import BeliefMemory, SourceType
 from clara.memory.event import EventStore
 from clara.memory.skill import SkillStore
 from clara.memory.world_model import WorldModelStore
+from clara.repoid import repo_id
 from clara.retrieval.engine import ScoredMemory
 from clara.retrieval.lexical import LexicalRetriever
 
 logger = logging.getLogger(__name__)
 
 VALID_TYPES = {t.value for t in MemoryType}
+
+# repo_id shells out to git; cache per working directory so long-lived MCP
+# servers pay the subprocess cost once, not per save.
+_REPO_ID_CACHE: dict[str, str] = {}
+
+
+def _cached_repo_id() -> str:
+    cwd = str(Path.cwd())
+    cached = _REPO_ID_CACHE.get(cwd)
+    if cached is None:
+        cached = repo_id(cwd)
+        _REPO_ID_CACHE[cwd] = cached
+    return cached
 
 
 def _coerce_types(types: Sequence[str] | None) -> list[MemoryType] | None:
@@ -176,10 +190,13 @@ class LocalMemory:
                 )
                 if confidence is not None:
                     record.confidence = max(0.0, min(1.0, float(confidence)))
+                meta = dict(record.metadata_) if record.metadata_ else {}
                 if tags:
-                    meta = dict(record.metadata_) if record.metadata_ else {}
                     meta["tags"] = list(tags)
-                    record.metadata_ = meta
+                # Stamp provenance on new writes; world-model upserts of an
+                # existing record keep their original repo_id.
+                meta.setdefault("repo_id", _cached_repo_id())
+                record.metadata_ = meta
                 memory_id = str(record.memory_id)
                 rec_type = record.memory_type.value
 

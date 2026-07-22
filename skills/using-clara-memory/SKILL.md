@@ -1,0 +1,56 @@
+---
+name: using-clara-memory
+description: How and when to use CLARA persistent memory — save durable facts with memory_save (belief/event/skill/world_model), search with memory_search before asking the user something they may already have told you, and keep tool use proportional to the task.
+---
+
+# Using CLARA memory
+
+CLARA is a plain SQLite store exposed through six MCP tools: `memory_save`,
+`memory_search`, `memory_recent`, `memory_update`, `memory_forget`,
+`memory_stats`. **You** are the only intelligence — there is no backend model
+doing extraction or embeddings. You decide what to store and how to query it.
+
+## When to recall
+
+- At the start of a non-trivial task, call `memory_search` with the key terms
+  (the user, the project, the technology, the decision at hand) before acting.
+- **Search before asking** the user something they may already have told you —
+  preferences, stack choices, past decisions.
+- Use `memory_recent` to see what is top-of-mind without a query.
+
+## When to save (`memory_save`)
+
+Save durable, reusable facts — not transient chatter. Pick the type:
+
+- **belief** — stable preference or fact. Requires `subject`, `relation`,
+  `object` (e.g. subject="user", relation="prefers", object="pytest over
+  unittest"). Corrections: save the new belief and mark the old one wrong with
+  `is_negation: true` (e.g. "user switched from npm to pnpm" → negation of
+  "user uses npm" plus a new belief).
+- **event** — a notable thing that happened. Requires `subject`,
+  `event_type`; add a `description` (a migration, a release, an incident,
+  an architectural decision).
+- **skill** — a reusable procedure worth repeating. Requires `name`; add
+  `trigger_conditions` (when to use it) and `steps` (how).
+- **world_model** — current state of a service/tool/repo. Requires
+  `entity_type`, `name`; put state in `properties`. Upserts replace the
+  active record for the same entity.
+
+Add `tags`, a `domain`, and `confidence` (0..1) when useful. Use
+`memory_update` to adjust confidence/tags, `memory_forget` to retire a memory
+(it is never hard-deleted).
+
+## Hygiene
+
+- **Never store secrets** — no API keys, tokens, passwords, or credentials,
+  even if the user pastes them.
+- Do not save what the repo or git history already records, or one-off
+  trivia. Save what was non-obvious and will matter again.
+- Prefer specific, atomic memories over long blobs.
+
+## Proportionality
+
+A `=== MEMORY CONTEXT ===` block is injected at session start. For trivial
+tasks that block already covers, do not spend tool calls on memory — answer
+directly. Reach for the tools when the task is non-trivial, when the user
+references past context, or when you learn something durable.
