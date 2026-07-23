@@ -341,6 +341,23 @@ async def _cmd_docs(args: argparse.Namespace) -> int:
         )
         return 0
 
+    if args.docs_cmd in ("archive", "restore"):
+        memory = await _open()
+        try:
+            handler = memory.docs_archive if args.docs_cmd == "archive" else memory.docs_restore
+            result = await handler(root, path=args.path)
+        finally:
+            await memory.close()
+        if not result.get("found"):
+            print(f"error: {result.get('hint', 'document not found')}", file=sys.stderr)
+            return 2
+        if result.get("action") == "refused":
+            print(f"refused: {result['reason']}", file=sys.stderr)
+            return 2
+        moved = " (file moved)" if result.get("moved") else ""
+        print(f"{result['action']}: {result.get('to', args.path)}{moved}")
+        return 0
+
     repo = compute_repo_id(root)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -415,6 +432,26 @@ async def _cmd_graph(args: argparse.Namespace) -> int:
             print(f"path ({result['hops']} hops):")
             for line in result["path"]:
                 print(f"  {line}")
+            return 0
+
+        if args.graph_cmd == "merge":
+            result = await memory.graph_merge(args.dup, args.canonical)
+            if not result.get("merged"):
+                reason = result.get("reason") or f"missing: {result.get('missing')}"
+                print(f"error: {reason}", file=sys.stderr)
+                return 2
+            audit = result["audit"]
+            repointed = (
+                len(audit["repointed_src_edges"]) + len(audit["repointed_dst_edges"])
+            )
+            print(
+                f"merged {args.dup} into {args.canonical} "
+                f"({repointed} edges re-pointed, audit {audit['merge_id']})"
+            )
+            return 0
+
+        if args.graph_cmd == "export":
+            print(await memory.graph_export(format=args.format))
             return 0
 
         # doctor
@@ -505,6 +542,10 @@ def main(argv: list[str] | None = None) -> None:
     d_status = dsub.add_parser("status", help="One-sentence standing of a document.")
     d_status.add_argument("path")
     dsub.add_parser("report", help="Stale/dead-ref/duplicate/archive proposals.")
+    d_archive = dsub.add_parser("archive", help="Archive a document (never automatic).")
+    d_archive.add_argument("path")
+    d_restore = dsub.add_parser("restore", help="Reverse an archive.")
+    d_restore.add_argument("path")
 
     p_graph = sub.add_parser("graph", help="Knowledge-graph tools.")
     gsub = p_graph.add_subparsers(dest="graph_cmd", required=True)
@@ -519,6 +560,12 @@ def main(argv: list[str] | None = None) -> None:
     g_path.add_argument("src")
     g_path.add_argument("dst")
     gsub.add_parser("doctor", help="List possible duplicates and dangling edges.")
+    g_merge = gsub.add_parser("merge", help="Merge a duplicate node into its canonical.")
+    g_merge.add_argument("dup")
+    g_merge.add_argument("canonical")
+    g_export = gsub.add_parser("export", help="Export the graph.")
+    g_export.add_argument("--format", choices=["mermaid", "dot", "json"],
+                          default="mermaid")
 
     sub.add_parser("mcp", help="Run the MCP stdio server (same as clara-mcp).")
 

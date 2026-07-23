@@ -79,6 +79,19 @@ entries. Trust rules:
 - The ledger updates via `clara docs scan`; if a document is missing from
   it, suggest a scan rather than guessing.
 
+## Fulfillment (closing out plans)
+
+- **Immediately after completing the work a plan-type document described**,
+  call `docs_fulfill` with 1-5 distilled durable facts — the decisions,
+  constraints, and standards that outlive the plan, not implementation
+  trivia. Pass the confirming commit/PR ref as evidence. `/clara:done`
+  walks this flow with user confirmation.
+- **When authoring a v2 of a plan**, call `docs_supersede(old, new)` so the
+  old plan is quarantined and future reads of it get annotated.
+- **When a fact changes**, save the correction (negation or new belief) and
+  let supersession invalidate the old edge — never claim deletion; CLARA
+  retires, it does not destroy.
+
 ## Proportionality
 
 A `=== MEMORY CONTEXT ===` block is injected at session start. For trivial

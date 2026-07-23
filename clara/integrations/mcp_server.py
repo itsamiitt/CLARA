@@ -252,6 +252,25 @@ def build_server():
         memory = await _get_memory()
         return await memory.stats()
 
+    async def _repo_root(repo: str | None) -> str:
+        """Resolve the repo root: explicit arg → MCP workspace roots → cwd."""
+        from clara.docs.scan import find_repo_root
+
+        if repo is not None:
+            return repo
+        root: str | None = None
+        try:
+            ctx = server.get_context()
+            roots_result = await ctx.session.list_roots()
+            path_str = str(roots_result.roots[0].uri)
+            if path_str.startswith("file://"):
+                from urllib.request import url2pathname
+
+                root = url2pathname(path_str[7:])
+        except Exception:  # noqa: BLE001 — roots are optional; fall back to cwd
+            root = None
+        return root if root is not None else find_repo_root(os.getcwd())
+
     @server.tool()
     async def docs_status(path_or_query: str, repo: str | None = None) -> dict[str, Any]:
         """Standing of a repository document from the curator ledger.
@@ -267,24 +286,9 @@ def build_server():
         import sqlite3 as _sqlite3
 
         from clara.docs.report import get_status
-        from clara.docs.scan import find_repo_root
         from clara.repoid import repo_id as compute_repo_id
 
-        root = repo
-        if root is None:
-            try:
-                ctx = server.get_context()
-                roots_result = await ctx.session.list_roots()
-                first = roots_result.roots[0].uri
-                path_str = str(first)
-                if path_str.startswith("file://"):
-                    from urllib.request import url2pathname
-
-                    root = url2pathname(path_str[7:])
-            except Exception:  # noqa: BLE001 — roots are optional; fall back to cwd
-                root = None
-        if root is None:
-            root = find_repo_root(os.getcwd())
+        root = await _repo_root(repo)
 
         def _lookup() -> dict[str, Any]:
             rid = compute_repo_id(root)
@@ -303,6 +307,84 @@ def build_server():
             return status
 
         return await asyncio.to_thread(_lookup)
+
+    @server.tool()
+    async def docs_classify(
+        path: str,
+        doc_type: str,
+        rationale: str,
+        tier: str | None = None,
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Attest a document's type (and optionally tier) in the curator ledger.
+
+        Use when the heuristic classification is wrong or missing. doc_type:
+        e.g. adr, spec, plan, guide, brainstorm, standard. tier: T0 pinned /
+        T1 authoritative / T2 working / T3 scratch / TX quarantined. Always
+        give a one-sentence rationale. Idempotent for unchanged content.
+        """
+        memory = await _get_memory()
+        return await memory.docs_classify(
+            await _repo_root(repo), path=path, doc_type=doc_type, tier=tier,
+            rationale=rationale,
+        )
+
+    @server.tool()
+    async def docs_supersede(
+        old_path: str,
+        new_path: str,
+        rationale: str,
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Mark one document as superseded by another (e.g. plan v1 -> v2).
+
+        The old document moves to the quarantine list and future reads of it
+        get annotated; the new document becomes the current guidance. Also
+        records a `supersedes` edge in the knowledge graph when present.
+        """
+        memory = await _get_memory()
+        return await memory.docs_supersede(
+            await _repo_root(repo), old_path=old_path, new_path=new_path,
+            rationale=rationale,
+        )
+
+    @server.tool()
+    async def docs_fulfill(
+        path: str,
+        distilled: list[dict[str, Any]],
+        evidence: str | None = None,
+        rationale: str = "plan completed",
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Close out a completed plan document by distilling it into memory.
+
+        Call immediately after finishing the work a plan-type document
+        described. distilled: 1-5 memory_save-shaped facts (mem_type +
+        fields) capturing the durable outcomes — decisions, constraints,
+        standards — not implementation trivia. evidence: the commit/PR/issue
+        ref proving completion. Atomic: the memories, the `fulfilled`
+        lifecycle transition, and provenance graph edges commit together.
+        Returns {doc_id, memory_ids, edge_ids}.
+        """
+        memory = await _get_memory()
+        return await memory.docs_fulfill(
+            await _repo_root(repo), path=path, distilled=distilled,
+            evidence=evidence, rationale=rationale,
+        )
+
+    @server.tool()
+    async def docs_report(
+        scope: str = "repo", repo: str | None = None
+    ) -> dict[str, Any]:
+        """Document rot report for the current repo (proposals only).
+
+        Lists stale documents, dead-reference documents, duplicate clusters,
+        and archive candidates. Nothing is mutated — present findings to the
+        user and act only on their instruction. scope: reserved (only 'repo'
+        today).
+        """
+        memory = await _get_memory()
+        return await memory.docs_report(await _repo_root(repo))
 
     @server.tool()
     async def graph_entity(name: str, include_history: bool = False) -> dict[str, Any]:

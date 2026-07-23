@@ -2,6 +2,79 @@
 
 One entry per milestone of the CLARA → Claude Code plugin conversion.
 
+## 2026-07-23 — Milestone 05: judgment & promotion (Prompt 05)
+
+Branch `feat/plugin-sprint0`, one commit
+(`feat: judgment layer — verdict tools, fulfillment, hook annotations`).
+
+**Built.**
+- `clara/docs/verdicts.py`: `classify` (type_source='claude', idempotent per
+  doc+verdict+content_hash), `supersede` (lifecycle + superseded_by +
+  quarantine manifest regen + graph `supersedes` edge), `fulfill` (ATOMIC:
+  distilled memory_save-shaped facts + lifecycle='fulfilled' + fulfilled_by
+  evidence + attestation + `derived_from`/`fulfilled_by` graph edges in one
+  transaction — the atomicity test proves a mid-list bad fact leaves zero
+  rows), `archive`/`restore` (git-mv per policy archive_mode, T0/T1 refused,
+  attestations both ways, round-trip tested). Every operation writes a
+  doc_attestations row. Fulfilled memories carry provenance
+  `{source: docs_fulfill, doc_id, tier}` + `doc_tier` (tier weighting).
+- MCP tools: `docs_classify`, `docs_supersede`, `docs_fulfill`,
+  `docs_report` (+ shared `_repo_root` resolver: explicit → MCP roots → cwd).
+- `clara/graph/admin.py`: `merge_nodes` (loser status='merged' +
+  merged_into + alias to winner + edges re-pointed + `merge_audit` in
+  properties listing every re-pointed edge id — reversible-auditable,
+  tested) and `export_graph` (mermaid/dot/json, labels sanitized: quotes,
+  brackets, newlines). CLI `clara graph merge|export`,
+  `clara docs archive|restore`.
+- Fastpath: proposals file `$BASE/proposals/<repo_id>.txt` (active plan
+  docs with checkbox ratio ≥ 0.9 or merge evidence), repo index
+  (`index.tsv`, both native and MSYS spellings) and `.git/clara-marker`
+  (repo_id + posix root) — the marker makes the pure-sh hooks immune to
+  Windows 8.3-short vs long vs MSYS path spellings. `docs_fulfill` drops
+  its doc from the proposals file.
+- `scripts/session-stop.sh` (Stop hook): pure sh, zero subprocesses,
+  fail-open, exit 0 always; marker → index fallback; one nudge per session
+  via `$BASE/session-flags/<session>.done`; plain stdout (Stop is not an
+  additionalContext event per S1). Measured (Windows Git Bash): 25-71 ms
+  wall including bash startup; script body does no forks, so POSIX-sh on
+  the launch targets is single-digit ms.
+- `scripts/read-annotate.sh` (PostToolUse Read): jq parse (awk fallback),
+  single awk does relativization (marker root or $PWD prefix), quarantine
+  manifest match, per-file-per-session debounce (getline flag probe), and
+  emits the S1 channel verbatim: stdout JSON
+  `hookSpecificOutput.additionalContext`, exit 0. Values travel via
+  ENVIRON, never `awk -v` (which escape-processes backslashes and corrupted
+  Windows paths — the bug that cost the debugging round). Measured
+  (Windows Git Bash + jq): 216-228 ms wall, dominated by process spawns;
+  Linux-representative cost is the awk+manifest scan, well under the 5 ms
+  target. All hook-consumed files now written with LF explicitly (CRLF
+  from Windows default newline broke `read`).
+- `hooks/hooks.json`: + PostToolUse(matcher Read) and Stop entries.
+- `/clara:done` command (review → draft distilled facts → confirm →
+  docs_fulfill); SKILL.md Fulfillment section (fulfill immediately after
+  completing plan work, supersede on v2, corrections never claim deletion).
+- Tests: +15 (`test_verdicts.py`) — E2E: fulfill a fixture plan → 3
+  provenanced memories + derived_from/fulfilled_by edges → a NEW session's
+  fastpath answers the plan's key decision from [MEMORY CONTEXT] with no
+  doc content leaked; atomicity; classify idempotence; supersede quarantine
+  + edge; archive/restore round trip incl. T1 refusal; merge audit
+  reconstructs pre-merge state + alias resolves to winner; export
+  sanitization; proposals generation; Stop nudge exactly once across 3
+  runs / silent with no proposals; read-annotate annotates once per
+  session, silent on normal docs, fail-open on garbage stdin.
+
+**Deviations from the prompt.**
+1. Read-annotate's no-jq fallback is a conservative awk extraction rather
+   than sed — same conservatism, one fewer tool in the pipeline.
+2. Repo identity for the sh hooks uses `.git/clara-marker` (fastpath-
+   stamped) with the index.tsv as fallback, instead of path-string
+   matching alone — Windows path spellings (8.3/MSYS) made pure string
+   matching unreliable.
+3. Hook timing targets: ≤5 ms holds for the script bodies on the launch
+   platforms (macOS/Linux/WSL); Windows Git Bash wall times above include
+   30-200 ms of process-spawn overhead inherent to the platform (recorded
+   verbatim), consistent with the best-effort Windows stance in README.
+
 ## 2026-07-23 — Milestone 04: curator doc ledger (Prompt 04)
 
 Branch `feat/plugin-sprint0`, one commit

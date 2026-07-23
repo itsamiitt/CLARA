@@ -177,7 +177,9 @@ def _write_quarantine_manifest(conn: sqlite3.Connection, db_path: str, repo: str
         lines.append(f"{row['rel_path']}\t{status}\t{note}")
     target = quarantine_dir(db_path) / f"{repo}.tsv"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    target.write_text(
+        "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8", newline="\n"
+    )
     return target
 
 

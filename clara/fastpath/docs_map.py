@@ -40,6 +40,17 @@ def _approx_tokens(text: str) -> int:
     return (len(text) + 3) // 4
 
 
+class _suppress_oserror:
+    """Tiny contextlib.suppress(OSError) stand-in (contextlib not in the
+    fastpath's allowed import set)."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return exc_type is not None and issubclass(exc_type, OSError)  # type: ignore[arg-type]
+
+
 def _quote_path(raw: str) -> str:
     """Verbatim-quoted path: control chars stripped, wrapped in double quotes."""
     cleaned = "".join(ch for ch in str(raw) if ord(ch) >= 0x20 and ord(ch) != 0x7F)
@@ -91,7 +102,7 @@ def _record_dirty(db_path: Path, repo: str, dirty: list[str]) -> None:
         merged = sorted(known | set(dirty))
         if merged != sorted(known):
             sidecar.parent.mkdir(parents=True, exist_ok=True)
-            sidecar.write_text("\n".join(merged) + "\n", encoding="utf-8")
+            sidecar.write_text("\n".join(merged) + "\n", encoding="utf-8", newline="\n")
     except OSError as exc:
         print(f"clara fastpath: dirty sidecar write failed ({exc})", file=sys.stderr)
 
@@ -129,11 +140,82 @@ def _refresh_quarantine(conn: sqlite3.Connection, db_path: Path, repo: str) -> N
             lines.append(f"{rel_path}\t{status}\t{note}")
         base.mkdir(parents=True, exist_ok=True)
         (base / f"{repo}.tsv").write_text(
-            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+            "\n".join(lines) + ("\n" if lines else ""),
+            encoding="utf-8",
+            newline="\n",
         )
-        stamp_file.write_text(stamp_value, encoding="utf-8")
+        stamp_file.write_text(stamp_value, encoding="utf-8", newline="\n")
     except OSError as exc:
         print(f"clara fastpath: quarantine refresh failed ({exc})", file=sys.stderr)
+
+
+def _update_repo_index(db_path: Path, root: str, repo: str) -> None:
+    """Maintain proposals/index.tsv (abs repo root -> repo_id) so the pure-sh
+    Stop and read-annotate hooks can find their per-repo files without git.
+
+    Windows roots are written in BOTH spellings — ``C:/x`` (native, what the
+    Read tool passes) and ``/c/x`` (MSYS, what ``$PWD`` looks like under Git
+    Bash) — so the scripts do exact string matches with zero normalization.
+    """
+    index = db_path.resolve().parent / "proposals" / "index.tsv"
+    posix = Path(root).resolve().as_posix()
+    entries = [f"{posix}\t{repo}"]
+    if len(posix) > 2 and posix[1] == ":":
+        entries.append(f"/{posix[0].lower()}{posix[2:]}\t{repo}")
+    try:
+        lines = (
+            [line for line in index.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if index.exists()
+            else []
+        )
+        if any(entry not in lines for entry in entries):
+            lines = [line for line in lines if not line.endswith(f"\t{repo}")]
+            lines.extend(entries)
+            index.parent.mkdir(parents=True, exist_ok=True)
+            index.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    except OSError as exc:
+        print(f"clara fastpath: repo index write failed ({exc})", file=sys.stderr)
+    # Primary key for the sh hooks: a marker INSIDE .git (local state, not
+    # working tree) — immune to 8.3-short vs long vs MSYS path spellings.
+    git_dir = Path(root) / ".git"
+    if git_dir.is_dir():
+        # OSError (read-only .git) tolerated — hooks fall back to the index.
+        with _suppress_oserror():
+            (git_dir / "clara-marker").write_text(
+                f"{repo}\n{posix}\n", encoding="utf-8", newline="\n"
+            )
+
+
+def _refresh_proposals(conn: sqlite3.Connection, db_path: Path, repo: str) -> None:
+    """proposals/<repo_id>.txt — one line per still-active plan doc that looks
+    complete (checkbox ratio >= 0.9 or merge evidence); Stop-hook fuel."""
+    rows = conn.execute(
+        "SELECT rel_path, signals FROM doc_registry WHERE repo_id = ? "
+        "AND invalid_at IS NULL AND lifecycle = 'active' AND doc_type = 'plan' "
+        "ORDER BY rel_path",
+        (repo,),
+    ).fetchall()
+    lines: list[str] = []
+    for rel_path, signals_raw in rows:
+        try:
+            sig = json.loads(signals_raw or "{}")
+        except ValueError:
+            continue
+        boxes = sig.get("checkbox_state") or {}
+        merged = (sig.get("merge_evidence") or {}).get("merged")
+        ratio = boxes.get("ratio")
+        if (isinstance(ratio, (int, float)) and ratio >= 0.9) or merged:
+            cleaned = "".join(ch for ch in rel_path if ord(ch) >= 0x20)
+            lines.append(cleaned)
+    target = db_path.resolve().parent / "proposals" / f"{repo}.txt"
+    try:
+        content = "\n".join(lines) + ("\n" if lines else "")
+        if target.exists() and target.read_text(encoding="utf-8") == content:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        print(f"clara fastpath: proposals write failed ({exc})", file=sys.stderr)
 
 
 def _checkbox_pct(signals_raw: str) -> str | None:
@@ -180,6 +262,8 @@ def build_map(cwd: str) -> str | None:
         if dirty:
             _record_dirty(db_path, repo, dirty)
         _refresh_quarantine(conn, db_path, repo)
+        _update_repo_index(db_path, root, repo)
+        _refresh_proposals(conn, db_path, repo)
 
         t1 = [r for r in rows if r[1] in ("T0", "T1") and r[2] == "active"]
         t2 = [r for r in rows if r[1] == "T2" and r[2] in ("active", "draft")]

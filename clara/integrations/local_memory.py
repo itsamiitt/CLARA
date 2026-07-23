@@ -20,10 +20,12 @@ import asyncio
 import logging
 import sqlite3
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-from sqlalchemy import func, select, text as sa_text
+from sqlalchemy import func, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from clara.agent import _make_engine, format_context
@@ -195,38 +197,37 @@ class LocalMemory:
                 f"Unknown mem_type {mem_type!r}. Expected one of {sorted(VALID_TYPES)}."
             )
 
-        async with self._session_factory() as session:
-            async with session.begin():
-                record = await self._route_save(
-                    session,
-                    mem_type=mem_type,
-                    subject=subject,
-                    relation=relation,
-                    object=object,
-                    is_negation=is_negation,
-                    event_type=event_type,
-                    name=name,
-                    trigger_conditions=trigger_conditions,
-                    steps=steps,
-                    entity_type=entity_type,
-                    properties=properties,
-                    description=description,
-                    domain=domain,
-                    confidence=confidence,
-                    source=source,
-                    user_id=user_id,
-                )
-                if confidence is not None:
-                    record.confidence = max(0.0, min(1.0, float(confidence)))
-                meta = dict(record.metadata_) if record.metadata_ else {}
-                if tags:
-                    meta["tags"] = list(tags)
-                # Stamp provenance on new writes; world-model upserts of an
-                # existing record keep their original repo_id.
-                meta.setdefault("repo_id", _cached_repo_id())
-                record.metadata_ = meta
-                memory_id = str(record.memory_id)
-                rec_type = record.memory_type.value
+        async with self._session_factory() as session, session.begin():
+            record = await self._route_save(
+                session,
+                mem_type=mem_type,
+                subject=subject,
+                relation=relation,
+                object=object,
+                is_negation=is_negation,
+                event_type=event_type,
+                name=name,
+                trigger_conditions=trigger_conditions,
+                steps=steps,
+                entity_type=entity_type,
+                properties=properties,
+                description=description,
+                domain=domain,
+                confidence=confidence,
+                source=source,
+                user_id=user_id,
+            )
+            if confidence is not None:
+                record.confidence = max(0.0, min(1.0, float(confidence)))
+            meta = dict(record.metadata_) if record.metadata_ else {}
+            if tags:
+                meta["tags"] = list(tags)
+            # Stamp provenance on new writes; world-model upserts of an
+            # existing record keep their original repo_id.
+            meta.setdefault("repo_id", _cached_repo_id())
+            record.metadata_ = meta
+            memory_id = str(record.memory_id)
+            rec_type = record.memory_type.value
 
         logger.info("Saved %s memory %s", rec_type, memory_id)
         return {"memory_id": memory_id, "type": rec_type, "action": "saved"}
@@ -368,36 +369,35 @@ class LocalMemory:
         seed_names = [n for n in seed_names if n.lower() != "user"][:3]
         if not seed_names:
             return None
-        async with self._session_factory() as session:
-            async with session.begin():
-                groups: list[tuple[str, list[dict[str, Any]]]] = []
-                all_edges: list[dict[str, Any]] = []
-                node_ids: list[str] = []
-                for name in seed_names:
-                    node = await resolve_node(
-                        session, name, user_id=user_id, create=False, bump_mention=False
-                    )
-                    if node is None:
-                        continue
-                    edges = await graph_traverse.traverse(
-                        session,
-                        [node["node_id"]],
-                        depth=depth,
-                        user_id=user_id,
-                        limit=12,
-                    )
-                    if not edges:
-                        continue
-                    groups.append((node["display_name"], edges))
-                    all_edges.extend(edges)
-                    node_ids.extend(
-                        [e["src_id"] for e in edges] + [e["dst_id"] for e in edges]
-                    )
-                if not all_edges:
-                    return None
-                nodes = await graph_traverse.fetch_nodes(session, node_ids)
-                await graph_traverse.bump_traversed(session, all_edges)
-                section = graph_render.render_graph_section(groups, nodes)
+        async with self._session_factory() as session, session.begin():
+            groups: list[tuple[str, list[dict[str, Any]]]] = []
+            all_edges: list[dict[str, Any]] = []
+            node_ids: list[str] = []
+            for name in seed_names:
+                node = await resolve_node(
+                    session, name, user_id=user_id, create=False, bump_mention=False
+                )
+                if node is None:
+                    continue
+                edges = await graph_traverse.traverse(
+                    session,
+                    [node["node_id"]],
+                    depth=depth,
+                    user_id=user_id,
+                    limit=12,
+                )
+                if not edges:
+                    continue
+                groups.append((node["display_name"], edges))
+                all_edges.extend(edges)
+                node_ids.extend(
+                    [e["src_id"] for e in edges] + [e["dst_id"] for e in edges]
+                )
+            if not all_edges:
+                return None
+            nodes = await graph_traverse.fetch_nodes(session, node_ids)
+            await graph_traverse.bump_traversed(session, all_edges)
+            section = graph_render.render_graph_section(groups, nodes)
         if not section:
             return None
         edges_payload = [
@@ -437,36 +437,34 @@ class LocalMemory:
     ) -> dict[str, Any]:
         """Update confidence and/or tags on an existing memory."""
         mid = uuid.UUID(str(memory_id))
-        async with self._session_factory() as session:
-            async with session.begin():
-                record = await session.get(Memory, mid)
-                if record is None:
-                    raise ValueError(f"Memory {memory_id} not found.")
-                if confidence is not None:
-                    record.confidence = max(0.0, min(1.0, float(confidence)))
-                    await graph_project.project_confidence_changed(
-                        session, str(mid), record.confidence
-                    )
-                if tags is not None:
-                    meta = dict(record.metadata_) if record.metadata_ else {}
-                    meta["tags"] = list(tags)
-                    record.metadata_ = meta
-                rec_type = record.memory_type.value
+        async with self._session_factory() as session, session.begin():
+            record = await session.get(Memory, mid)
+            if record is None:
+                raise ValueError(f"Memory {memory_id} not found.")
+            if confidence is not None:
+                record.confidence = max(0.0, min(1.0, float(confidence)))
+                await graph_project.project_confidence_changed(
+                    session, str(mid), record.confidence
+                )
+            if tags is not None:
+                meta = dict(record.metadata_) if record.metadata_ else {}
+                meta["tags"] = list(tags)
+                record.metadata_ = meta
+            rec_type = record.memory_type.value
         return {"memory_id": str(mid), "type": rec_type, "action": "updated"}
 
     async def forget(self, memory_id: str, *, archive: bool = False) -> dict[str, Any]:
         """Deprecate (default) or archive a memory. Never hard-deletes."""
         mid = uuid.UUID(str(memory_id))
         new_status = MemoryStatus.archived if archive else MemoryStatus.deprecated
-        async with self._session_factory() as session:
-            async with session.begin():
-                record = await session.get(Memory, mid)
-                if record is None:
-                    raise ValueError(f"Memory {memory_id} not found.")
-                record.status = new_status
-                await graph_project.project_memory_invalidated(
-                    session, str(mid), reason=new_status.value
-                )
+        async with self._session_factory() as session, session.begin():
+            record = await session.get(Memory, mid)
+            if record is None:
+                raise ValueError(f"Memory {memory_id} not found.")
+            record.status = new_status
+            await graph_project.project_memory_invalidated(
+                session, str(mid), reason=new_status.value
+            )
         return {"memory_id": str(mid), "action": new_status.value}
 
     async def stats(self) -> dict[str, Any]:
@@ -515,39 +513,38 @@ class LocalMemory:
         """Entity card: node fields, aliases, possible_duplicates, top edges."""
         import json as _json
 
-        async with self._session_factory() as session:
-            async with session.begin():
-                node = await resolve_node(
-                    session, name, user_id=user_id, create=False, bump_mention=False
+        async with self._session_factory() as session, session.begin():
+            node = await resolve_node(
+                session, name, user_id=user_id, create=False, bump_mention=False
+            )
+            if node is None:
+                return {"found": False, "name": name}
+            aliases = (
+                await session.execute(
+                    sa_text("SELECT alias_norm FROM graph_aliases WHERE node_id = :nid"),
+                    {"nid": node["node_id"]},
                 )
-                if node is None:
-                    return {"found": False, "name": name}
-                aliases = (
+            ).scalars().all()
+            edges = await graph_traverse.traverse(
+                session, [node["node_id"]], depth=1, limit=10, user_id=user_id
+            )
+            history: list[dict[str, Any]] = []
+            if include_history:
+                rows = (
                     await session.execute(
-                        sa_text("SELECT alias_norm FROM graph_aliases WHERE node_id = :nid"),
+                        sa_text(
+                            "SELECT * FROM graph_edges WHERE invalid_at IS NOT NULL "
+                            "AND (src_id = :nid OR dst_id = :nid) "
+                            "ORDER BY invalid_at DESC LIMIT 10"
+                        ),
                         {"nid": node["node_id"]},
                     )
-                ).scalars().all()
-                edges = await graph_traverse.traverse(
-                    session, [node["node_id"]], depth=1, limit=10, user_id=user_id
-                )
-                history: list[dict[str, Any]] = []
-                if include_history:
-                    rows = (
-                        await session.execute(
-                            sa_text(
-                                "SELECT * FROM graph_edges WHERE invalid_at IS NOT NULL "
-                                "AND (src_id = :nid OR dst_id = :nid) "
-                                "ORDER BY invalid_at DESC LIMIT 10"
-                            ),
-                            {"nid": node["node_id"]},
-                        )
-                    ).mappings().all()
-                    history = [dict(r) for r in rows]
-                node_ids = [node["node_id"]]
-                for e in [*edges, *history]:
-                    node_ids.extend([e["src_id"], e["dst_id"]])
-                nodes = await graph_traverse.fetch_nodes(session, node_ids)
+                ).mappings().all()
+                history = [dict(r) for r in rows]
+            node_ids = [node["node_id"]]
+            for e in [*edges, *history]:
+                node_ids.extend([e["src_id"], e["dst_id"]])
+            nodes = await graph_traverse.fetch_nodes(session, node_ids)
         try:
             properties = _json.loads(node.get("properties") or "{}")
         except ValueError:
@@ -581,28 +578,27 @@ class LocalMemory:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Neighborhood traversal from a named entity, rendered + structured."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                node = await resolve_node(
-                    session, name, user_id=user_id, create=False, bump_mention=False
-                )
-                if node is None:
-                    return {"found": False, "name": name, "edges": []}
-                edges = await graph_traverse.traverse(
-                    session,
-                    [node["node_id"]],
-                    depth=depth,
-                    relation=relation,
-                    as_of=as_of,
-                    limit=limit,
-                    user_id=user_id,
-                )
-                node_ids = [node["node_id"]]
-                for e in edges:
-                    node_ids.extend([e["src_id"], e["dst_id"]])
-                nodes = await graph_traverse.fetch_nodes(session, node_ids)
-                if edges and as_of is None:
-                    await graph_traverse.bump_traversed(session, edges)
+        async with self._session_factory() as session, session.begin():
+            node = await resolve_node(
+                session, name, user_id=user_id, create=False, bump_mention=False
+            )
+            if node is None:
+                return {"found": False, "name": name, "edges": []}
+            edges = await graph_traverse.traverse(
+                session,
+                [node["node_id"]],
+                depth=depth,
+                relation=relation,
+                as_of=as_of,
+                limit=limit,
+                user_id=user_id,
+            )
+            node_ids = [node["node_id"]]
+            for e in edges:
+                node_ids.extend([e["src_id"], e["dst_id"]])
+            nodes = await graph_traverse.fetch_nodes(session, node_ids)
+            if edges and as_of is None:
+                await graph_traverse.bump_traversed(session, edges)
         section = graph_render.render_graph_section(
             [(node["display_name"], edges)], nodes
         )
@@ -631,35 +627,34 @@ class LocalMemory:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Best path between two named entities, or found=False."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                src = await resolve_node(
-                    session, from_name, user_id=user_id, create=False, bump_mention=False
-                )
-                dst = await resolve_node(
-                    session, to_name, user_id=user_id, create=False, bump_mention=False
-                )
-                if src is None or dst is None:
-                    return {
-                        "found": False,
-                        "missing": [
-                            n for n, r in ((from_name, src), (to_name, dst)) if r is None
-                        ],
-                    }
-                path = await graph_traverse.find_path(
-                    session,
-                    src["node_id"],
-                    dst["node_id"],
-                    max_hops=max_hops,
-                    as_of=as_of,
-                    user_id=user_id,
-                )
-                if path is None:
-                    return {"found": False, "hops": None}
-                node_ids = [src["node_id"], dst["node_id"]]
-                for e in path:
-                    node_ids.extend([e["src_id"], e["dst_id"]])
-                nodes = await graph_traverse.fetch_nodes(session, node_ids)
+        async with self._session_factory() as session, session.begin():
+            src = await resolve_node(
+                session, from_name, user_id=user_id, create=False, bump_mention=False
+            )
+            dst = await resolve_node(
+                session, to_name, user_id=user_id, create=False, bump_mention=False
+            )
+            if src is None or dst is None:
+                return {
+                    "found": False,
+                    "missing": [
+                        n for n, r in ((from_name, src), (to_name, dst)) if r is None
+                    ],
+                }
+            path = await graph_traverse.find_path(
+                session,
+                src["node_id"],
+                dst["node_id"],
+                max_hops=max_hops,
+                as_of=as_of,
+                user_id=user_id,
+            )
+            if path is None:
+                return {"found": False, "hops": None}
+            node_ids = [src["node_id"], dst["node_id"]]
+            for e in path:
+                node_ids.extend([e["src_id"], e["dst_id"]])
+            nodes = await graph_traverse.fetch_nodes(session, node_ids)
         return {
             "found": True,
             "hops": len(path),
@@ -680,14 +675,13 @@ class LocalMemory:
         """Belief-save sugar: pre-resolve typed endpoints, save, return ids."""
         src_type = entity_types[0] if entity_types and len(entity_types) > 0 else None
         dst_type = entity_types[1] if entity_types and len(entity_types) > 1 else None
-        async with self._session_factory() as session:
-            async with session.begin():
-                src_node = await resolve_node(
-                    session, src, user_id=user_id, entity_type=src_type, create=True
-                )
-                dst_node = await resolve_node(
-                    session, dst, user_id=user_id, entity_type=dst_type, create=True
-                )
+        async with self._session_factory() as session, session.begin():
+            src_node = await resolve_node(
+                session, src, user_id=user_id, entity_type=src_type, create=True
+            )
+            dst_node = await resolve_node(
+                session, dst, user_id=user_id, entity_type=dst_type, create=True
+            )
         saved = await self.save(
             mem_type="belief",
             subject=src,
@@ -717,6 +711,91 @@ class LocalMemory:
 
     async def graph_rebuild(self, *, from_scratch: bool = False) -> dict[str, int]:
         """Regenerate graph tables from active memories (CLI entry point)."""
+        async with self._session_factory() as session, session.begin():
+            return await graph_project.rebuild(session, from_scratch=from_scratch)
+
+    async def graph_merge(self, dup: str, canonical: str) -> dict[str, Any]:
+        """Merge a duplicate node into its canonical node (auditable)."""
+        from clara.graph.admin import merge_nodes
+
+        async with self._session_factory() as session, session.begin():
+            return await merge_nodes(session, dup, canonical)
+
+    async def graph_export(self, *, format: str = "mermaid") -> str:
+        """Export valid graph edges as mermaid, dot, or json."""
+        from clara.graph.admin import export_graph
+
         async with self._session_factory() as session:
-            async with session.begin():
-                return await graph_project.rebuild(session, from_scratch=from_scratch)
+            return await export_graph(session, format=format)
+
+    # ------------------------------------------------------------------
+    # Document verdict API (judgment layer — see clara/docs/verdicts.py)
+    # ------------------------------------------------------------------
+
+    async def docs_classify(
+        self, repo_root: str, *, path: str, doc_type: str,
+        tier: str | None = None, rationale: str,
+    ) -> dict[str, Any]:
+        from clara.docs import verdicts
+
+        return await verdicts.classify(
+            self, repo_id(repo_root), path=path, doc_type=doc_type,
+            tier=tier, rationale=rationale,
+        )
+
+    async def docs_supersede(
+        self, repo_root: str, *, old_path: str, new_path: str, rationale: str,
+    ) -> dict[str, Any]:
+        from clara.docs import verdicts
+
+        return await verdicts.supersede(
+            self, repo_id(repo_root), old_path=old_path, new_path=new_path,
+            rationale=rationale,
+        )
+
+    async def docs_fulfill(
+        self, repo_root: str, *, path: str, distilled: list[dict[str, Any]],
+        evidence: str | None = None, rationale: str = "plan completed",
+    ) -> dict[str, Any]:
+        from clara.docs import verdicts
+
+        return await verdicts.fulfill(
+            self, repo_id(repo_root), path=path, distilled=distilled,
+            evidence=evidence, rationale=rationale,
+        )
+
+    async def docs_report(self, repo_root: str) -> dict[str, Any]:
+        import sqlite3 as _sqlite3
+
+        from clara.docs.report import build_report
+        from clara.policy import load_policy
+
+        def _build() -> dict[str, Any]:
+            conn = _sqlite3.connect(self._db_path)
+            conn.row_factory = _sqlite3.Row
+            try:
+                return build_report(conn, repo_id(repo_root), load_policy(repo_root))
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_build)
+
+    async def docs_archive(
+        self, repo_root: str, *, path: str, rationale: str = "archived by user",
+    ) -> dict[str, Any]:
+        from clara.docs import verdicts
+
+        return await verdicts.archive(
+            self, repo_id(repo_root), repo_root=repo_root, path=path,
+            rationale=rationale,
+        )
+
+    async def docs_restore(
+        self, repo_root: str, *, path: str, rationale: str = "restored by user",
+    ) -> dict[str, Any]:
+        from clara.docs import verdicts
+
+        return await verdicts.restore(
+            self, repo_id(repo_root), repo_root=repo_root, path=path,
+            rationale=rationale,
+        )
