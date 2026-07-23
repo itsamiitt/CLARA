@@ -5,10 +5,15 @@ description: When and how to use CLARA persistent memory — save durable facts,
 
 # Using CLARA memory
 
-CLARA is a plain SQLite store exposed through six MCP tools: `memory_save`,
-`memory_search`, `memory_recent`, `memory_update`, `memory_forget`,
-`memory_stats`. **You** are the only intelligence — there is no backend model
-doing extraction or embeddings. You decide what to store and how to query it.
+CLARA is a plain SQLite store exposed through 15 MCP tools — 6 memory
+(`memory_save`, `memory_search`, `memory_recent`, `memory_update`,
+`memory_forget`, `memory_stats`), 5 docs (`docs_status`, `docs_classify`,
+`docs_supersede`, `docs_fulfill`, `docs_report`), 4 graph (`graph_entity`,
+`graph_neighbors`, `graph_path`, `memory_link`). **You** are the only
+intelligence — there is no backend model doing extraction or embeddings.
+You decide what to store and how to query it. Never store credentials: the
+save path rejects secret-shaped content — store a reference (env var name,
+vault path) instead.
 
 ## When to recall
 

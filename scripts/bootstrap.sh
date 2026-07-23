@@ -1,16 +1,20 @@
 #!/bin/sh
 # CLARA plugin bootstrap: ensure a virtualenv with clara-memory[mcp] exists.
 #
-# Exit codes: 0 = environment ready · 1 = unrecoverable (no Python 3.11+)
+# Exit codes: 0 = environment ready · 1 = unrecoverable (no Python 3.10+)
 #             3 = install running in the background, try again later.
 # stdout discipline: this script writes ONLY to stderr — callers own stdout.
 #
 # Layout under $CLAUDE_PLUGIN_DATA (default ~/.clara/plugin):
 #   venv-<hash>/  one venv per pyproject.toml content hash (12 hex chars)
 #   current       symlink to the active venv (atomic swap via ln -sfn)
+#   shim/         stable clara-mcp entry the MCP server config spawns
 #   .installing   flag while a background install runs (stale after 15 min)
 #   .lock/        mkdir-based mutex so concurrent callers spawn one install
 #   install.log   background install output
+#
+# Python floor: 3.10, matching pyproject.toml requires-python — the library,
+# CI matrix, and this gate must agree (tests/test_installation_defaults.py).
 
 set -u
 
@@ -32,6 +36,22 @@ find_bin() {
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname -- "$SCRIPT_DIR")}"
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-$HOME/.clara}/plugin}"
+
+# Keep $DATA/shim/clara-mcp pointing at the active venv's real binary. The
+# plugin's mcpServers command spawns this path directly (no shell, no
+# bootstrap subshell), so it must be refreshed whenever the venv moves.
+ensure_shim() {
+  _venv=$1
+  _data=$2
+  _bin=$(find_bin "$_venv" clara-mcp) || return 1
+  mkdir -p "$_data/shim" 2>/dev/null || return 1
+  case "$_bin" in
+    *.exe) cp -f "$_bin" "$_data/shim/clara-mcp.exe" 2>/dev/null || return 1 ;;
+    *) ln -sfn "$_bin" "$_data/shim/clara-mcp" 2>/dev/null \
+         || cp -f "$_bin" "$_data/shim/clara-mcp" 2>/dev/null || return 1 ;;
+  esac
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # Detached worker (re-invoked by the spawn below; stdout goes to install.log)
@@ -66,6 +86,7 @@ if [ "${1:-}" = "--install-worker" ]; then
 
   if [ "$status" -eq 0 ] && find_bin "$VENV" clara-mcp >/dev/null; then
     ln -sfn "$VENV" "$CURRENT"
+    ensure_shim "$VENV" "$DATA" || echo "shim refresh failed (non-fatal)"
     # GC: keep the two newest venvs (the one just installed + one fallback).
     # venv-* basenames are fixed-format hex, so parsing ls -dt is safe here.
     # shellcheck disable=SC2012
@@ -90,19 +111,19 @@ mkdir -p "$DATA_DIR" 2>/dev/null || {
   exit 1
 }
 
-# Python gate: first interpreter >= 3.11 wins.
+# Python gate: first interpreter >= 3.10 wins (the library's requires-python).
 PY=''
-for _cand in python3.13 python3.12 python3.11 python3 python; do
+for _cand in python3.13 python3.12 python3.11 python3.10 python3 python; do
   if command -v "$_cand" >/dev/null 2>&1 \
-    && "$_cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+    && "$_cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
       >/dev/null 2>&1; then
     PY="$_cand"
     break
   fi
 done
 if [ -z "$PY" ]; then
-  log 'no Python >= 3.11 on PATH (tried python3.13 python3.12 python3.11 python3 python).'
-  log 'install Python 3.11+ (https://www.python.org/downloads/) and start a new session.'
+  log 'no Python >= 3.10 on PATH (tried python3.13 python3.12 python3.11 python3.10 python3 python).'
+  log 'install Python 3.10+ (https://www.python.org/downloads/) and start a new session.'
   exit 1
 fi
 
@@ -124,6 +145,12 @@ if find_bin "$VENV" clara-mcp >/dev/null; then
     ln -sfn "$VENV" "$CURRENT" 2>/dev/null || true
   elif [ -n "$current_target" ] && [ "$current_target" != "$VENV" ]; then
     ln -sfn "$VENV" "$CURRENT" 2>/dev/null || true
+  fi
+  # Heal the MCP shim too (dangling after venv GC, missing on upgrade).
+  if [ ! -e "$DATA_DIR/shim/clara-mcp" ] && [ ! -e "$DATA_DIR/shim/clara-mcp.exe" ]; then
+    ensure_shim "$VENV" "$DATA_DIR" || true
+  elif [ -L "$DATA_DIR/shim/clara-mcp" ] && [ ! -e "$DATA_DIR/shim/clara-mcp" ]; then
+    ensure_shim "$VENV" "$DATA_DIR" || true
   fi
   exit 0
 fi

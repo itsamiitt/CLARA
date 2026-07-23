@@ -24,6 +24,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from sqlalchemy.exc import OperationalError
@@ -89,7 +90,13 @@ def _is_in_memory_sqlite(db_url: str) -> bool:
 def _make_engine(db_url: str) -> AsyncEngine:
     """Create a database engine with SQLite-specific concurrency tuning."""
     connect_args: dict[str, Any] = {}
-    engine_kwargs: dict[str, Any] = {"echo": False}
+    engine_kwargs: dict[str, Any] = {
+        "echo": False,
+        # Store JSON as raw UTF-8, not \uXXXX escapes: the FTS index reads
+        # CAST(content AS TEXT), and escaped CJK/diacritics would never
+        # match a query typed in the original script.
+        "json_serializer": lambda obj: json.dumps(obj, ensure_ascii=False),
+    }
     if db_url.startswith("sqlite"):
         connect_args["timeout"] = SQLITE_BUSY_TIMEOUT_MS / 1000
         if _is_in_memory_sqlite(db_url):

@@ -17,21 +17,28 @@ The only state on disk is a single SQLite file. LanceDB stays dormant via the
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import sqlite3
 import uuid
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy import text as sa_text
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from clara import security
 from clara.agent import _make_engine, format_context
 from clara.db.fts import ensure_fts
 from clara.db.migrations import ensure_schema
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
+from clara.db.pragmas import apply_runtime
+from clara.db.retry import with_sqlite_retry
 from clara.flags import (
     DOCS_DISABLED_HINT,
     GRAPH_DISABLED_HINT,
@@ -69,23 +76,63 @@ def _cached_repo_id() -> str:
 
 
 def _ensure_versioned_schema(db_path: str) -> None:
-    """Apply versioned migrations (graph tables etc.) to a file-backed store.
+    """Apply versioned migrations (memories, graph, docs, FTS) to a file store.
 
-    Fail-soft: the memory store must work even if migrations cannot run
-    (read-only mount, schema from a newer CLARA) — graph features then
-    degrade to no-ops.
+    Since schema v4 this is the primary schema path. A backup is taken before
+    any pending migration runs (see :mod:`clara.db.backup`). Fail-soft: the
+    memory store must work even if migrations cannot run (read-only mount,
+    schema from a newer CLARA) — add-ons then degrade to no-ops.
     """
     if db_path in ("", ":memory:"):
         return
     try:
         conn = sqlite3.connect(db_path)
         try:
-            conn.execute("PRAGMA busy_timeout = 5000")
+            apply_runtime(conn)
+            from clara.db.backup import backup_before_migration
+
+            backup_before_migration(conn, db_path)
             ensure_schema(conn)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 — memory availability beats graph availability
         logger.warning("versioned schema migration failed for %s", db_path, exc_info=True)
+
+
+# Write-path guardrails (see plan §3.3): a single memory is a compact fact,
+# not a document dump — and never a credential.
+_MAX_CONTENT_BYTES = int(os.environ.get("CLARA_MAX_CONTENT_BYTES", "16384") or 16384)
+_MAX_TAGS = 64
+_MAX_TAG_LENGTH = 256
+
+
+def _guard_content(fields: dict[str, Any], tags: list[str] | None) -> None:
+    """Enforce the secret policy and size caps on one save's fields."""
+    if tags is not None:
+        if len(tags) > _MAX_TAGS:
+            raise ValueError(f"too many tags ({len(tags)} > {_MAX_TAGS}).")
+        for tag in tags:
+            if len(str(tag)) > _MAX_TAG_LENGTH:
+                raise ValueError(
+                    f"tag too long ({len(str(tag))} chars > {_MAX_TAG_LENGTH})."
+                )
+    payload = json.dumps(
+        {k: v for k, v in fields.items() if v is not None}, ensure_ascii=False
+    )
+    if len(payload.encode("utf-8")) > _MAX_CONTENT_BYTES:
+        raise ValueError(
+            f"content is {len(payload.encode('utf-8'))} bytes "
+            f"(cap {_MAX_CONTENT_BYTES}) — split it, or store a summary plus a "
+            "file reference. Raise CLARA_MAX_CONTENT_BYTES to change the cap."
+        )
+    policy = security.secret_policy()
+    if policy == "off":
+        return
+    scan_text = payload + " " + " ".join(str(t) for t in (tags or []))
+    if policy == "reject":
+        name = security.find_secret(scan_text)
+        if name is not None:
+            raise security.SecretRejected(name)
 
 
 def _coerce_types(types: Sequence[str] | None) -> list[MemoryType] | None:
@@ -143,11 +190,14 @@ class LocalMemory:
         # Forward-slash form keeps the SQLAlchemy URL valid on Windows paths.
         db_url = f"sqlite+aiosqlite:///{path_obj.as_posix()}"
         db_path = str(path_obj)
+        # Versioned migrations are the primary schema path for file stores
+        # (memories DDL lives in migration 4, FTS in 5); create_all stays as
+        # a checkfirst no-op safety net and the whole path for ":memory:".
+        await asyncio.to_thread(_ensure_versioned_schema, db_path)
         engine = _make_engine(db_url)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         await ensure_fts(engine)
-        await asyncio.to_thread(_ensure_versioned_schema, db_path)
 
         # The info dict is shared by every session this factory makes, so the
         # LanceDB commit listeners short-circuit and never touch a vector store.
@@ -203,38 +253,66 @@ class LocalMemory:
                 f"Unknown mem_type {mem_type!r}. Expected one of {sorted(VALID_TYPES)}."
             )
 
-        async with self._session_factory() as session, session.begin():
-            record = await self._route_save(
-                session,
-                mem_type=mem_type,
-                subject=subject,
-                relation=relation,
-                object=object,
-                is_negation=is_negation,
-                event_type=event_type,
-                name=name,
-                trigger_conditions=trigger_conditions,
-                steps=steps,
-                entity_type=entity_type,
-                properties=properties,
-                description=description,
-                domain=domain,
-                confidence=confidence,
-                source=source,
-                user_id=user_id,
+        _guard_content(
+            {
+                "subject": subject,
+                "relation": relation,
+                "object": object,
+                "event_type": event_type,
+                "name": name,
+                "trigger_conditions": trigger_conditions,
+                "steps": steps,
+                "entity_type": entity_type,
+                "properties": properties,
+                "description": description,
+                "domain": domain,
+            },
+            tags,
+        )
+        redacted: list[str] = []
+        if security.secret_policy() == "redact":
+            subject, r1 = security.redact(subject) if subject else (subject, [])
+            object, r2 = security.redact(object) if object else (object, [])
+            description, r3 = (
+                security.redact(description) if description else (description, [])
             )
-            if confidence is not None:
-                record.confidence = max(0.0, min(1.0, float(confidence)))
-            meta = dict(record.metadata_) if record.metadata_ else {}
-            if tags:
-                meta["tags"] = list(tags)
-            # Stamp provenance on new writes; world-model upserts of an
-            # existing record keep their original repo_id.
-            meta.setdefault("repo_id", _cached_repo_id())
-            record.metadata_ = meta
-            memory_id = str(record.memory_id)
-            rec_type = record.memory_type.value
+            redacted = [*r1, *r2, *r3]
 
+        async def _attempt() -> tuple[str, str]:
+            async with self._session_factory() as session, session.begin():
+                record = await self._route_save(
+                    session,
+                    mem_type=mem_type,
+                    subject=subject,
+                    relation=relation,
+                    object=object,
+                    is_negation=is_negation,
+                    event_type=event_type,
+                    name=name,
+                    trigger_conditions=trigger_conditions,
+                    steps=steps,
+                    entity_type=entity_type,
+                    properties=properties,
+                    description=description,
+                    domain=domain,
+                    confidence=confidence,
+                    source=source,
+                    user_id=user_id,
+                )
+                if confidence is not None:
+                    record.confidence = max(0.0, min(1.0, float(confidence)))
+                meta = dict(record.metadata_) if record.metadata_ else {}
+                if tags:
+                    meta["tags"] = list(tags)
+                if redacted:
+                    meta["redacted"] = sorted(set(redacted))
+                # Stamp provenance on new writes; world-model upserts of an
+                # existing record keep their original repo_id.
+                meta.setdefault("repo_id", _cached_repo_id())
+                record.metadata_ = meta
+                return str(record.memory_id), record.memory_type.value
+
+        memory_id, rec_type = await with_sqlite_retry(_attempt, what="save")
         logger.info("Saved %s memory %s", rec_type, memory_id)
         return {"memory_id": memory_id, "type": rec_type, "action": "saved"}
 
@@ -344,6 +422,10 @@ class LocalMemory:
                 memory_types=_coerce_types(types),
                 user_id=user_id,
             )
+        if query.strip() and result.total:
+            # Real queries feed the usage score term; the empty-query recency
+            # feed (recent()) does not — bumping there would be noise.
+            await self._record_accesses(result.all)
         payload: dict[str, Any] = {
             "query": query,
             "total": result.total,
@@ -360,6 +442,65 @@ class LocalMemory:
                 payload["context"] += "\n\n" + graph["section"]
                 payload["graph"] = {"edges": graph["edges"]}
         return payload
+
+    async def _record_accesses(self, hits: Sequence[ScoredMemory]) -> None:
+        """Bump ``metadata.access_count``/``last_accessed`` on returned hits.
+
+        Feeds the 0.05 usage term of the ranking score (and skill-pruning
+        freshness via ``last_used``). The explicit ``updated_at`` self-assign
+        suppresses the ORM ``onupdate`` — a read must never look like a
+        content change, or recency ranking would inflate on every search.
+        Fail-soft: recording usage must never break search.
+        """
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            ids = [sm.memory.memory_id for sm in hits]
+            skill_ids = [
+                sm.memory.memory_id
+                for sm in hits
+                if sm.memory.memory_type == MemoryType.skill
+            ]
+
+            async def _attempt() -> None:
+                async with self._session_factory() as session, session.begin():
+                    base_meta = func.coalesce(Memory.metadata_, sa_text("'{}'"))
+                    await session.execute(
+                        sa_update(Memory)
+                        .where(Memory.memory_id.in_(ids))
+                        .values(
+                            metadata_=func.json_set(
+                                base_meta,
+                                "$.access_count",
+                                func.coalesce(
+                                    func.json_extract(Memory.metadata_, "$.access_count"),
+                                    0,
+                                )
+                                + 1,
+                                "$.last_accessed",
+                                now_iso,
+                            ),
+                            updated_at=Memory.updated_at,
+                        )
+                        .execution_options(synchronize_session=False)
+                    )
+                    if skill_ids:
+                        await session.execute(
+                            sa_update(Memory)
+                            .where(Memory.memory_id.in_(skill_ids))
+                            .values(
+                                metadata_=func.json_set(
+                                    func.coalesce(Memory.metadata_, sa_text("'{}'")),
+                                    "$.last_used",
+                                    now_iso,
+                                ),
+                                updated_at=Memory.updated_at,
+                            )
+                            .execution_options(synchronize_session=False)
+                        )
+
+            await with_sqlite_retry(_attempt, what="usage update")
+        except Exception:  # noqa: BLE001 — usage accounting is best-effort
+            logger.debug("access recording skipped", exc_info=True)
 
     async def _graph_augment(
         self, result: Any, *, depth: int, user_id: str | None
@@ -443,34 +584,42 @@ class LocalMemory:
     ) -> dict[str, Any]:
         """Update confidence and/or tags on an existing memory."""
         mid = uuid.UUID(str(memory_id))
-        async with self._session_factory() as session, session.begin():
-            record = await session.get(Memory, mid)
-            if record is None:
-                raise ValueError(f"Memory {memory_id} not found.")
-            if confidence is not None:
-                record.confidence = max(0.0, min(1.0, float(confidence)))
-                await graph_project.project_confidence_changed(
-                    session, str(mid), record.confidence
-                )
-            if tags is not None:
-                meta = dict(record.metadata_) if record.metadata_ else {}
-                meta["tags"] = list(tags)
-                record.metadata_ = meta
-            rec_type = record.memory_type.value
+
+        async def _attempt() -> str:
+            async with self._session_factory() as session, session.begin():
+                record = await session.get(Memory, mid)
+                if record is None:
+                    raise ValueError(f"Memory {memory_id} not found.")
+                if confidence is not None:
+                    record.confidence = max(0.0, min(1.0, float(confidence)))
+                    await graph_project.project_confidence_changed(
+                        session, str(mid), record.confidence
+                    )
+                if tags is not None:
+                    meta = dict(record.metadata_) if record.metadata_ else {}
+                    meta["tags"] = list(tags)
+                    record.metadata_ = meta
+                return record.memory_type.value
+
+        rec_type = await with_sqlite_retry(_attempt, what="update")
         return {"memory_id": str(mid), "type": rec_type, "action": "updated"}
 
     async def forget(self, memory_id: str, *, archive: bool = False) -> dict[str, Any]:
         """Deprecate (default) or archive a memory. Never hard-deletes."""
         mid = uuid.UUID(str(memory_id))
         new_status = MemoryStatus.archived if archive else MemoryStatus.deprecated
-        async with self._session_factory() as session, session.begin():
-            record = await session.get(Memory, mid)
-            if record is None:
-                raise ValueError(f"Memory {memory_id} not found.")
-            record.status = new_status
-            await graph_project.project_memory_invalidated(
-                session, str(mid), reason=new_status.value
-            )
+
+        async def _attempt() -> None:
+            async with self._session_factory() as session, session.begin():
+                record = await session.get(Memory, mid)
+                if record is None:
+                    raise ValueError(f"Memory {memory_id} not found.")
+                record.status = new_status
+                await graph_project.project_memory_invalidated(
+                    session, str(mid), reason=new_status.value
+                )
+
+        await with_sqlite_retry(_attempt, what="forget")
         return {"memory_id": str(mid), "action": new_status.value}
 
     async def stats(self) -> dict[str, Any]:

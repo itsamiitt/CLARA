@@ -74,9 +74,12 @@ wiring for your agent:
 - **Anything else** — `clara context "<task>"` prints a context block;
   `clara remember "<text>"` stores facts from plain text. No MCP needed.
 
-The MCP server (`clara-mcp`) exposes six tools — `memory_save`,
-`memory_search`, `memory_recent`, `memory_update`, `memory_forget`,
-`memory_stats`. **Your agent's own model decides what to remember and
+The MCP server (`clara-mcp`) exposes **15 tools**: 6 memory tools
+(`memory_save`, `memory_search`, `memory_recent`, `memory_update`,
+`memory_forget`, `memory_stats`), 5 doc-curator tools (`docs_status`,
+`docs_classify`, `docs_supersede`, `docs_fulfill`, `docs_report`), and 4
+knowledge-graph tools (`graph_entity`, `graph_neighbors`, `graph_path`,
+`memory_link`). **Your agent's own model decides what to remember and
 recall** — CLARA does durable typed storage, ranked retrieval, and
 prompt-injection-safe context formatting. That's why no key is needed: the
 intelligence is the host model you already run.
@@ -99,8 +102,40 @@ clara remember TEXT...                  rule-based fact extraction (no LLM) + st
 clara list [--query Q] [--type T]       inspect what's stored
 clara forget MEMORY_ID [--archive]      retire a memory (never hard-deletes)
 clara stats                             store location + counts (JSON)
-clara doctor [--quiet]                  health check: exit 0 ok / 1 degraded / 2 unusable
+clara doctor [--quiet] [--deep]         health check: exit 0 ok / 1 degraded / 2 unusable
+clara export [--out F] [--type T]...    dump memories as JSONL (portable)
+clara import FILE [--on-conflict ...]   load a clara-export file (dedup-aware)
+clara backup [--reason R]               rotated store snapshot (VACUUM INTO)
+clara restore FILE [--force]            replace the store with a snapshot
+clara sync [export|import|status]       bridge to Claude Code native memory
+clara statusline                        one-line summary for a statusLine command
 clara mcp                               run the MCP stdio server (same as clara-mcp)
+```
+
+### Native-memory bridge
+
+`clara sync` keeps CLARA and Claude Code's own memory files coherent:
+imports facts from `CLAUDE.md` and the auto-memory directory
+(`~/.claude/projects/<project>/memory/`), then writes a marker-fenced
+section into `MEMORY.md` (≤ 60 lines, so Claude's own notes keep the native
+200-line window) plus a fully CLARA-owned `clara-memory.md` topic file.
+Hand-edits inside the fence are imported, never overwritten; the daily
+maintenance pass refreshes the export automatically. `/clara:sync` runs it
+from inside a session.
+
+### Backups & portability
+
+The daily maintenance pass snapshots the store (`backups/` beside it,
+rotation via `CLARA_BACKUP_KEEP`, default 7) and a snapshot is always taken
+before a schema migration. `clara export | import` moves memories between
+machines as JSONL with ids, timestamps, and provenance intact.
+
+### Statusline
+
+Add to `~/.claude/settings.json` for an at-a-glance memory count:
+
+```json
+{"statusLine": {"type": "command", "command": "clara statusline"}}
 ```
 
 ## The two tiers
@@ -174,17 +209,31 @@ actually said.
 ## Storage & paths
 
 - **SQLite** (WAL, 30s busy timeout) — all memory rows, plus the
-  `memories_fts` FTS5 index maintained by triggers.
+  `memories_fts` FTS5 index (porter) and a `memories_fts_tri` trigram twin
+  (CJK/substring queries), both maintained by column-scoped triggers.
 - **LanceDB** (full tier only) — 1536-dim vectors at `CLARA_LANCE_PATH`
   (default `./clara_vectors`). `LocalMemory`/MCP never create or touch it.
-- Store resolution for the CLI/MCP tier: `$CLARA_DB_PATH` →
-  `$CLARA_HOME/clara.db` → `~/.clara/clara.db`.
+- **One resolver everywhere** (`clara/store.py`): `$CLARA_DB_PATH` (explicit)
+  → `<git toplevel>/.clara/clara.db` *if it exists* (created by
+  `clara init --project`) → `$CLARA_HOME/clara.db` → `~/.clara/clara.db`.
+  The SessionStart hook, the MCP tools, and the CLI all resolve identically,
+  so what gets injected is exactly what gets read and written. The doc
+  ledger deliberately always lives in the global store (keyed by repo_id, so
+  worktrees and clones share one ledger).
+- Writes are guarded: secret-looking content is rejected before storage
+  (`CLARA_SECRET_POLICY=reject|redact|off`), content is size-capped
+  (`CLARA_MAX_CONTENT_BYTES`, default 16 KB), and lock contention retries
+  with backoff instead of surfacing "database is locked".
 
 ## Environment variables
 
 | Variable | Default | Notes |
 |---|---|---|
 | `CLARA_DB_PATH` / `CLARA_HOME` | `~/.clara/clara.db` | CLI + MCP store location |
+| `CLARA_SECRET_POLICY` | `reject` | `reject` / `redact` / `off` — credential patterns on the save path |
+| `CLARA_MAX_CONTENT_BYTES` | `16384` | per-memory content size cap |
+| `CLARA_BACKUP_KEEP` | `7` | rotated snapshots kept in `backups/` |
+| `CLARA_QUERY_EXPANSION` | on | dev-vocabulary synonym expansion (`postgres`↔`postgresql`); `0` disables |
 | `CLARA_DB_URL` | `sqlite+aiosqlite:///clara.db` | library/API database URL |
 | `CLARA_EMBEDDING_BACKEND` | `openai` | `openai` needs `OPENAI_API_KEY`; `local` needs sentence-transformers; `ollama` needs a running daemon |
 | `CLARA_LLM_PROVIDER` | `openai` | also `anthropic`, `ollama`, `none` (rule-based) |
@@ -223,9 +272,13 @@ interface.
 
 ## Supported platforms
 
-The Claude Code plugin surface targets **macOS, Linux, and WSL** at launch.
-Native Windows is best-effort: the library, CLI, and test suite run on
-Windows, but plugin hooks are exercised only on POSIX shells.
+**macOS, Linux, WSL, and native Windows are all first-class.** Every hook
+ships as a polyglot `.cmd` dispatcher (line 1 execs the POSIX `sh` body;
+`cmd.exe` routes to a native PowerShell 5.1 body under `scripts/win/`), the
+MCP server is spawned through a real-executable shim
+(`${CLAUDE_PLUGIN_DATA}/shim/clara-mcp` — resolves to `clara-mcp.exe` on
+Windows, where stdio servers are spawned without a shell), and CI runs the
+full suite plus hook smoke tests on `windows-latest`.
 
 ## Development
 

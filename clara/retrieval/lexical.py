@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -36,6 +37,7 @@ from clara.retrieval.engine import (
     compute_recency_score,
     compute_usage_frequency,
 )
+from clara.retrieval.synonyms import expand_groups, flatten
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,20 @@ logger = logging.getLogger(__name__)
 # Used by the ILIKE fallback; the FTS5 path is index-ranked and needs no cap.
 DEFAULT_CANDIDATE_LIMIT = 1000
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+TRIGRAM_TABLE = "memories_fts_tri"
+
+# Word characters minus underscore, any script — not just [a-z0-9]. CJK text
+# has no word boundaries, so contiguous CJK runs are additionally split into
+# character bigrams below.
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+_CJK_RANGES = (
+    (0x3040, 0x30FF),   # Hiragana + Katakana
+    (0x3400, 0x4DBF),   # CJK ext A
+    (0x4E00, 0x9FFF),   # CJK unified
+    (0xAC00, 0xD7AF),   # Hangul syllables
+    (0xF900, 0xFAFF),   # CJK compat
+)
 
 # Tiny stop-word set so common words don't dominate the overlap score.
 _STOPWORDS = frozenset(
@@ -56,13 +71,33 @@ _STOPWORDS = frozenset(
 )
 
 
+def _fold(text: str) -> str:
+    """Casefold + strip combining marks — matches what FTS5 unicode61 does
+    index-side (``remove_diacritics``), so "café" queries hit "cafe" rows."""
+    nfkd = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+
+
+def _has_cjk(token: str) -> bool:
+    return any(
+        lo <= ord(ch) <= hi for ch in token for lo, hi in _CJK_RANGES
+    )
+
+
 def tokenize(text: str) -> list[str]:
-    """Lowercase, split on non-alphanumerics, drop stop-words and 1-char tokens."""
-    return [
-        tok
-        for tok in _TOKEN_RE.findall(text.lower())
-        if len(tok) > 1 and tok not in _STOPWORDS
-    ]
+    """Fold, split on non-word chars, drop stop-words and 1-char tokens.
+
+    CJK runs (no word boundaries) are kept whole *and* split into character
+    bigrams, so both prefix FTS matches and overlap scoring work on them.
+    """
+    out: list[str] = []
+    for tok in _TOKEN_RE.findall(_fold(text)):
+        if _has_cjk(tok):
+            out.append(tok)
+            out.extend(tok[i : i + 2] for i in range(len(tok) - 1))
+        elif len(tok) > 1 and tok not in _STOPWORDS:
+            out.append(tok)
+    return out
 
 
 def _memory_text(memory: Memory) -> str:
@@ -106,6 +141,7 @@ class LexicalRetriever:
         self._session = session
         self._candidate_limit = candidate_limit
         self._fts_available: bool | None = None
+        self._tri_available: bool | None = None
 
     async def search(
         self,
@@ -127,33 +163,58 @@ class LexicalRetriever:
             return RetrievalResult()
 
         query_tokens = tokenize(query or "")
+        token_groups = expand_groups(query_tokens)
+        search_tokens = flatten(token_groups)
 
         weighted: list[tuple[Memory, float]] | None = None
-        if query_tokens and await self._has_fts():
+        if search_tokens and await self._has_fts():
             try:
                 weighted = await self._fetch_fts_candidates(
-                    query_tokens,
+                    search_tokens,
                     limit=max(top_k * 4, 32),
                     memory_types=memory_types,
                     user_id=user_id,
                 )
+                # The porter index tokenizes a CJK run as one term, so only
+                # prefix matches land; the trigram twin covers substrings.
+                # It also rescues short result sets (rare/partial terms).
+                if (
+                    any(_has_cjk(tok) for tok in search_tokens)
+                    or len(weighted) < top_k
+                ) and await self._has_trigram():
+                    tri = await self._fetch_fts_candidates(
+                        [t for t in search_tokens if len(t) >= 3],
+                        limit=max(top_k * 4, 32),
+                        memory_types=memory_types,
+                        user_id=user_id,
+                        table=TRIGRAM_TABLE,
+                        prefix=False,
+                    )
+                    weighted = self._merge_weighted(weighted, tri)
             except Exception:  # noqa: BLE001 — degrade to the scan path
                 logger.exception("FTS5 search failed; falling back to scan")
                 self._fts_available = False
                 weighted = None
+            else:
+                # Zero FTS hits ≠ zero matches: rows written before the
+                # raw-UTF-8 serializer carry \uXXXX escapes the index can't
+                # match, and the scan path (which parses the JSON) can. The
+                # sim>0 filter below keeps precision.
+                if not weighted:
+                    weighted = None
 
         if weighted is None:
             candidates = await self._fetch_candidates(
-                query_tokens,
+                search_tokens,
                 memory_types=memory_types,
                 user_id=user_id,
             )
             weighted = [
-                (memory, self._similarity(query_tokens, memory))
+                (memory, self._similarity(token_groups, memory))
                 for memory in candidates
             ]
             # When the user typed real terms, drop rows that match nothing.
-            if query_tokens:
+            if search_tokens:
                 weighted = [(m, sim) for m, sim in weighted if sim > 0.0]
 
         if not weighted:
@@ -204,21 +265,42 @@ class LexicalRetriever:
         """Probe (once per retriever) whether the FTS5 index exists."""
         if self._fts_available is not None:
             return self._fts_available
+        self._fts_available = await self._table_exists(FTS_TABLE)
+        return self._fts_available
+
+    async def _has_trigram(self) -> bool:
+        if self._tri_available is None:
+            self._tri_available = await self._table_exists(TRIGRAM_TABLE)
+        return self._tri_available
+
+    async def _table_exists(self, name: str) -> bool:
         bind = self._session.get_bind()
         if bind is None or bind.dialect.name != "sqlite":
-            self._fts_available = False
             return False
         try:
             result = await self._session.execute(
                 sa_text(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :n"
                 ),
-                {"n": FTS_TABLE},
+                {"n": name},
             )
-            self._fts_available = result.first() is not None
+            return result.first() is not None
         except Exception:  # noqa: BLE001
-            self._fts_available = False
-        return self._fts_available
+            return False
+
+    @staticmethod
+    def _merge_weighted(
+        primary: list[tuple[Memory, float]],
+        secondary: list[tuple[Memory, float]],
+    ) -> list[tuple[Memory, float]]:
+        """Union candidate lists, keeping the best similarity per memory."""
+        best: dict[str, tuple[Memory, float]] = {}
+        for memory, sim in [*primary, *secondary]:
+            key = str(memory.memory_id)
+            kept = best.get(key)
+            if kept is None or sim > kept[1]:
+                best[key] = (memory, sim)
+        return list(best.values())
 
     async def _fetch_fts_candidates(
         self,
@@ -227,15 +309,25 @@ class LexicalRetriever:
         limit: int,
         memory_types: Sequence[MemoryType] | None,
         user_id: str | None,
+        table: str = FTS_TABLE,
+        prefix: bool = True,
     ) -> list[tuple[Memory, float]]:
-        """BM25-ranked candidates from the FTS5 index, hydrated from SQLite.
+        """BM25-ranked candidates from an FTS5 index, hydrated from SQLite.
 
         BM25 rank (lower = better, typically negative) is mapped to a (0, 1)
         similarity with a sigmoid — the same normalization trick Mem0 uses —
         so it slots into the shared composite score's 0.65 similarity term.
+        ``table``/``prefix`` select between the porter index (prefix queries)
+        and the trigram twin (bare quoted terms = substring semantics).
         """
-        match_expr = build_match_expression(list(dict.fromkeys(query_tokens)))
-        clauses = [f"{FTS_TABLE} MATCH :match", "status = 'active'"]
+        terms = list(dict.fromkeys(query_tokens))
+        if not terms:
+            return []
+        if prefix:
+            match_expr = build_match_expression(terms)
+        else:
+            match_expr = " OR ".join(f'"{term}"' for term in terms)
+        clauses = [f"{table} MATCH :match", "status = 'active'"]
         params: dict[str, Any] = {"match": match_expr, "limit": limit}
         if user_id is not None:
             clauses.append("user_id = :user_id")
@@ -249,8 +341,8 @@ class LexicalRetriever:
         rows = (
             await self._session.execute(
                 sa_text(
-                    f"SELECT memory_id, bm25({FTS_TABLE}) AS rank "
-                    f"FROM {FTS_TABLE} WHERE {' AND '.join(clauses)} "
+                    f"SELECT memory_id, bm25({table}) AS rank "
+                    f"FROM {table} WHERE {' AND '.join(clauses)} "
                     f"ORDER BY rank LIMIT :limit"
                 ),
                 params,
@@ -293,16 +385,20 @@ class LexicalRetriever:
         ]
 
     @staticmethod
-    def _similarity(query_tokens: Sequence[str], memory: Memory) -> float:
-        """Fraction of distinct query tokens present in the memory text (0..1)."""
-        if not query_tokens:
+    def _similarity(token_groups: Sequence[set[str]], memory: Memory) -> float:
+        """Fraction of query concepts present in the memory text (0..1).
+
+        Each group is one typed token plus its synonyms — a group counts as
+        matched when *any* member appears, so expansion widens recall without
+        deflating the score of literal matches.
+        """
+        if not token_groups:
             return 0.0
         memory_tokens = set(tokenize(_memory_text(memory)))
         if not memory_tokens:
             return 0.0
-        unique_query = set(query_tokens)
-        matched = sum(1 for tok in unique_query if tok in memory_tokens)
-        return matched / len(unique_query)
+        matched = sum(1 for group in token_groups if group & memory_tokens)
+        return matched / len(token_groups)
 
     async def _fetch_candidates(
         self,

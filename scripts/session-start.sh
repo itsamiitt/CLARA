@@ -20,6 +20,15 @@ find_bin() {
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-$HOME/.clara}/plugin}"
+BASE="${CLARA_HOME:-$HOME/.clara}"
+
+# Session-cwd hint: lets the long-lived MCP server resolve the store for THIS
+# session's directory even when its own process cwd is stale. Best-effort.
+if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+  mkdir -p "$BASE/session-cwd" 2>/dev/null \
+    && printf '%s' "$PWD" >"$BASE/session-cwd/$CLAUDE_SESSION_ID" 2>/dev/null \
+    || true
+fi
 
 sh "$SCRIPT_DIR/bootstrap.sh"
 rc=$?

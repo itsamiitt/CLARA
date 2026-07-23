@@ -6,12 +6,10 @@ migrations idempotently, one transaction per migration. Built on stdlib
 ``sqlite3`` on purpose: the Claude Code plugin layers open the store
 directly, without the async SQLAlchemy stack.
 
-Intentionally NOT wired into the existing runtime paths this milestone —
-the live schema is still created by SQLAlchemy ``create_all`` (see
-``clara/integrations/local_memory.py`` and ``clara/agent.py``); wiring
-lands with the plugin bootstrap. This module sets no journal-mode pragmas
-(WAL is the runtime engine's concern), which also keeps the "never writes
-when the schema is too new" guarantee byte-stable on disk.
+Since v4 this is the *primary* schema path for file-backed stores: the
+memories table itself is created here (frozen DDL, IF NOT EXISTS), and
+SQLAlchemy ``create_all`` remains only as a checkfirst no-op safety net and
+for ``:memory:`` engines (see ``clara/integrations/local_memory.py``).
 
 The one rule callers must honor: if the database's version is NEWER than
 this code knows (``SCHEMA_VERSION``), never write — ``ensure_schema``
@@ -29,7 +27,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
 
 _BUSY_TIMEOUT_MS = 30_000  # matches SQLITE_BUSY_TIMEOUT_MS in clara/agent.py
 
@@ -178,10 +176,168 @@ def _migration_3(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# The memories table, frozen exactly as SQLAlchemy's SQLite dialect emits it
+# (see tests/test_db_migrations.py::test_create_all_parity — the drift alarm).
+# Legacy stores built by ``Base.metadata.create_all`` already have all of
+# these objects, so every statement is IF NOT EXISTS and the migration
+# no-ops there; fresh stores get the canonical schema with no SQLAlchemy in
+# the loop. This is what makes the memories table migratable at all: from
+# v4 on, ALTERs land here as ordinary numbered migrations.
+_MEMORIES_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS memories (
+        memory_id CHAR(32) NOT NULL,
+        user_id TEXT,
+        memory_type VARCHAR(11) NOT NULL,
+        content JSON NOT NULL,
+        confidence FLOAT DEFAULT (0.5) NOT NULL,
+        status VARCHAR(10) DEFAULT 'active' NOT NULL,
+        decay_rate FLOAT DEFAULT (0.02) NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        metadata JSON,
+        CONSTRAINT pk_memories PRIMARY KEY (memory_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_memories_created_at ON memories (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_memories_memory_type ON memories (memory_type)",
+    "CREATE INDEX IF NOT EXISTS ix_memories_status ON memories (status)",
+    "CREATE INDEX IF NOT EXISTS ix_memories_type_status ON memories (memory_type, status)",
+    "CREATE INDEX IF NOT EXISTS ix_memories_user_id ON memories (user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_memories_user_type_status"
+    " ON memories (user_id, memory_type, status)",
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_world_model_identity
+        ON memories (coalesce(user_id, ''),
+                     json_extract(content, '$.entity_type'),
+                     json_extract(content, '$.name'))
+        WHERE memory_type = 'world_model' AND status = 'active'
+    """,
+]
+
+
+def _migration_4(conn: sqlite3.Connection) -> None:
+    for statement in _MEMORIES_DDL:
+        conn.execute(statement)
+
+
+# Searchable text per memories row. Shared with clara/db/fts.py (which
+# imports it) so triggers written by either path index identical text.
+# v5 extends the original content-only expression with tags and the
+# native-import origin file so tag search works on the FTS path too.
+FTS_TEXT_EXPR = (
+    "lower(CAST({row}.content AS TEXT)"
+    " || ' ' || coalesce(CAST(json_extract({row}.metadata, '$.tags') AS TEXT), '')"
+    " || ' ' || coalesce(json_extract({row}.metadata, '$.origin_file'), ''))"
+)
+
+_FTS_COLUMNS = "memory_id UNINDEXED, user_id UNINDEXED, memory_type UNINDEXED, status UNINDEXED, text"
+
+
+def _fts_trigger_ddl(table: str) -> list[str]:
+    """Column-scoped sync triggers.
+
+    A bare AFTER UPDATE trigger reindexes the row (porter AND trigram
+    tokenization) on *every* write — which made the nightly decay pass and
+    per-search access recording pay a full-store FTS rebuild. Only content /
+    status / user_id changes, plus metadata changes that touch the indexed
+    keys (tags, origin_file), actually need the index refreshed.
+    """
+    insert = (
+        f"INSERT INTO {table}(memory_id, user_id, memory_type, status, text) "
+        f"VALUES (new.memory_id, coalesce(new.user_id, ''), new.memory_type, "
+        f"new.status, {FTS_TEXT_EXPR.format(row='new')});"
+    )
+    refresh = f"DELETE FROM {table} WHERE memory_id = old.memory_id; {insert}"
+    meta_changed = (
+        "coalesce(CAST(json_extract(new.metadata, '$.tags') AS TEXT), '') IS NOT "
+        "coalesce(CAST(json_extract(old.metadata, '$.tags') AS TEXT), '') "
+        "OR coalesce(json_extract(new.metadata, '$.origin_file'), '') IS NOT "
+        "coalesce(json_extract(old.metadata, '$.origin_file'), '')"
+    )
+    # NOTE on retirement (archive/deprecate/supersede): there is deliberately
+    # NO per-row status-retire trigger. memory_id is UNINDEXED in FTS5, so a
+    # per-row DELETE scans the whole index — bulk archival would be O(rows ×
+    # index). Stale entries are filtered out at hydration (search re-checks
+    # status against the memories table) and swept in one pass by
+    # fts_gc_statements() during daily maintenance.
+    return [
+        f"CREATE TRIGGER IF NOT EXISTS {table}_ai AFTER INSERT ON memories BEGIN {insert} END",
+        f"CREATE TRIGGER IF NOT EXISTS {table}_ad AFTER DELETE ON memories BEGIN "
+        f"DELETE FROM {table} WHERE memory_id = old.memory_id; END",
+        # Active rows: content/tenant changes refresh the index entry.
+        f"CREATE TRIGGER IF NOT EXISTS {table}_au AFTER UPDATE OF content, user_id "
+        f"ON memories WHEN new.status = 'active' BEGIN {refresh} END",
+        # Reactivation (rare: restore/import) re-inserts the entry; the
+        # per-row scan cost is fine at this frequency.
+        f"CREATE TRIGGER IF NOT EXISTS {table}_aua AFTER UPDATE OF status ON memories "
+        f"WHEN new.status = 'active' AND old.status != 'active' BEGIN {refresh} END",
+        f"CREATE TRIGGER IF NOT EXISTS {table}_aum AFTER UPDATE OF metadata ON memories "
+        f"WHEN new.status = 'active' AND ({meta_changed}) BEGIN {refresh} END",
+    ]
+
+
+def fts_gc_statements() -> list[str]:
+    """One-pass sweep of retired rows out of both FTS tables (run by the
+    daily maintenance pass; each statement is one index scan total)."""
+    return [
+        f"DELETE FROM {table} WHERE memory_id IN "
+        f"(SELECT memory_id FROM memories WHERE status != 'active')"
+        for table in ("memories_fts", "memories_fts_tri")
+    ]
+
+
+def _fts_backfill(table: str) -> str:
+    # Only active rows: retiring a row deletes its index entry (see the
+    # _aur trigger), so the index holds exactly the searchable set.
+    return (
+        f"INSERT INTO {table}(memory_id, user_id, memory_type, status, text) "
+        f"SELECT memory_id, coalesce(user_id, ''), memory_type, status, "
+        f"{FTS_TEXT_EXPR.format(row='memories')} FROM memories "
+        f"WHERE status = 'active' "
+        f"AND memory_id NOT IN (SELECT memory_id FROM {table})"
+    )
+
+
+def _rebuild_fts(conn: sqlite3.Connection, table: str, tokenize: str) -> None:
+    for suffix in ("_ai", "_ad", "_au", "_aur", "_aua", "_aum"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {table}{suffix}")
+    conn.execute(f"DROP TABLE IF EXISTS {table}")
+    conn.execute(
+        f"CREATE VIRTUAL TABLE {table} USING fts5({_FTS_COLUMNS}, tokenize='{tokenize}')"
+    )
+    for statement in _fts_trigger_ddl(table):
+        conn.execute(statement)
+    conn.execute(_fts_backfill(table))
+
+
+def _migration_5(conn: sqlite3.Connection) -> None:
+    """Rebuild memories_fts with the v5 text expression (content + tags +
+    origin_file) and add a trigram twin for CJK / substring queries.
+
+    Both are best-effort: FTS5 or its trigram tokenizer (SQLite >= 3.34) may
+    be missing from this build — search then degrades to the scan path, and
+    the migration still records v5.
+    """
+    with contextlib.suppress(sqlite3.OperationalError):
+        _rebuild_fts(conn, "memories_fts", "porter unicode61")
+    with contextlib.suppress(sqlite3.OperationalError):
+        _rebuild_fts(conn, "memories_fts_tri", "trigram")
+
+
+def _migration_6(conn: sqlite3.Connection) -> None:
+    """Re-run the FTS rebuild: v5's bare AFTER UPDATE triggers reindexed
+    every row on bookkeeping writes; v6 installs the column-scoped set."""
+    _migration_5(conn)
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_1),
     (2, _migration_2),
     (3, _migration_3),
+    (4, _migration_4),
+    (5, _migration_5),
+    (6, _migration_6),
 ]
 
 
@@ -194,6 +350,16 @@ def get_version(conn: sqlite3.Connection) -> int:
         return 0
     value = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_info").fetchone()[0]
     return int(value)
+
+
+def check_version(conn: sqlite3.Connection) -> int:
+    """Read-only version gate: raise :class:`SchemaTooNew` when the database
+    is ahead of this code, else return the current version. Never writes —
+    this is what the fastpath calls instead of :func:`ensure_schema`."""
+    current = get_version(conn)
+    if current > SCHEMA_VERSION:
+        raise SchemaTooNew(current, SCHEMA_VERSION)
+    return current
 
 
 def ensure_schema(conn: sqlite3.Connection) -> int:

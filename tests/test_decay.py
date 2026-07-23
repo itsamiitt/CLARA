@@ -80,8 +80,68 @@ def _make_session_factory(
 
     _call_count = {"n": 0}
 
-    async def _execute(stmt):
+    def _apply_one(param_row: dict) -> int:
+        """Apply one UPDATE parameter row (single-row or executemany) to
+        the fake records; returns the number of records touched."""
+        target_ids: set[uuid.UUID] = set()
+        for key, value in param_row.items():
+            if "mid" not in key and not key.startswith("memory_id"):
+                continue
+            if isinstance(value, (list, tuple)):
+                target_ids.update(value)
+            elif value is not None:
+                target_ids.add(value)
+        touched = 0
+        for r in records:
+            if r.memory_id not in target_ids:
+                continue
+            touched += 1
+            for conf_key in ("b_conf", "confidence"):
+                if param_row.get(conf_key) is not None:
+                    r.confidence = param_row[conf_key]
+            for meta_key in ("b_meta", "metadata"):
+                if param_row.get(meta_key) is not None:
+                    r.metadata_ = param_row[meta_key]
+            if param_row.get("status") is not None:
+                r.status = param_row["status"]
+            if param_row.get("updated_at") is not None:
+                r.updated_at = param_row["updated_at"]
+        return touched
+
+    def _apply_update(stmt, extra_params=None) -> MagicMock:
+        """Apply a Core UPDATE (decay/prune batches) to the fake records.
+
+        The production code stopped mutating ORM instances for pure decay —
+        it emits ``update(Memory)...`` (executemany for decay batches) so
+        the ``onupdate`` hook is bypassed — and the mock mirrors that by
+        applying the bound params here.
+        """
+        touched = 0
+        if isinstance(extra_params, (list, tuple)):
+            # Static VALUES entries (e.g. status='archived', updated_at=now)
+            # live in the statement; per-row b_* params ride the list.
+            try:
+                static = dict(stmt.compile().params)
+            except Exception:
+                static = {}
+            for row in extra_params:
+                touched += _apply_one({**static, **dict(row)})
+        else:
+            merged = dict(stmt.compile().params)
+            if isinstance(extra_params, dict):
+                merged.update(extra_params)
+            touched = _apply_one(merged)
+        result = MagicMock()
+        result.rowcount = touched
+        return result
+
+    async def _execute(stmt, params=None):
         """Inspect the compiled SQL to decide which subset to return."""
+        from sqlalchemy.sql.dml import Update as _Update
+
+        if isinstance(stmt, _Update):
+            return _apply_update(stmt, params)
+
         scalars_mock = MagicMock()
 
         # Build a rough clause string for routing.
@@ -94,10 +154,12 @@ def _make_session_factory(
 
         where = full.split("WHERE", 1)[1] if "WHERE" in full else full
 
+        branch = None
         matching = []
         for r in records:
             # --- daily decay: active + decay_rate > 0 ---
             if "decay_rate >" in where and "'event'" not in where and "'skill'" not in where:
+                branch = "decay"
                 if (
                     r.status == MemoryStatus.active
                     and r.decay_rate > 0.0
@@ -105,12 +167,16 @@ def _make_session_factory(
                     matching.append(r)
 
             # --- weekly: stale events ---
+            # The unlinked check is pushed down to SQL (json_extract on
+            # related_beliefs) — mirror it here.
             elif "'event'" in where:
+                branch = "event"
                 event_cutoff = now - timedelta(days=event_cutoff_days)
                 if (
                     r.memory_type == MemoryType.event
                     and r.status == MemoryStatus.active
                     and r.created_at < event_cutoff
+                    and not (r.metadata_ or {}).get("related_beliefs")
                 ):
                     matching.append(r)
 
@@ -119,6 +185,7 @@ def _make_session_factory(
             # last-used cutoff in Python (updated_at is unusable — the
             # daily decay job resets it every night via onupdate).
             elif "'skill'" in where:
+                branch = "skill"
                 if (
                     r.memory_type == MemoryType.skill
                     and r.status == MemoryStatus.active
@@ -128,6 +195,24 @@ def _make_session_factory(
         scalars_mock.all.return_value = matching
         result_mock = MagicMock()
         result_mock.scalars.return_value = scalars_mock
+        if branch == "decay":
+            # The decay pass reads Core column rows, not ORM instances.
+            from types import SimpleNamespace
+
+            result_mock.all.return_value = [
+                SimpleNamespace(
+                    memory_id=r.memory_id,
+                    memory_type=r.memory_type.value,
+                    confidence=r.confidence,
+                    decay_rate=r.decay_rate,
+                    updated_at=r.updated_at,
+                    metadata=r.metadata_,
+                )
+                for r in matching
+            ]
+        else:
+            # The stale-event pass selects bare memory_id rows.
+            result_mock.all.return_value = [(r.memory_id,) for r in matching]
         return result_mock
 
     session.execute = AsyncMock(side_effect=_execute)

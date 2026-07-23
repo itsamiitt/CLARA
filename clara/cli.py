@@ -38,12 +38,24 @@ from clara.update.engine import classify_memory_type
 
 # Ignore only the store's own artifacts; everything else in .clara/ (policy
 # exports, the .gitignore itself) stays visible to git.
-_PROJECT_GITIGNORE = "clara.db*\n.maintenance\nquarantine/\n"
+_PROJECT_GITIGNORE = "clara.db*\n.maintenance*\nbackups/\nquarantine/\n"
 
 
 def _resolve_db_path(project: bool) -> str:
     if project:
-        path = Path.cwd() / ".clara" / "clara.db"
+        from clara.store import git_toplevel
+
+        root = git_toplevel(str(Path.cwd()))
+        if root is None:
+            print(
+                "note: not inside a git repository — creating the project store "
+                "under the current directory",
+                file=sys.stderr,
+            )
+        # Anchor at the git toplevel: the SessionStart fastpath looks for
+        # .clara/clara.db there, so a store created from a subdirectory
+        # would otherwise never be read.
+        path = Path(root or Path.cwd()) / ".clara" / "clara.db"
         path.parent.mkdir(parents=True, exist_ok=True)
         gitignore = path.parent / ".gitignore"
         if not gitignore.exists():
@@ -52,8 +64,8 @@ def _resolve_db_path(project: bool) -> str:
             gitignore.write_text(_PROJECT_GITIGNORE, encoding="utf-8")
             print(
                 "warning: rewrote .clara/.gitignore — the old '*' hid every future "
-                ".clara file from git; now only clara.db*, .maintenance and "
-                "quarantine/ are ignored",
+                ".clara file from git; now only clara.db*, .maintenance*, backups/ "
+                "and quarantine/ are ignored",
                 file=sys.stderr,
             )
         return str(path)
@@ -61,7 +73,12 @@ def _resolve_db_path(project: bool) -> str:
 
 
 async def _open(db_path: str | None = None) -> LocalMemory:
-    return await LocalMemory.create(db_path or default_db_path())
+    """Open the store every other entry point would resolve for this cwd."""
+    if db_path is None:
+        from clara.store import resolve_store
+
+        db_path = str(resolve_store(create=True).db_path)
+    return await LocalMemory.create(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +266,11 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
 
     from clara.db.fts import FTS_TABLE
 
+    from clara.store import orphaned_project_stores, resolve_store
+
     checks: list[tuple[str, bool, str]] = []
-    db_path = default_db_path()
+    resolution = resolve_store(create=True)
+    db_path = str(resolution.db_path)
 
     try:
         memory = await _open(db_path)
@@ -261,7 +281,11 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
 
     try:
         async with memory._engine.connect() as conn:
-            integrity = (await conn.execute(sa_text("PRAGMA quick_check(1)"))).scalar()
+            check_sql = (
+                "PRAGMA integrity_check" if getattr(args, "deep", False)
+                else "PRAGMA quick_check(1)"
+            )
+            integrity = (await conn.execute(sa_text(check_sql))).scalar()
             checks.append(("sqlite integrity", integrity == "ok", str(integrity)))
             fts_row = (
                 await conn.execute(
@@ -281,11 +305,43 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
     finally:
         await memory.close()
 
-    hard_failures = [c for c in checks if not c[1] and c[0] != "fts5 index"]
+    from clara.db.backup import latest_backup
+
+    newest = latest_backup(db_path)
+    if newest is not None:
+        import time as _time
+
+        age_h = (_time.time() - newest.stat().st_mtime) / 3600
+        checks.append(("backups", True, f"newest {age_h:.1f}h old ({newest.name})"))
+    else:
+        import time as _time
+
+        store_age_h = (_time.time() - Path(db_path).stat().st_mtime) / 3600
+        # A brand-new store legitimately has no backups; only an established
+        # store without one is a degradation worth flagging.
+        overdue = store_age_h > 48
+        checks.append((
+            "backups",
+            not overdue,
+            "none yet — the daily maintenance pass takes one, or run `clara backup`",
+        ))
+
+    orphans = orphaned_project_stores(str(Path.cwd()), Path(db_path))
+    if orphans:
+        checks.append((
+            "project stores",
+            False,
+            f"orphaned store(s) never read by the resolver: "
+            f"{', '.join(str(o) for o in orphans)} — move to the git toplevel "
+            f".clara/ or delete",
+        ))
+
+    hard_failures = [c for c in checks if not c[1] and c[0] not in
+                     ("fts5 index", "backups", "project stores")]
     degraded = [c for c in checks if not c[1]]
 
     if not args.quiet:
-        print(f"store: {db_path}")
+        print(f"store: {db_path} (scope: {resolution.scope})")
         for name, ok, detail in checks:
             print(f"  [{'ok' if ok else '!!'}] {name}: {detail}")
         _print_plugin_health(db_path)
@@ -576,6 +632,225 @@ async def _cmd_graph(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# clara export / import / backup / restore / statusline
+# ---------------------------------------------------------------------------
+
+
+async def _cmd_export(args: argparse.Namespace) -> int:
+    from clara.porting import export_records, write_export
+    from clara.store import resolve_store
+
+    db_path = str(resolve_store(create=False).db_path)
+    if not Path(db_path).is_file():
+        print(f"no store at {db_path} — nothing to export", file=sys.stderr)
+        return 1
+    records = export_records(
+        db_path,
+        types=args.types,
+        status=args.status,
+        since=args.since,
+        include_graph=args.include_graph,
+        include_docs=args.include_docs,
+    )
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as handle:
+            written = write_export(records, handle)
+        print(f"exported {written - 1} records to {args.out}", file=sys.stderr)
+    else:
+        write_export(records, sys.stdout)
+    return 0
+
+
+async def _cmd_import(args: argparse.Namespace) -> int:
+    from clara.porting import ImportError_, import_records
+    from clara.store import resolve_store
+
+    db_path = str(resolve_store(create=True).db_path)
+    try:
+        with open(args.file, encoding="utf-8") as handle:
+            stats = import_records(
+                db_path,
+                handle,
+                on_conflict=args.on_conflict,
+                dry_run=args.dry_run,
+                allow_secrets=args.allow_secrets,
+            )
+    except (OSError, ImportError_) as exc:
+        print(f"import failed: {exc}", file=sys.stderr)
+        return 1
+    prefix = "would import" if args.dry_run else "imported"
+    print(
+        f"{prefix} {stats['imported']}, skipped-id {stats['skipped_id']}, "
+        f"skipped-content {stats['skipped_content']}, "
+        f"conflicts-updated {stats['conflicts_updated']}, "
+        f"skipped-secret {stats['skipped_secret']}"
+    )
+    if stats["imported"] or stats["conflicts_updated"]:
+        print("hint: run `clara graph rebuild` to project imported memories "
+              "into the knowledge graph")
+    return 0
+
+
+async def _cmd_backup(args: argparse.Namespace) -> int:
+    from clara.db.backup import backup_db
+    from clara.store import resolve_store
+
+    db_path = str(resolve_store(create=False).db_path)
+    if not Path(db_path).is_file():
+        print(f"no store at {db_path} — nothing to back up", file=sys.stderr)
+        return 1
+    dest = backup_db(db_path, reason=args.reason)
+    if dest is None:
+        print("backup failed (see log)", file=sys.stderr)
+        return 1
+    print(f"backup written: {dest}")
+    return 0
+
+
+async def _cmd_restore(args: argparse.Namespace) -> int:
+    import shutil
+    import sqlite3 as _sqlite3
+
+    from clara.db.backup import backup_db
+    from clara.db.migrations import SCHEMA_VERSION, get_version
+    from clara.store import resolve_store
+
+    source = Path(args.file)
+    if not source.is_file():
+        print(f"no such file: {source}", file=sys.stderr)
+        return 1
+    conn = _sqlite3.connect(source)
+    try:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        version = get_version(conn)
+    finally:
+        conn.close()
+    if integrity != "ok":
+        print(f"refusing to restore: source failed integrity_check ({integrity})",
+              file=sys.stderr)
+        return 1
+    if version > SCHEMA_VERSION:
+        print(f"refusing to restore: source schema v{version} is newer than this "
+              f"CLARA supports (v{SCHEMA_VERSION})", file=sys.stderr)
+        return 1
+
+    target = resolve_store(create=True).db_path
+    if target.is_file() and not args.force:
+        print(f"this will replace {target} with {source}.")
+        print("re-run with --force to proceed (a pre-restore backup is taken).")
+        return 1
+    if target.is_file():
+        backup_db(str(target), reason="pre-restore")
+    # WAL side files from the old store are stale after a swap.
+    for side in (f"{target}-wal", f"{target}-shm"):
+        Path(side).unlink(missing_ok=True)
+    tmp = target.with_suffix(".restore-tmp")
+    shutil.copyfile(source, tmp)
+    import os as _os
+
+    _os.replace(tmp, target)
+    print(f"restored {target} from {source}")
+    print("restart any running Claude Code sessions so the MCP server reopens the store.")
+    return 0
+
+
+async def _cmd_statusline(args: argparse.Namespace) -> int:
+    """Statusline provider: `CLARA - N memories - scope`.
+
+    Reads the statusline JSON (for the session cwd) from stdin; never opens
+    SQLite on the statusline cadence — counts come from a stats cache file
+    refreshed by saves/maintenance, falling back to one count query only
+    when the cache is absent.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    from clara.store import resolve_store
+
+    anchor = None
+    if not args.no_stdin and not sys.stdin.isatty():
+        try:
+            payload = _json.loads(sys.stdin.read() or "{}")
+            anchor = (
+                payload.get("cwd")
+                or payload.get("workspace", {}).get("current_dir")
+                or None
+            )
+        except (ValueError, AttributeError):
+            anchor = None
+    res = resolve_store(anchor, create=False)
+    if not res.exists:
+        print("CLARA - no store")
+        return 0
+    cache = Path(str(res.db_path) + ".stats")
+    count: int | None = None
+    try:
+        import time as _time
+
+        if cache.is_file() and _time.time() - cache.stat().st_mtime < 300:
+            count = int(cache.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        count = None
+    if count is None:
+        try:
+            conn = _sqlite3.connect(res.db_path)
+            conn.execute("PRAGMA busy_timeout = 200")
+            count = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE status = 'active'"
+            ).fetchone()[0]
+            conn.close()
+            cache.write_text(str(count), encoding="utf-8")
+        except (OSError, _sqlite3.Error):
+            print("CLARA - store busy")
+            return 0
+    print(f"CLARA - {count} memories - {res.scope}")
+    return 0
+
+
+async def _cmd_sync(args: argparse.Namespace) -> int:
+    from clara.bridge import paths as bridge_paths
+    from clara.bridge.exporter import export_native
+    from clara.bridge.importer import import_native
+    from clara.store import resolve_store
+
+    anchor = str(Path.cwd())
+    res = resolve_store(anchor, create=True)
+    db_path = str(res.db_path)
+
+    if args.mode == "status":
+        memory_md = bridge_paths.memory_md_path(anchor)
+        print(f"store: {db_path} (scope: {res.scope})")
+        print(f"auto-memory enabled: {bridge_paths.auto_memory_enabled()}")
+        print(f"MEMORY.md target: {memory_md if memory_md else '(disabled)'}")
+        print(f"topic file: {bridge_paths.topic_file_path(anchor) or '(disabled)'}")
+        sources = bridge_paths.claude_md_paths(anchor)
+        print(f"import sources: {', '.join(str(s) for s in sources) or '(none found)'}")
+        return 0
+
+    # Import BEFORE export: pre-existing native notes (and any hand-edited
+    # fence lines) must be captured before the fence is (re)generated.
+    if args.mode in (None, "import"):
+        memory = await _open(db_path)
+        try:
+            results = await import_native(memory, anchor, verbatim=args.verbatim)
+        finally:
+            await memory.close()
+        imported = sum(r["imported"] for r in results.values())
+        skipped = sum(r["skipped_dup"] + r["skipped_no_extract"] for r in results.values())
+        print(f"import: {imported} new memories from {len(results)} file(s), "
+              f"{skipped} lines skipped")
+        no_extract = sum(r["skipped_no_extract"] for r in results.values())
+        if no_extract and not args.verbatim:
+            print(f"  ({no_extract} lines did not extract — re-run with --verbatim "
+                  "to store them as plain notes)")
+
+    if args.mode in (None, "export"):
+        summary = export_native(db_path, anchor)
+        print(f"export: {summary}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -613,6 +888,51 @@ def main(argv: list[str] | None = None) -> None:
 
     p_doc = sub.add_parser("doctor", help="Health check (exit 0/1/2).")
     p_doc.add_argument("--quiet", action="store_true")
+    p_doc.add_argument("--deep", action="store_true",
+                       help="Full PRAGMA integrity_check instead of quick_check.")
+
+    p_export = sub.add_parser("export", help="Export memories as JSONL (stdout default).")
+    p_export.add_argument("--out", default=None, metavar="FILE")
+    p_export.add_argument("--type", action="append", dest="types",
+                          choices=["belief", "event", "skill", "world_model"])
+    p_export.add_argument("--status", choices=["active", "all"], default="all")
+    p_export.add_argument("--since", default=None, metavar="ISO",
+                          help="Only rows updated at/after this ISO timestamp.")
+    p_export.add_argument("--include-graph", action="store_true")
+    p_export.add_argument("--include-docs", action="store_true")
+
+    p_import = sub.add_parser("import", help="Import a clara-export JSONL file.")
+    p_import.add_argument("file")
+    p_import.add_argument("--on-conflict", choices=["skip", "newest", "force"],
+                          default="skip")
+    p_import.add_argument("--dry-run", action="store_true")
+    p_import.add_argument("--allow-secrets", action="store_true",
+                          help="Import rows even when they match secret patterns.")
+
+    p_backup = sub.add_parser("backup", help="Snapshot the store (rotated).")
+    p_backup.add_argument("--reason", default="manual")
+
+    p_restore = sub.add_parser("restore", help="Replace the store with a backup/snapshot.")
+    p_restore.add_argument("file")
+    p_restore.add_argument("--force", action="store_true",
+                           help="Skip the confirmation prompt.")
+
+    p_status_line = sub.add_parser(
+        "statusline",
+        help="One-line store summary for a Claude Code statusLine command.",
+    )
+    p_status_line.add_argument("--no-stdin", action="store_true",
+                               help="Ignore statusline JSON on stdin (use cwd).")
+
+    p_sync = sub.add_parser(
+        "sync", help="Sync with Claude Code native memory (import then export)."
+    )
+    p_sync.add_argument("mode", nargs="?", choices=["export", "import", "status"],
+                        default=None,
+                        help="Run only one direction, or show resolved paths.")
+    p_sync.add_argument("--verbatim", action="store_true",
+                        help="Also store lines the extractor cannot parse "
+                             "(as note/states beliefs).")
 
     p_docs = sub.add_parser("docs", help="Document lifecycle ledger.")
     dsub = p_docs.add_subparsers(dest="docs_cmd", required=True)
@@ -672,6 +992,12 @@ def main(argv: list[str] | None = None) -> None:
         "doctor": _cmd_doctor,
         "graph": _cmd_graph,
         "docs": _cmd_docs,
+        "export": _cmd_export,
+        "import": _cmd_import,
+        "backup": _cmd_backup,
+        "restore": _cmd_restore,
+        "statusline": _cmd_statusline,
+        "sync": _cmd_sync,
     }[args.command]
     raise SystemExit(asyncio.run(handler(args)))
 
