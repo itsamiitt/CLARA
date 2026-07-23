@@ -1,5 +1,5 @@
 ---
-description: Search CLARA memory and summarize what is known about a topic
+description: Search CLARA memory and summarize a topic
 argument-hint: <topic or question>
 ---
 

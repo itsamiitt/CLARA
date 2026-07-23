@@ -1,5 +1,5 @@
 ---
-description: Check document standing or the repo rot report from the CLARA ledger
+description: Document standing or repo rot report from the ledger
 argument-hint: [path]
 ---
 

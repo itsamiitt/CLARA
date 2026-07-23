@@ -12,6 +12,14 @@
 
 set -u
 
+# Kill switch: docs add-on off => no annotations, consume stdin, exit clean.
+case "${CLARA_DOCS_ENABLED:-1}" in
+  0 | false | no | off)
+    cat >/dev/null 2>&1
+    exit 0
+    ;;
+esac
+
 BASE="${CLARA_HOME:-$HOME/.clara}"
 
 # Repo root: walk up from the hook cwd looking for .git (no subprocess).

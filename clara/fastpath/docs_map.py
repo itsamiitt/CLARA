@@ -230,7 +230,11 @@ def _checkbox_pct(signals_raw: str) -> str | None:
 
 def build_map(cwd: str) -> str | None:
     """Build the fenced ``[KNOWLEDGE MAP]`` block, or the not-scanned notice,
-    or ``None`` outside a git repo / without a ledger."""
+    or ``None`` outside a git repo / without a ledger / with docs disabled."""
+    from clara.flags import docs_enabled
+
+    if not docs_enabled():
+        return None
     root = fastdb._git_toplevel(cwd)
     if root is None:
         return None

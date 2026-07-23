@@ -1,5 +1,5 @@
 ---
-description: Close out a completed plan document — distill it into CLARA memory
+description: Close out a completed plan — distill it into memory
 argument-hint: [plan path]
 ---
 

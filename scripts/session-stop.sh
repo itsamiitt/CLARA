@@ -12,6 +12,11 @@
 
 set -u
 
+# Kill switch: the proposals nudge is doc-curator behavior.
+case "${CLARA_DOCS_ENABLED:-1}" in
+  0 | false | no | off) exit 0 ;;
+esac
+
 BASE="${CLARA_HOME:-$HOME/.clara}"
 [ -d "$BASE/proposals" ] || exit 0
 

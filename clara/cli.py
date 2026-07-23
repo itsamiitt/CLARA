@@ -288,9 +288,79 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"store: {db_path}")
         for name, ok, detail in checks:
             print(f"  [{'ok' if ok else '!!'}] {name}: {detail}")
+        _print_plugin_health(db_path)
     if hard_failures:
         return 2
     return 1 if degraded else 0
+
+
+def _print_plugin_health(db_path: str) -> None:
+    """Plugin-health block: schema version, flags, ledger, venv. Info only."""
+    import sqlite3
+    import time as _time
+
+    from clara.db.migrations import SCHEMA_VERSION, get_version
+    from clara.flags import docs_enabled, graph_enabled
+
+    print("plugin:")
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            version = get_version(conn)
+            print(f"  schema: v{version} (code supports v{SCHEMA_VERSION})")
+            for label, sql in (
+                ("graph", "SELECT COUNT(*) FROM graph_edges WHERE invalid_at IS NULL"),
+                ("docs", "SELECT COUNT(*) FROM doc_registry WHERE invalid_at IS NULL"),
+            ):
+                try:
+                    count = conn.execute(sql).fetchone()[0]
+                    print(f"  {label} rows: {count}")
+                except sqlite3.Error:
+                    print(f"  {label} rows: (tables absent)")
+            try:
+                per_repo = conn.execute(
+                    "SELECT repo_id, COUNT(*) FROM doc_registry "
+                    "WHERE invalid_at IS NULL GROUP BY repo_id "
+                    "ORDER BY COUNT(*) DESC LIMIT 5"
+                ).fetchall()
+                for repo, count in per_repo:
+                    print(f"    ledger {repo}: {count} docs")
+            except sqlite3.Error:
+                pass
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        print(f"  schema: unreadable ({exc})")
+    print(f"  flags: graph={'on' if graph_enabled() else 'OFF'} "
+          f"docs={'on' if docs_enabled() else 'OFF'}")
+
+    base = Path(db_path).resolve().parent
+    quarantine = base / "quarantine"
+    manifests = sorted(quarantine.glob("*.tsv")) if quarantine.is_dir() else []
+    if manifests:
+        newest = max(manifests, key=lambda p: p.stat().st_mtime)
+        age_h = (_time.time() - newest.stat().st_mtime) / 3600
+        print(f"  quarantine manifests: {len(manifests)} (newest {age_h:.1f}h old)")
+    else:
+        print("  quarantine manifests: none")
+
+    import os as _os
+
+    data_dir = Path(_os.environ.get("CLAUDE_PLUGIN_DATA") or (base / "plugin"))
+    current = data_dir / "current"
+    if current.exists():
+        try:
+            target = current.resolve()
+        except OSError:
+            target = current
+        print(f"  venv: {target}")
+    else:
+        print(f"  venv: (not installed under {data_dir})")
+    install_log = data_dir / "install.log"
+    if install_log.is_file():
+        tail = install_log.read_text(encoding="utf-8", errors="replace").splitlines()[-3:]
+        for line in tail:
+            print(f"    log: {line}")
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +370,12 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
 
 async def _cmd_docs(args: argparse.Namespace) -> int:
     import sqlite3
+
+    from clara.flags import DOCS_DISABLED_HINT, docs_enabled
+
+    if not docs_enabled():
+        print(f"error: {DOCS_DISABLED_HINT}", file=sys.stderr)
+        return 2
 
     from clara.docs.report import build_report, format_report, get_status
     from clara.docs.scan import (
@@ -384,6 +460,12 @@ async def _cmd_docs(args: argparse.Namespace) -> int:
 
 async def _cmd_graph(args: argparse.Namespace) -> int:
     from sqlalchemy import text as sa_text
+
+    from clara.flags import GRAPH_DISABLED_HINT, graph_enabled
+
+    if not graph_enabled():
+        print(f"error: {GRAPH_DISABLED_HINT}", file=sys.stderr)
+        return 2
 
     memory = await _open()
     try:

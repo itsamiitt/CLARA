@@ -1,6 +1,6 @@
 ---
 name: using-clara-memory
-description: How and when to use CLARA persistent memory — save durable facts with memory_save (belief/event/skill/world_model), search with memory_search before asking the user something they may already have told you, and keep tool use proportional to the task.
+description: When and how to use CLARA persistent memory — save durable facts, search before asking the user, trust document tiers, link entities.
 ---
 
 # Using CLARA memory

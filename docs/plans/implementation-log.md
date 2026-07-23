@@ -2,6 +2,69 @@
 
 One entry per milestone of the CLARA → Claude Code plugin conversion.
 
+## 2026-07-23 — Milestone 06: governance & flags (Prompt 06) — FINAL
+
+Branch `feat/plugin-sprint0`, one commit
+(`feat: governance & flags — docs-review, reversibility, kill switches`).
+The plugin is feature-complete per Master Plan v2.
+
+**Built.**
+- `/clara:docs-review` (`commands/docs-review.md`): interactive review —
+  report → three proposal groups (archives with evidence, duplicate
+  clusters with keeper suggestion, promotion candidates with drafted
+  facts) → per-item approve/skip/edit → single execution pass
+  (docs_fulfill / docs_supersede / `clara docs archive`) → ONE commit or
+  PR branch whose body lists every action + evidence + memory ids.
+  Nothing executes without explicit approval.
+- `agents/curator-reviewer.md`: worktree-isolated subagent running the
+  same workflow autonomously — applies only unambiguous proposals,
+  reports borderline items for human review, returns summary + commit ref.
+- **Reversibility (centerpiece test, `TestReversibility`)**: scripted
+  full-approval review on the rotting fixture → one commit → `git revert`
+  → `clara docs scan` → `clara graph rebuild` ⇒ repo files byte-identical,
+  ledger doc set identical with every location-coupled field restored
+  (archives return to their prior lifecycle via `prior_lifecycle` recorded
+  in the archive attestation + the scan's new unarchive-on-move-out rule),
+  quarantine manifest holds exactly the review's superseded lines, every
+  pre-review graph edge still valid, promoted memories persist with
+  provenance and re-linked `derived_from` edges. Documented semantics:
+  repo-derived state fully reverts; attested knowledge (memories,
+  fulfilled/superseded verdicts) intentionally survives — reverting a file
+  move does not un-decide a distilled decision.
+- **Feature flags** `CLARA_GRAPH_ENABLED` / `CLARA_DOCS_ENABLED`
+  (default 1): fields on `ClaraConfig` plus `clara/flags.py` per-call
+  helpers (long-lived MCP server must see flips without restart;
+  stdlib-only so the fastpath may import). Enforced on all four surfaces
+  per flag, each tested: MCP/LocalMemory tools return
+  `{disabled, error: ...set CLARA_*_ENABLED=1...}` (export/rebuild/scan
+  raise with the hint), projection + graph maintenance no-op, fastpath
+  omits `[GRAPH]`/`[KNOWLEDGE MAP]`, both sh hooks short-circuit on the
+  env var, CLI subcommands print the re-enable hint (exit 2). Memory core
+  verified working with both off; flag flip + `graph rebuild` recovers
+  projections missed while disabled.
+- `clara doctor` plugin-health block: schema version vs supported, flag
+  states, graph/docs row counts + top per-repo ledgers, quarantine
+  manifest freshness, venv path + install.log tail.
+- README: plugin install (`/plugin marketplace add` → `/plugin install
+  clara@clara-marketplace`), warm-up, global-vs-project store tradeoff,
+  kill switches, versioning policy (bump `plugin.json` version for
+  releases). CI: always-on token budget gate (`claude --plugin-dir .
+  plugin details clara`, fail > 300 tok) + reversibility test in the
+  quality job. Frontmatter descriptions trimmed: always-on cost 369 →
+  ~275 tok after adding the two new components.
+- Tests: +12 (`test_governance.py`).
+
+**Deviations from the prompt.**
+1. `plugin.json` keeps `version` (strict validation requires it — the
+   milestone-02 deviation stands); README documents the bump-for-release
+   policy the prompt wanted.
+2. The reversibility test treats fulfilled/superseded verdicts as intended
+   residue (asserted exactly, not ignored) — the prompt's own parenthesis
+   ("memories promoted remain, correctly re-linked") generalized to all
+   attested knowledge, with the rationale in the test docstring.
+3. The always-on budget check parses `claude plugin details` CLI output
+   (`Always-on: ~N tok`) — no stable JSON interface exists for it yet.
+
 ## 2026-07-23 — Milestone 05: judgment & promotion (Prompt 05)
 
 Branch `feat/plugin-sprint0`, one commit

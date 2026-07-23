@@ -22,6 +22,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.db.models import Memory
+from clara.flags import GRAPH_DISABLED_HINT, graph_enabled
 from clara.graph.normalize import normalize_relation
 from clara.graph.resolve import _graph_ready, resolve_node
 
@@ -51,6 +52,8 @@ def _fail_soft(
 ) -> Callable[..., Awaitable[_T | None]]:
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> _T | None:
+        if not graph_enabled():
+            return None
         try:
             return await fn(*args, **kwargs)
         except Exception:  # noqa: BLE001 — graph errors must never fail a memory write
@@ -286,6 +289,8 @@ async def rebuild(session: AsyncSession, *, from_scratch: bool = False) -> dict[
     Edges created here carry ``temporal_precision='reconstructed'``.
     Idempotent: beliefs whose edge already exists are skipped.
     """
+    if not graph_enabled():
+        raise RuntimeError(GRAPH_DISABLED_HINT)
     if not await _graph_ready(session):
         raise RuntimeError("graph tables missing — run migrations first")
     if from_scratch:

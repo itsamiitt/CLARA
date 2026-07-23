@@ -13,6 +13,40 @@ with full-text search, exposed to any coding-agent CLI over MCP. An optional
 full pipeline adds LLM fact extraction, embeddings, and vector retrieval on
 top of the same store.
 
+## Claude Code plugin
+
+The repo doubles as a Claude Code plugin: session-start memory + knowledge-map
+injection, six memory MCP tools, a knowledge graph, and a document-lifecycle
+curator. Install from the marketplace:
+
+```
+/plugin marketplace add itsamiitt/clara
+/plugin install clara@clara-marketplace
+```
+
+The first session prints `CLARA is installing in the background` while a
+bootstrap script builds a private virtualenv (prefers `uv`, falls back to
+pip); from the second session on, memory context is injected automatically.
+Run `scripts/bootstrap.sh` manually to warm the environment up front, and
+`clara doctor` to check plugin health (schema version, flags, ledger counts,
+venv, install log).
+
+- **Platforms**: macOS, Linux, and WSL at launch; native Windows best-effort
+  (see "Supported platforms").
+- **Store choice**: the global store (`~/.clara/clara.db`) shares memory
+  across every project and is what the doc ledger keys on (worktrees and
+  clones of one repo share a ledger); a per-project store
+  (`clara init --project` → `./.clara/clara.db`) isolates memories but
+  gives up cross-project recall. Default to global.
+- **Kill switches**: `CLARA_GRAPH_ENABLED=0` disables the knowledge graph,
+  `CLARA_DOCS_ENABLED=0` the doc curator — independently. Tools report a
+  clear disabled error, projection/scan become no-ops, the fastpath omits
+  the corresponding context sections, and hooks short-circuit; the memory
+  core keeps working with both off.
+- **Versioning**: `plugin.json` carries a `version` for marketplace
+  installs — set and bump it for releases (commits are the effective
+  version while iterating).
+
 ## Quick start (coding-agent memory, zero keys)
 
 ```bash

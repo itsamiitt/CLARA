@@ -442,7 +442,8 @@ async def archive(
         await _attest(
             session, doc["doc_id"], actor="user", verdict="archived",
             rationale=rationale,
-            evidence={"from": doc["rel_path"], "to": new_rel, "moved": moved},
+            evidence={"from": doc["rel_path"], "to": new_rel, "moved": moved,
+                      "prior_lifecycle": doc["lifecycle"]},
         )
     await asyncio.to_thread(_refresh_side_files, memory._db_path, repo)
     return {"found": True, "action": "archived", "from": doc["rel_path"],
@@ -474,6 +475,7 @@ async def restore(
         ).first()
         evidence = json.loads(original[0]) if original else {}
         back_rel = evidence.get("from") or doc["rel_path"]
+        prior_lifecycle = evidence.get("prior_lifecycle") or "active"
         moved = False
         if evidence.get("moved"):
             moved = await asyncio.to_thread(
@@ -482,10 +484,11 @@ async def restore(
         new_rel = back_rel if (moved or not evidence.get("moved")) else doc["rel_path"]
         await session.execute(
             sa_text(
-                "UPDATE doc_registry SET lifecycle = 'active', rel_path = :rel, "
+                "UPDATE doc_registry SET lifecycle = :lc, rel_path = :rel, "
                 "updated_at = :now WHERE doc_id = :did"
             ),
-            {"rel": new_rel, "now": _now(), "did": doc["doc_id"]},
+            {"lc": prior_lifecycle, "rel": new_rel, "now": _now(),
+             "did": doc["doc_id"]},
         )
         await _attest(
             session, doc["doc_id"], actor="user", verdict="restored",

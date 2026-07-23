@@ -1,5 +1,5 @@
 ---
-description: Save a fact, preference, or decision to CLARA long-term memory
+description: Save a fact or decision to CLARA long-term memory
 argument-hint: <fact to remember>
 ---
 

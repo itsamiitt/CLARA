@@ -254,6 +254,10 @@ def scan_repo(
     those paths (other rows keep their stored signals). Unchanged content
     hashes skip collection entirely.
     """
+    from clara.flags import DOCS_DISABLED_HINT, docs_enabled
+
+    if not docs_enabled():
+        raise RuntimeError(DOCS_DISABLED_HINT)
     root = Path(repo_root).resolve()
     repo = compute_repo_id(str(root))
     policy = load_policy(root)
@@ -300,7 +304,37 @@ def scan_repo(
                         (new_home, _now_iso(), row["doc_id"]),
                     )
                     _attest(conn, row["doc_id"], "moved", f"{rel} -> {new_home}")
-                    rows[new_home] = {**row, "rel_path": new_home}
+                    lifecycle = row["lifecycle"]
+                    # 'archived' is location-coupled state: a doc moved back
+                    # OUT of the archive dir (e.g. a reverted cleanup commit)
+                    # is live again. Content-coupled judgments (fulfilled,
+                    # superseded) survive moves.
+                    if (
+                        lifecycle == "archived"
+                        and not new_home.startswith(policy.archive_dir.rstrip("/") + "/")
+                    ):
+                        prior = conn.execute(
+                            "SELECT evidence FROM doc_attestations "
+                            "WHERE doc_id = ? AND verdict = 'archived' "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (row["doc_id"],),
+                        ).fetchone()
+                        restored = "active"
+                        if prior is not None:
+                            with contextlib.suppress(ValueError):
+                                restored = (
+                                    json.loads(prior["evidence"] or "{}")
+                                    .get("prior_lifecycle") or "active"
+                                )
+                        conn.execute(
+                            "UPDATE doc_registry SET lifecycle = ?, "
+                            "updated_at = ? WHERE doc_id = ?",
+                            (restored, _now_iso(), row["doc_id"]),
+                        )
+                        _attest(conn, row["doc_id"], "unarchived",
+                                f"moved out of {policy.archive_dir} by {new_home}")
+                        lifecycle = restored
+                    rows[new_home] = {**row, "rel_path": new_home, "lifecycle": lifecycle}
                     del rows[rel]
                     summary["moved"] += 1
                 else:

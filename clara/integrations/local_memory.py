@@ -32,6 +32,12 @@ from clara.agent import _make_engine, format_context
 from clara.db.fts import ensure_fts
 from clara.db.migrations import ensure_schema
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
+from clara.flags import (
+    DOCS_DISABLED_HINT,
+    GRAPH_DISABLED_HINT,
+    docs_enabled,
+    graph_enabled,
+)
 from clara.graph import project as graph_project
 from clara.graph import render as graph_render
 from clara.graph import traverse as graph_traverse
@@ -344,7 +350,7 @@ class LocalMemory:
             "context": format_context(result),
             "hits": [_serialize(sm) for sm in result.all],
         }
-        if graph_depth > 0 and result.total:
+        if graph_depth > 0 and result.total and graph_enabled():
             try:
                 graph = await self._graph_augment(result, depth=graph_depth, user_id=user_id)
             except Exception:  # noqa: BLE001 — graph must never break search
@@ -513,6 +519,9 @@ class LocalMemory:
         """Entity card: node fields, aliases, possible_duplicates, top edges."""
         import json as _json
 
+        if not graph_enabled():
+            return {"found": False, "disabled": True, "error": GRAPH_DISABLED_HINT}
+
         async with self._session_factory() as session, session.begin():
             node = await resolve_node(
                 session, name, user_id=user_id, create=False, bump_mention=False
@@ -578,6 +587,8 @@ class LocalMemory:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Neighborhood traversal from a named entity, rendered + structured."""
+        if not graph_enabled():
+            return {"found": False, "disabled": True, "error": GRAPH_DISABLED_HINT}
         async with self._session_factory() as session, session.begin():
             node = await resolve_node(
                 session, name, user_id=user_id, create=False, bump_mention=False
@@ -627,6 +638,8 @@ class LocalMemory:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Best path between two named entities, or found=False."""
+        if not graph_enabled():
+            return {"found": False, "disabled": True, "error": GRAPH_DISABLED_HINT}
         async with self._session_factory() as session, session.begin():
             src = await resolve_node(
                 session, from_name, user_id=user_id, create=False, bump_mention=False
@@ -673,6 +686,9 @@ class LocalMemory:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Belief-save sugar: pre-resolve typed endpoints, save, return ids."""
+        if not graph_enabled():
+            return {"disabled": True, "error": GRAPH_DISABLED_HINT,
+                    "hint": "use memory_save for the belief without graph sugar"}
         src_type = entity_types[0] if entity_types and len(entity_types) > 0 else None
         dst_type = entity_types[1] if entity_types and len(entity_types) > 1 else None
         async with self._session_factory() as session, session.begin():
@@ -718,6 +734,8 @@ class LocalMemory:
         """Merge a duplicate node into its canonical node (auditable)."""
         from clara.graph.admin import merge_nodes
 
+        if not graph_enabled():
+            return {"merged": False, "disabled": True, "error": GRAPH_DISABLED_HINT}
         async with self._session_factory() as session, session.begin():
             return await merge_nodes(session, dup, canonical)
 
@@ -725,6 +743,8 @@ class LocalMemory:
         """Export valid graph edges as mermaid, dot, or json."""
         from clara.graph.admin import export_graph
 
+        if not graph_enabled():
+            raise RuntimeError(GRAPH_DISABLED_HINT)
         async with self._session_factory() as session:
             return await export_graph(session, format=format)
 
@@ -732,12 +752,20 @@ class LocalMemory:
     # Document verdict API (judgment layer — see clara/docs/verdicts.py)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _docs_disabled() -> dict[str, Any] | None:
+        if docs_enabled():
+            return None
+        return {"found": False, "disabled": True, "error": DOCS_DISABLED_HINT}
+
     async def docs_classify(
         self, repo_root: str, *, path: str, doc_type: str,
         tier: str | None = None, rationale: str,
     ) -> dict[str, Any]:
         from clara.docs import verdicts
 
+        if (disabled := self._docs_disabled()) is not None:
+            return disabled
         return await verdicts.classify(
             self, repo_id(repo_root), path=path, doc_type=doc_type,
             tier=tier, rationale=rationale,
@@ -748,6 +776,8 @@ class LocalMemory:
     ) -> dict[str, Any]:
         from clara.docs import verdicts
 
+        if (disabled := self._docs_disabled()) is not None:
+            return disabled
         return await verdicts.supersede(
             self, repo_id(repo_root), old_path=old_path, new_path=new_path,
             rationale=rationale,
@@ -759,6 +789,8 @@ class LocalMemory:
     ) -> dict[str, Any]:
         from clara.docs import verdicts
 
+        if (disabled := self._docs_disabled()) is not None:
+            return disabled
         return await verdicts.fulfill(
             self, repo_id(repo_root), path=path, distilled=distilled,
             evidence=evidence, rationale=rationale,
@@ -769,6 +801,9 @@ class LocalMemory:
 
         from clara.docs.report import build_report
         from clara.policy import load_policy
+
+        if (disabled := self._docs_disabled()) is not None:
+            return disabled
 
         def _build() -> dict[str, Any]:
             conn = _sqlite3.connect(self._db_path)
@@ -785,6 +820,8 @@ class LocalMemory:
     ) -> dict[str, Any]:
         from clara.docs import verdicts
 
+        if (disabled := self._docs_disabled()) is not None:
+            return disabled
         return await verdicts.archive(
             self, repo_id(repo_root), repo_root=repo_root, path=path,
             rationale=rationale,
@@ -795,6 +832,8 @@ class LocalMemory:
     ) -> dict[str, Any]:
         from clara.docs import verdicts
 
+        if (disabled := self._docs_disabled()) is not None:
+            return disabled
         return await verdicts.restore(
             self, repo_id(repo_root), repo_root=repo_root, path=path,
             rationale=rationale,

@@ -39,6 +39,10 @@ async def run_graph_maintenance(
     stale_days: int = 90,
 ) -> dict[str, int]:
     """Run all graph maintenance steps; returns per-step row counts."""
+    from clara.flags import graph_enabled
+
+    if not graph_enabled():
+        return {}
     ready = (
         await session.execute(
             sa_text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_nodes'")
