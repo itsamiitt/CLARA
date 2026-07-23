@@ -68,9 +68,10 @@ async def _seed(db_path) -> LocalMemory:
 class TestImportPurity:
     def test_fastpath_pulls_no_heavy_modules(self):
         code = (
-            "import clara.fastpath.context, clara.fastpath.db, sys; "
+            "import clara.fastpath.context, clara.fastpath.db, "
+            "clara.fastpath.docs_map, sys; "
             "print(';'.join(m for m in ('sqlalchemy', 'asyncio', 'aiosqlite', "
-            "'urllib.request') if m in sys.modules))"
+            "'urllib.request', 'yaml') if m in sys.modules))"
         )
         proc = subprocess.run(
             [sys.executable, "-c", code], capture_output=True, text=True, timeout=60

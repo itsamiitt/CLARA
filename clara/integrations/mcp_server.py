@@ -97,13 +97,12 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
             from clara.graph.maintain import maintenance_summary, run_graph_maintenance
 
             config = ClaraConfig.from_env()
-            async with memory._session_factory() as session:
-                async with session.begin():
-                    graph_counts = await run_graph_maintenance(
-                        session,
-                        archival_threshold=config.archival_threshold,
-                        stale_days=config.event_stale_days,
-                    )
+            async with memory._session_factory() as session, session.begin():
+                graph_counts = await run_graph_maintenance(
+                    session,
+                    archival_threshold=config.archival_threshold,
+                    stale_days=config.event_stale_days,
+                )
             graph_summary = maintenance_summary(graph_counts)
         except Exception:  # noqa: BLE001 — graph housekeeping is best-effort
             logger.exception("Graph maintenance failed")
@@ -252,6 +251,58 @@ def build_server():
         plus knowledge-graph node/edge counts."""
         memory = await _get_memory()
         return await memory.stats()
+
+    @server.tool()
+    async def docs_status(path_or_query: str, repo: str | None = None) -> dict[str, Any]:
+        """Standing of a repository document from the curator ledger.
+
+        Returns its tier (T0 pinned / T1 authoritative / T2 working / T3
+        scratch / TX quarantined), lifecycle, deterministic signals (age,
+        churn, dead refs, checkboxes, duplicates), and the supersession
+        chain. Consult this before executing a plan-type document. repo:
+        optional repo-root path; defaults to the session's workspace root
+        (MCP roots) or the server's cwd. Run `clara docs scan` first if the
+        repo is not in the ledger.
+        """
+        import sqlite3 as _sqlite3
+
+        from clara.docs.report import get_status
+        from clara.docs.scan import find_repo_root
+        from clara.repoid import repo_id as compute_repo_id
+
+        root = repo
+        if root is None:
+            try:
+                ctx = server.get_context()
+                roots_result = await ctx.session.list_roots()
+                first = roots_result.roots[0].uri
+                path_str = str(first)
+                if path_str.startswith("file://"):
+                    from urllib.request import url2pathname
+
+                    root = url2pathname(path_str[7:])
+            except Exception:  # noqa: BLE001 — roots are optional; fall back to cwd
+                root = None
+        if root is None:
+            root = find_repo_root(os.getcwd())
+
+        def _lookup() -> dict[str, Any]:
+            rid = compute_repo_id(root)
+            conn = _sqlite3.connect(default_db_path())
+            conn.row_factory = _sqlite3.Row
+            try:
+                status = get_status(conn, rid, path_or_query)
+            finally:
+                conn.close()
+            if status is None:
+                return {
+                    "found": False,
+                    "query": path_or_query,
+                    "hint": "not in the ledger — run `clara docs scan` in the repo",
+                }
+            return status
+
+        return await asyncio.to_thread(_lookup)
 
     @server.tool()
     async def graph_entity(name: str, include_history: bool = False) -> dict[str, Any]:

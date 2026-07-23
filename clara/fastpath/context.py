@@ -37,6 +37,11 @@ _W_RECENCY = 0.10
 _W_USAGE = 0.05
 _RECENCY_LAMBDA = 0.01
 
+# Doc-provenance tier weighting — keep in sync with clara.docs.TIER_MULTIPLIER
+# and clara.retrieval.lexical (the recent()-parity test enforces this mirror).
+_TIER_MULTIPLIER = {"T0": 1.2, "T1": 1.1, "T2": 1.0, "T3": 0.8}
+_EXCLUDED_TIER = "TX"
+
 _E = 2.718281828459045
 _SANITIZE_MAX_LEN = 500  # clara.core.text.DEFAULT_MAX_LEN
 
@@ -92,10 +97,16 @@ def rank(memories: list[dict[str, object]], now_epoch: float) -> list[dict[str, 
     max_access = max((_access_count(m) for m in memories), default=0)
     scored: list[tuple[float, dict[str, object]]] = []
     for memory in memories:
+        meta = memory.get("metadata")
+        doc_tier = meta.get("doc_tier") if isinstance(meta, dict) else None
+        if doc_tier == _EXCLUDED_TIER:
+            continue  # quarantined provenance is excluded from default context
         recency = _recency_score(memory.get("updated_epoch"), now_epoch)  # type: ignore[arg-type]
         usage = _usage_frequency(_access_count(memory), max_access)
         confidence = float(memory.get("confidence", 0.5))  # type: ignore[arg-type]
         score = _W_CONFIDENCE * confidence + _W_RECENCY * recency + _W_USAGE * usage
+        if isinstance(doc_tier, str):
+            score *= _TIER_MULTIPLIER.get(doc_tier, 1.0)
         scored.append((score, memory))
     # Stable sort over the updated_at-desc fetch order — same tie-breaking as
     # the LexicalRetriever path.
@@ -271,21 +282,31 @@ def main(argv: list[str] | None = None) -> int:
     db_path, rid = db.resolve_store(cwd)
     if os.environ.get("CLARA_FASTPATH_DEBUG"):
         print(f"clara fastpath: repo_id={rid} store={db_path}", file=sys.stderr)
-    if db_path is None:
-        return 0
-    conn = db.open_store(db_path)
-    if conn is None:
-        return 0
-    try:
-        memories = db.fetch_active(conn)
-    except sqlite3.Error as exc:
-        print(f"clara fastpath: {db_path}: read failed ({exc})", file=sys.stderr)
-        return 0
-    finally:
-        conn.close()
-    block = build_context(memories, time.time())
+    block: str | None = None
+    if db_path is not None:
+        conn = db.open_store(db_path)
+        if conn is not None:
+            try:
+                memories = db.fetch_active(conn)
+                block = build_context(memories, time.time())
+            except sqlite3.Error as exc:
+                print(f"clara fastpath: {db_path}: read failed ({exc})", file=sys.stderr)
+            finally:
+                conn.close()
     if block:
         print(block)
+
+    try:
+        from clara.fastpath import docs_map
+
+        map_block = docs_map.build_map(cwd)
+    except Exception as exc:  # noqa: BLE001 — the map must never block a session
+        print(f"clara fastpath: knowledge map failed ({exc})", file=sys.stderr)
+        map_block = None
+    if map_block:
+        if block:
+            print()
+        print(map_block)
     return 0
 
 

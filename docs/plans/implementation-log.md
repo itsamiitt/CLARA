@@ -2,6 +2,65 @@
 
 One entry per milestone of the CLARA → Claude Code plugin conversion.
 
+## 2026-07-23 — Milestone 04: curator doc ledger (Prompt 04)
+
+Branch `feat/plugin-sprint0`, one commit
+(`feat: curator doc ledger — signals, knowledge map, docs_status`).
+
+**Built.**
+- Migration 3: `doc_registry` (unique on repo_id+rel_path while valid),
+  `doc_refs`, `doc_attestations`. Ledger keyed on `repo_id` in the GLOBAL
+  store — worktrees/clones share one ledger (worktree test proves it).
+- `clara/docs/`: `simhash.py` (in-tree 64-bit simhash, 3-word shingles,
+  cluster at Hamming ≤ 6), `refs.py` (md links, inline-code repo paths,
+  `path::symbol`, urls, issue ids; code fences stripped), `signals.py`
+  (one-sentence docstring per signal: age_days, last_author,
+  churn_divergence "targets:doc", dead_refs incl. capped `git grep -w`
+  symbol probes, checkbox_state, merge_evidence, path_convention from
+  clara.yml + built-ins, frontmatter status/type/tier/supersedes — one
+  batched `git log --name-only` parse feeds all git signals), `scan.py`
+  (hash-gated incremental scan; rename keeps doc_id via content hash +
+  `moved` attestation; vanish invalidates; frontmatter `supersedes:` marks
+  targets superseded; repo-wide link_indegree + duplicate clusters;
+  quarantine manifest `$CLARA_HOME/quarantine/<repo_id>.tsv`; graph
+  projection of document nodes + describes→file edges feature-detected),
+  `report.py` (status sentence + rot report — proposals only, T0/T1 never
+  archive candidates).
+- Fastpath: `docs_map.py` renders the fenced `[KNOWLEDGE MAP]` after
+  `[MEMORY CONTEXT]` (raw SQL, ≤300 tokens, 120-char lines, control chars
+  stripped, paths verbatim-quoted, never content excerpts; cold-start
+  notice line), runs the `git status --porcelain -- '*.md'` dirty-check
+  into a sidecar consumed by `clara docs scan --changed`, and refreshes
+  the quarantine manifest when the ledger stamp changed. Import purity
+  extended to docs_map (+ yaml guard).
+- Tier weighting: memories with `metadata.doc_tier` get multipliers
+  (T0 1.2 / T1 1.1 / T2 1.0 / T3 0.8) and TX is excluded — implemented in
+  `LexicalRetriever` (rich path) and fastpath `rank()` (mirror; parity
+  test), constants in `clara.docs.TIER_MULTIPLIER`.
+- CLI `clara docs scan|status|report` (scan warns when clara.yml is
+  git-ignored; `--changed` with no paths consumes the dirty sidecar); MCP
+  tool `docs_status(path_or_query, repo=None)` resolving repo via MCP
+  roots then cwd; `/clara:docs`; SKILL.md "Document trust" section.
+- Tests: +21 (`test_docs.py`) — rotting-repo fixture (30 docs) with 12/12
+  planted rot found (≥90% required), zero archive proposals on T1,
+  frontmatter typing, rename keeps doc_id, incremental rescan <100 ms
+  (min-of-3, measured ~60 ms), scan idempotence, worktree shared ledger,
+  knowledge-map sanitization (adversarial `IGNORE PREVIOUS
+  INSTRUCTIONS.md` renders quoted inside the fence), budget, cold-start
+  notice, dirty sidecar round-trip, lexical + fastpath tier weighting.
+
+**Deviations from the prompt.**
+1. "Mark dirty docs in a lightweight fastpath table or sidecar" — sidecar
+   file chosen (`$CLARA_HOME/dirty/<repo_id>.list`); no new table.
+2. Tier weighting implemented in the lexical path (the zero-backend
+   retriever the plugin uses) and fastpath; the LanceDB vector path is
+   untouched this milestone.
+3. `_discover` additionally skips hidden directories (except `.github`) —
+   `.pytest_cache/README.md` etc. are never documentation.
+4. Dead-ref heuristics have known benign false positives (branch names,
+   npm package ids that look path-like); deterministic and explainable,
+   left as-is.
+
 ## 2026-07-22 — Milestone 03: knowledge graph layer (Prompt 03)
 
 Branch `feat/plugin-sprint0`, one commit

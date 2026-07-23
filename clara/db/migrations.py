@@ -29,7 +29,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _BUSY_TIMEOUT_MS = 30_000  # matches SQLITE_BUSY_TIMEOUT_MS in clara/agent.py
 
@@ -120,9 +120,68 @@ def _migration_2(conn: sqlite3.Connection) -> None:
         )
 
 
+# Curator document ledger (see clara/docs/). Deterministic signals about repo
+# documents, keyed on repo_id so worktrees share one ledger. Rows are
+# invalidated, never deleted; `clara docs scan` is the universal repair path.
+_DOCS_DDL = [
+    """
+    CREATE TABLE doc_registry (
+        doc_id TEXT PRIMARY KEY,
+        user_id TEXT,
+        repo_id TEXT NOT NULL,
+        rel_path TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        doc_type TEXT DEFAULT 'unknown',
+        tier TEXT DEFAULT 'T2',
+        lifecycle TEXT DEFAULT 'active',
+        superseded_by TEXT,
+        fulfilled_by TEXT DEFAULT '{}',
+        type_source TEXT DEFAULT 'heuristic',
+        signals TEXT DEFAULT '{}',
+        valid_from TIMESTAMP NOT NULL,
+        invalid_at TIMESTAMP,
+        last_verified TIMESTAMP,
+        updated_at TIMESTAMP
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX uq_doc_registry_path
+        ON doc_registry (repo_id, rel_path) WHERE invalid_at IS NULL
+    """,
+    "CREATE INDEX ix_doc_registry_repo ON doc_registry (repo_id)",
+    """
+    CREATE TABLE doc_refs (
+        doc_id TEXT NOT NULL,
+        ref_kind TEXT NOT NULL,
+        ref_value TEXT NOT NULL,
+        resolved INTEGER DEFAULT 1,
+        PRIMARY KEY (doc_id, ref_kind, ref_value)
+    )
+    """,
+    """
+    CREATE TABLE doc_attestations (
+        att_id TEXT PRIMARY KEY,
+        doc_id TEXT NOT NULL,
+        actor TEXT,
+        verdict TEXT,
+        rationale TEXT,
+        evidence TEXT DEFAULT '{}',
+        created_at TIMESTAMP
+    )
+    """,
+    "CREATE INDEX ix_doc_attestations_doc ON doc_attestations (doc_id)",
+]
+
+
+def _migration_3(conn: sqlite3.Connection) -> None:
+    for statement in _DOCS_DDL:
+        conn.execute(statement)
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_1),
     (2, _migration_2),
+    (3, _migration_3),
 ]
 
 

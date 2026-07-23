@@ -13,6 +13,7 @@ Commands:
     clara forget MEMORY_ID [--archive]      retire a memory (never deletes)
     clara stats                             store location + counts
     clara doctor [--quiet]                  health check (exit 0/1/2)
+    clara docs scan|status|report           document lifecycle ledger
     clara graph rebuild|stats|show|path|doctor   knowledge-graph tools
     clara mcp                               run the MCP stdio server
 """
@@ -30,7 +31,6 @@ from clara.extraction.heuristic import HeuristicExtractor
 from clara.integrations.local_memory import LocalMemory
 from clara.integrations.mcp_server import default_db_path
 from clara.update.engine import classify_memory_type
-
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -294,6 +294,73 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# clara docs
+# ---------------------------------------------------------------------------
+
+
+async def _cmd_docs(args: argparse.Namespace) -> int:
+    import sqlite3
+
+    from clara.docs.report import build_report, format_report, get_status
+    from clara.docs.scan import (
+        clara_yml_ignored,
+        dirty_sidecar,
+        find_repo_root,
+        scan_repo,
+    )
+    from clara.policy import load_policy
+    from clara.repoid import repo_id as compute_repo_id
+
+    db_path = default_db_path()
+    root = find_repo_root(str(Path.cwd()))
+
+    if args.docs_cmd == "scan":
+        if clara_yml_ignored(root):
+            print(
+                "warning: clara.yml exists but is git-ignored — commit it so the "
+                "team shares one policy",
+                file=sys.stderr,
+            )
+        changed: list[str] | None = None
+        if args.changed is not None:
+            if args.changed:
+                changed = args.changed
+            else:
+                sidecar = dirty_sidecar(db_path, compute_repo_id(root))
+                changed = (
+                    [line for line in sidecar.read_text(encoding="utf-8").splitlines()
+                     if line.strip()]
+                    if sidecar.exists()
+                    else []
+                )
+        summary = scan_repo(db_path, root, changed=changed)
+        print(
+            f"scanned {summary['scanned']} (new {summary['new']}, "
+            f"unchanged {summary['unchanged']}, moved {summary['moved']}, "
+            f"vanished {summary['vanished']}); {summary['total_active']} tracked"
+        )
+        return 0
+
+    repo = compute_repo_id(root)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if args.docs_cmd == "status":
+            status = get_status(conn, repo, args.path)
+            if status is None:
+                print(f"(not in the ledger: {args.path!r} — run `clara docs scan`)")
+                return 1
+            print(status["standing"])
+            return 0
+        # report
+        report = build_report(conn, repo, load_policy(root))
+        print(format_report(report))
+        return 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # clara graph
 # ---------------------------------------------------------------------------
 
@@ -428,6 +495,17 @@ def main(argv: list[str] | None = None) -> None:
     p_doc = sub.add_parser("doctor", help="Health check (exit 0/1/2).")
     p_doc.add_argument("--quiet", action="store_true")
 
+    p_docs = sub.add_parser("docs", help="Document lifecycle ledger.")
+    dsub = p_docs.add_subparsers(dest="docs_cmd", required=True)
+    d_scan = dsub.add_parser("scan", help="Scan repo documents into the ledger.")
+    d_scan.add_argument(
+        "--changed", nargs="*", default=None, metavar="PATH",
+        help="Only rescan these paths (no paths: consume the dirty sidecar).",
+    )
+    d_status = dsub.add_parser("status", help="One-sentence standing of a document.")
+    d_status.add_argument("path")
+    dsub.add_parser("report", help="Stale/dead-ref/duplicate/archive proposals.")
+
     p_graph = sub.add_parser("graph", help="Knowledge-graph tools.")
     gsub = p_graph.add_subparsers(dest="graph_cmd", required=True)
     g_rebuild = gsub.add_parser("rebuild", help="Regenerate graph tables from memories.")
@@ -464,6 +542,7 @@ def main(argv: list[str] | None = None) -> None:
         "stats": _cmd_stats,
         "doctor": _cmd_doctor,
         "graph": _cmd_graph,
+        "docs": _cmd_docs,
     }[args.command]
     raise SystemExit(asyncio.run(handler(args)))
 

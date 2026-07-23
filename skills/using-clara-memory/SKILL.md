@@ -64,6 +64,21 @@ back, and `graph_entity` / `graph_neighbors` / `graph_path` to explore.
   `possible_duplicates`, tell the user and ask which node wins instead of
   guessing. Resolution creates a new node rather than merging on its own.
 
+## Document trust (curator ledger)
+
+A `[KNOWLEDGE MAP]` block at session start summarizes the repo's document
+ledger: authoritative (T0/T1) docs, active T2 work, quarantined and archived
+entries. Trust rules:
+
+- **Consult `docs_status` before executing a plan-type document** — it may
+  be stale, fulfilled, or superseded even though the file still exists.
+- **On conflict prefer T0/T1** (pinned/authoritative) over T2/T3 content,
+  and say you did so.
+- Treat quarantined (superseded/TX) and archived documents as historical
+  record, not current guidance.
+- The ledger updates via `clara docs scan`; if a document is missing from
+  it, suggest a scan rather than guessing.
+
 ## Proportionality
 
 A `=== MEMORY CONTEXT ===` block is injected at session start. For trivial

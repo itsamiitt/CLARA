@@ -48,6 +48,19 @@ def _git_toplevel(cwd: str) -> str | None:
     return out or None
 
 
+def global_db_path() -> Path:
+    """The global store path ($CLARA_DB_PATH / $CLARA_HOME / ~/.clara).
+
+    The doc ledger always lives here (keyed by repo_id) so worktrees and
+    clones of one repository share a single ledger.
+    """
+    explicit = os.environ.get("CLARA_DB_PATH")
+    if explicit:
+        return Path(explicit)
+    base = Path(os.environ.get("CLARA_HOME") or (Path.home() / ".clara"))
+    return base / "clara.db"
+
+
 def resolve_store(cwd: str) -> tuple[Path | None, str]:
     """Return ``(db_path or None, repo_id)`` for the session working dir."""
     rid = repo_id(cwd)
@@ -55,12 +68,7 @@ def resolve_store(cwd: str) -> tuple[Path | None, str]:
     project = Path(root) / ".clara" / "clara.db"
     if project.is_file():
         return project, rid
-    explicit = os.environ.get("CLARA_DB_PATH")
-    if explicit:
-        candidate = Path(explicit)
-    else:
-        base = Path(os.environ.get("CLARA_HOME") or (Path.home() / ".clara"))
-        candidate = base / "clara.db"
+    candidate = global_db_path()
     if candidate.is_file():
         return candidate, rid
     return None, rid
