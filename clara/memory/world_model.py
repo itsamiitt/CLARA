@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.core.exceptions import MemoryNotFoundError
 from clara.db.models import Memory, MemoryStatus, MemoryType
+from clara.graph import project as graph_project
 
 logger = logging.getLogger(__name__)
 
@@ -97,18 +98,19 @@ class WorldModelStore:
         existing = await self._find_existing(entity_type, name, user_id=user_id)
 
         if existing is not None:
-            return await self._merge_properties(
+            record = await self._merge_properties(
                 existing,
                 properties,
                 source_type=source_type,
                 raw_text=raw_text,
                 embedding=embedding,
             )
+            return await self._with_graph_projection(record)
 
         create_error: IntegrityError | None = None
         try:
             async with self._session.begin_nested():
-                return await self._create_new(
+                record = await self._create_new(
                     entity_type=entity_type,
                     name=name,
                     properties=properties,
@@ -119,6 +121,7 @@ class WorldModelStore:
                     raw_text=raw_text,
                     embedding=embedding,
                 )
+            return await self._with_graph_projection(record)
         except IntegrityError as exc:
             create_error = exc
             logger.debug(
@@ -130,16 +133,22 @@ class WorldModelStore:
 
         existing = await self._find_existing(entity_type, name, user_id=user_id)
         if existing is not None:
-            return await self._merge_properties(
+            record = await self._merge_properties(
                 existing,
                 properties,
                 source_type=source_type,
                 raw_text=raw_text,
                 embedding=embedding,
             )
+            return await self._with_graph_projection(record)
         if create_error is None:
             raise RuntimeError("World-model upsert failed without an IntegrityError cause")
         raise create_error
+
+    async def _with_graph_projection(self, record: Memory) -> Memory:
+        """Fail-soft: mirror the world-model row onto its graph node."""
+        await graph_project.project_world_model_upserted(self._session, record)
+        return record
 
     # ------------------------------------------------------------------
     # update_property — single property mutation

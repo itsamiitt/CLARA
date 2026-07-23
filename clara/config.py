@@ -24,7 +24,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-
 # ---------------------------------------------------------------------------
 # Default values (keep in sync with per-module defaults)
 # ---------------------------------------------------------------------------
@@ -45,6 +44,8 @@ _DEFAULT_EVENT_STALE_DAYS = 90
 _DEFAULT_SKILL_UNUSED_DAYS = 60
 _DEFAULT_CACHE_URL: str | None = None
 _DEFAULT_AUTH_REQUIRED = False
+_DEFAULT_GRAPH_ENABLED = True
+_DEFAULT_DOCS_ENABLED = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +126,11 @@ class ClaraConfig:
     cache_url: str | None = _DEFAULT_CACHE_URL
     auth_required: bool = _DEFAULT_AUTH_REQUIRED
 
+    # Plugin add-on kill switches (see also clara.flags for the per-call
+    # helpers long-lived processes use)
+    graph_enabled: bool = _DEFAULT_GRAPH_ENABLED
+    docs_enabled: bool = _DEFAULT_DOCS_ENABLED
+
     # ------------------------------------------------------------------
     # Factory
     # ------------------------------------------------------------------
@@ -199,4 +205,6 @@ class ClaraConfig:
             start_scheduler=_bool("CLARA_START_SCHEDULER", True),
             cache_url=_str("CLARA_CACHE_URL", "memory://") if os.environ.get("CLARA_CACHE_URL") else None,
             auth_required=_bool("CLARA_AUTH_REQUIRED", _DEFAULT_AUTH_REQUIRED),
+            graph_enabled=_bool("CLARA_GRAPH_ENABLED", _DEFAULT_GRAPH_ENABLED),
+            docs_enabled=_bool("CLARA_DOCS_ENABLED", _DEFAULT_DOCS_ENABLED),
         )

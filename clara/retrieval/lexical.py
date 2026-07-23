@@ -17,14 +17,17 @@ import logging
 import math
 import re
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any
 
-from sqlalchemy import String, and_, cast, or_, select, text as sa_text
+from sqlalchemy import String, and_, cast, or_, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.db.fts import FTS_TABLE, build_match_expression
 from clara.db.models import Memory, MemoryStatus, MemoryType
+from clara.docs import TIER_MULTIPLIER
 from clara.retrieval.engine import (
     RetrievalEngine,
     RetrievalResult,
@@ -164,6 +167,13 @@ class LexicalRetriever:
 
         scored: list[ScoredMemory] = []
         for memory, similarity in weighted:
+            # Doc-derived provenance: tier multiplier on the composite score;
+            # TX (quarantined) provenance is excluded from default context —
+            # mirrored in clara/fastpath/context.py (parity test enforces it).
+            meta = memory.metadata_ if isinstance(memory.metadata_, dict) else {}
+            doc_tier = meta.get("doc_tier")
+            if doc_tier == "TX":
+                continue
             access = RetrievalEngine._get_access_count(memory)
             recency = compute_recency_score(memory.updated_at, now)
             usage = compute_usage_frequency(access, max_access)
@@ -173,6 +183,8 @@ class LexicalRetriever:
                 recency_score=recency,
                 usage_frequency=usage,
             )
+            if isinstance(doc_tier, str):
+                final *= TIER_MULTIPLIER.get(doc_tier, 1.0)
             scored.append(
                 ScoredMemory(
                     memory=memory,

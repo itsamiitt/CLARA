@@ -20,6 +20,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.db.models import Memory, MemoryStatus, MemoryType
+from clara.graph import project as graph_project
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +208,8 @@ class BeliefMemory:
 
         self._session.add(record)
         await self._session.flush()
+        # Fail-soft graph projection: belief → edge (negation → invalidation).
+        await graph_project.project_belief_created(self._session, record)
         return record
 
     # ------------------------------------------------------------------
@@ -342,6 +345,9 @@ class BeliefMemory:
         record.metadata_ = meta
 
         await self._session.flush()
+        await graph_project.project_confidence_changed(
+            self._session, str(record.memory_id), record.confidence
+        )
         return record
 
     # ------------------------------------------------------------------
@@ -419,4 +425,8 @@ class BeliefMemory:
         new_record.metadata_ = new_meta
 
         await self._session.flush()
+        # The new edge was projected by store(); invalidate the old one.
+        await graph_project.project_belief_superseded(
+            self._session, old_record, new_record
+        )
         return old_record, new_record

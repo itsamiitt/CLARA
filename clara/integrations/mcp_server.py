@@ -91,9 +91,25 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
         scheduler = DecayScheduler(memory._session_factory)
         decay_summary = await scheduler.run_daily_decay()
         prune_summary = await scheduler.run_weekly_pruning()
+        graph_summary = "graph: skipped"
+        try:
+            from clara.config import ClaraConfig
+            from clara.graph.maintain import maintenance_summary, run_graph_maintenance
+
+            config = ClaraConfig.from_env()
+            async with memory._session_factory() as session, session.begin():
+                graph_counts = await run_graph_maintenance(
+                    session,
+                    archival_threshold=config.archival_threshold,
+                    stale_days=config.event_stale_days,
+                )
+            graph_summary = maintenance_summary(graph_counts)
+        except Exception:  # noqa: BLE001 — graph housekeeping is best-effort
+            logger.exception("Graph maintenance failed")
         marker.touch()
         logger.info(
-            "Opportunistic maintenance: %s %s", decay_summary, prune_summary,
+            "Opportunistic maintenance: %s %s %s",
+            decay_summary, prune_summary, graph_summary,
         )
     except Exception:  # noqa: BLE001 — housekeeping must never block memory
         logger.exception("Opportunistic maintenance failed")
@@ -179,6 +195,7 @@ def build_server():
         query: str,
         top_k: int = 8,
         types: list[str] | None = None,
+        graph_depth: int = 1,
     ) -> dict[str, Any]:
         """Search long-term memory by keywords and return matching memories.
 
@@ -187,9 +204,14 @@ def build_server():
         result includes a ready-to-read "MEMORY CONTEXT" block plus structured
         hits. Optionally filter types to any of:
         ["belief", "event", "skill", "world_model"].
+
+        graph_depth (default 1) also walks the knowledge graph from the top
+        hits' entities and appends a [GRAPH] relations section; set 0 to skip.
         """
         memory = await _get_memory()
-        return await memory.search(query, top_k=top_k, types=types)
+        return await memory.search(
+            query, top_k=top_k, types=types, graph_depth=graph_depth
+        )
 
     @server.tool()
     async def memory_recent(
@@ -225,9 +247,216 @@ def build_server():
 
     @server.tool()
     async def memory_stats() -> dict[str, Any]:
-        """Report where the store lives and how many active memories it holds."""
+        """Report where the store lives and how many active memories it holds,
+        plus knowledge-graph node/edge counts."""
         memory = await _get_memory()
         return await memory.stats()
+
+    async def _repo_root(repo: str | None) -> str:
+        """Resolve the repo root: explicit arg → MCP workspace roots → cwd."""
+        from clara.docs.scan import find_repo_root
+
+        if repo is not None:
+            return repo
+        root: str | None = None
+        try:
+            ctx = server.get_context()
+            roots_result = await ctx.session.list_roots()
+            path_str = str(roots_result.roots[0].uri)
+            if path_str.startswith("file://"):
+                from urllib.request import url2pathname
+
+                root = url2pathname(path_str[7:])
+        except Exception:  # noqa: BLE001 — roots are optional; fall back to cwd
+            root = None
+        return root if root is not None else find_repo_root(os.getcwd())
+
+    @server.tool()
+    async def docs_status(path_or_query: str, repo: str | None = None) -> dict[str, Any]:
+        """Standing of a repository document from the curator ledger.
+
+        Returns its tier (T0 pinned / T1 authoritative / T2 working / T3
+        scratch / TX quarantined), lifecycle, deterministic signals (age,
+        churn, dead refs, checkboxes, duplicates), and the supersession
+        chain. Consult this before executing a plan-type document. repo:
+        optional repo-root path; defaults to the session's workspace root
+        (MCP roots) or the server's cwd. Run `clara docs scan` first if the
+        repo is not in the ledger.
+        """
+        import sqlite3 as _sqlite3
+
+        from clara.docs.report import get_status
+        from clara.repoid import repo_id as compute_repo_id
+
+        root = await _repo_root(repo)
+
+        def _lookup() -> dict[str, Any]:
+            rid = compute_repo_id(root)
+            conn = _sqlite3.connect(default_db_path())
+            conn.row_factory = _sqlite3.Row
+            try:
+                status = get_status(conn, rid, path_or_query)
+            finally:
+                conn.close()
+            if status is None:
+                return {
+                    "found": False,
+                    "query": path_or_query,
+                    "hint": "not in the ledger — run `clara docs scan` in the repo",
+                }
+            return status
+
+        return await asyncio.to_thread(_lookup)
+
+    @server.tool()
+    async def docs_classify(
+        path: str,
+        doc_type: str,
+        rationale: str,
+        tier: str | None = None,
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Attest a document's type (and optionally tier) in the curator ledger.
+
+        Use when the heuristic classification is wrong or missing. doc_type:
+        e.g. adr, spec, plan, guide, brainstorm, standard. tier: T0 pinned /
+        T1 authoritative / T2 working / T3 scratch / TX quarantined. Always
+        give a one-sentence rationale. Idempotent for unchanged content.
+        """
+        memory = await _get_memory()
+        return await memory.docs_classify(
+            await _repo_root(repo), path=path, doc_type=doc_type, tier=tier,
+            rationale=rationale,
+        )
+
+    @server.tool()
+    async def docs_supersede(
+        old_path: str,
+        new_path: str,
+        rationale: str,
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Mark one document as superseded by another (e.g. plan v1 -> v2).
+
+        The old document moves to the quarantine list and future reads of it
+        get annotated; the new document becomes the current guidance. Also
+        records a `supersedes` edge in the knowledge graph when present.
+        """
+        memory = await _get_memory()
+        return await memory.docs_supersede(
+            await _repo_root(repo), old_path=old_path, new_path=new_path,
+            rationale=rationale,
+        )
+
+    @server.tool()
+    async def docs_fulfill(
+        path: str,
+        distilled: list[dict[str, Any]],
+        evidence: str | None = None,
+        rationale: str = "plan completed",
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Close out a completed plan document by distilling it into memory.
+
+        Call immediately after finishing the work a plan-type document
+        described. distilled: 1-5 memory_save-shaped facts (mem_type +
+        fields) capturing the durable outcomes — decisions, constraints,
+        standards — not implementation trivia. evidence: the commit/PR/issue
+        ref proving completion. Atomic: the memories, the `fulfilled`
+        lifecycle transition, and provenance graph edges commit together.
+        Returns {doc_id, memory_ids, edge_ids}.
+        """
+        memory = await _get_memory()
+        return await memory.docs_fulfill(
+            await _repo_root(repo), path=path, distilled=distilled,
+            evidence=evidence, rationale=rationale,
+        )
+
+    @server.tool()
+    async def docs_report(
+        scope: str = "repo", repo: str | None = None
+    ) -> dict[str, Any]:
+        """Document rot report for the current repo (proposals only).
+
+        Lists stale documents, dead-reference documents, duplicate clusters,
+        and archive candidates. Nothing is mutated — present findings to the
+        user and act only on their instruction. scope: reserved (only 'repo'
+        today).
+        """
+        memory = await _get_memory()
+        return await memory.docs_report(await _repo_root(repo))
+
+    @server.tool()
+    async def graph_entity(name: str, include_history: bool = False) -> dict[str, Any]:
+        """Look up one entity in the knowledge graph.
+
+        Returns its card: display/canonical name, entity type, aliases,
+        possible_duplicates (candidate merges — propose a merge to the user
+        instead of guessing), linked world-model id, and its top relations.
+        Set include_history=true to also see invalidated (✗) relations.
+        """
+        memory = await _get_memory()
+        return await memory.graph_entity(name, include_history=include_history)
+
+    @server.tool()
+    async def graph_neighbors(
+        name: str,
+        depth: int = 1,
+        relation: str | None = None,
+        as_of: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Walk the knowledge graph outward from an entity.
+
+        depth: hops to expand (1-2 typical). relation: filter to one relation
+        (free-form; normalized like edge relations). as_of: ISO date/time to
+        view the graph as it was then (includes edges since invalidated).
+        Returns a rendered [GRAPH] section plus structured edges.
+        """
+        memory = await _get_memory()
+        return await memory.graph_neighbors(
+            name, depth=depth, relation=relation, as_of=as_of, limit=limit
+        )
+
+    @server.tool()
+    async def graph_path(
+        from_name: str,
+        to_name: str,
+        max_hops: int = 4,
+        as_of: str | None = None,
+    ) -> dict[str, Any]:
+        """Find how two entities are connected (shortest/best relation path)."""
+        memory = await _get_memory()
+        return await memory.graph_path(
+            from_name, to_name, max_hops=max_hops, as_of=as_of
+        )
+
+    @server.tool()
+    async def memory_link(
+        src: str,
+        relation: str,
+        dst: str,
+        entity_types: list[str] | None = None,
+        confidence: float | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Save a belief AND get its graph edge in one call (linking sugar).
+
+        Use active-voice relations (uses, depends_on, deployed_to). Name code
+        entities by path ("src/api.py"), symbol ("src/api.py::handler"), or
+        decision slug ("decision:move-to-sqlite"). entity_types optionally
+        types the endpoints as [src_type, dst_type]. Returns belief_id,
+        edge_id, and the resolved node names.
+        """
+        memory = await _get_memory()
+        return await memory.memory_link(
+            src,
+            relation,
+            dst,
+            entity_types=entity_types,
+            confidence=confidence,
+            description=description,
+        )
 
     return server
 

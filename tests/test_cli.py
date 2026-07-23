@@ -94,3 +94,58 @@ class TestDoctor:
     def test_doctor_quiet(self, capsys):
         assert _run(["doctor", "--quiet"]) == 0
         assert capsys.readouterr().out == ""
+
+
+class TestGraphCli:
+    def test_graph_stats_and_show(self, capsys):
+        assert _run(["remember", "I use PostgreSQL for the backend"]) == 0
+        capsys.readouterr()
+        assert _run(["graph", "stats"]) == 0
+        out = capsys.readouterr().out
+        assert "nodes:" in out and "edges:" in out
+
+        assert _run(["graph", "show", "postgres"]) == 0
+        out = capsys.readouterr().out
+        assert "postgresql" in out.lower()
+
+    def test_graph_show_unknown_entity(self, capsys):
+        assert _run(["remember", "I use PostgreSQL for the backend"]) == 0
+        capsys.readouterr()
+        assert _run(["graph", "show", "definitely-not-there"]) == 1
+
+    def test_graph_rebuild_and_doctor(self, capsys):
+        assert _run(["remember", "I use PostgreSQL for the backend"]) == 0
+        capsys.readouterr()
+        assert _run(["graph", "rebuild"]) == 0
+        assert "graph rebuilt" in capsys.readouterr().out
+        assert _run(["graph", "doctor"]) == 0
+        assert "no issues" in capsys.readouterr().out
+
+
+class TestProjectGitignore:
+    def test_init_writes_scoped_gitignore(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        assert _run(["init", "--project", "--agent", "generic"]) == 0
+        content = (tmp_path / ".clara" / ".gitignore").read_text(encoding="utf-8")
+        assert content == "clara.db*\n.maintenance\nquarantine/\n"
+        assert "warning:" not in capsys.readouterr().err
+
+    def test_init_migrates_star_gitignore(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        clara_dir = tmp_path / ".clara"
+        clara_dir.mkdir()
+        (clara_dir / ".gitignore").write_text("*\n", encoding="utf-8")
+        assert _run(["init", "--project", "--agent", "generic"]) == 0
+        content = (clara_dir / ".gitignore").read_text(encoding="utf-8")
+        assert content == "clara.db*\n.maintenance\nquarantine/\n"
+        assert capsys.readouterr().err.count("warning:") == 1
+
+    def test_init_leaves_custom_gitignore_alone(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        clara_dir = tmp_path / ".clara"
+        clara_dir.mkdir()
+        custom = "clara.db\nmy-custom\n"
+        (clara_dir / ".gitignore").write_text(custom, encoding="utf-8")
+        assert _run(["init", "--project", "--agent", "generic"]) == 0
+        assert (clara_dir / ".gitignore").read_text(encoding="utf-8") == custom
+        assert "warning:" not in capsys.readouterr().err

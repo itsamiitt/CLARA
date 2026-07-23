@@ -1,0 +1,11 @@
+version: 1
+archive_dir: docs/archive
+tiers:
+  T1: ["docs/adr/**", "CODING_STANDARDS.md", "CLAUDE.md"]
+  T3: ["notes/**", "**/*brainstorm*.md"]
+types:
+  plan: ["docs/plans/**", "**/PLAN*.md"]
+stale_after_days: { plan: 60, brainstorm: 14 }
+exclude: ["vendor/**"]
+archive_mode: git-mv
+aliases: { pg: postgresql }

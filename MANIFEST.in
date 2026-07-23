@@ -1,0 +1,7 @@
+# Claude Code plugin wiring ships via the marketplace (git checkout), never
+# via PyPI — keep it out of sdists and wheels.
+prune .claude-plugin
+prune hooks
+prune scripts
+prune skills
+prune commands
