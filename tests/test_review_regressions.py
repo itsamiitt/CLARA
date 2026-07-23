@@ -82,6 +82,21 @@ class TestF1HomeUnbound:
         assert not offenders, "bare $HOME under set -u:\n" + "\n".join(offenders)
 
 
+class TestR1BootstrapInstallSpec:
+    """R1: `pip install "${ROOT}[mcp]"` fails on native Windows under Git Bash
+    because $ROOT is an MSYS path (/c/...) the venv's Windows Python does not
+    recognize — pip parses it as a PEP 508 requirement and errors. The install
+    must go through the directory with a relative ".[mcp]" spec instead."""
+
+    def test_no_root_extras_passed_to_pip(self):
+        text = (_ROOT / "scripts" / "bootstrap.sh").read_text(encoding="utf-8")
+        assert '"${ROOT}[mcp]"' not in text, (
+            'bootstrap.sh must not pass an absolute path with extras to pip; '
+            'install from inside $ROOT with ".[mcp]" (MSYS paths break Windows pip)'
+        )
+        assert '".[mcp]"' in text, "expected the cd + relative .[mcp] install form"
+
+
 class TestF2TopKClamp:
     """F2: negative top_k became a Python slice scored[:-1] and silently
     dropped the lowest-ranked hit instead of returning the requested count."""

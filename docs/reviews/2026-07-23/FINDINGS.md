@@ -75,10 +75,43 @@ live store.
 
 ---
 
+## Real-environment addendum (2026-07-23, second pass)
+
+After the probe pass above, I **actually installed and ran CLARA on this box**
+(real `pip install -e ".[mcp]"`, real `clara-mcp` over stdio, real `~/.clara`
+store, real `~/.claude` bridge). That closed several NOT-TESTED items and
+surfaced one **HIGH** install bug the synthetic probes — and even my earlier
+"live" implementation test — missed:
+
+- **R1 (HIGH, FIXED + re-verified):** the plugin bootstrap could not install
+  on native Windows under Git Bash. See below.
+- **MCP wire protocol (was NOT TESTED → PASS):** drove the real `clara-mcp`
+  server over stdio JSON-RPC (official `mcp` client SDK): `initialize` (proto
+  2025-11-25), `tools/list` (15 tools), a live `memory_save`→`memory_search`
+  round-trip (recall confirmed), `memory_stats`, and malformed args returning
+  a structured `isError=true` — not a crash. Clean JSON-RPC framing also
+  confirms **C11 stdout discipline** end-to-end (stray stdout would break the
+  parse; it didn't).
+- **Real data recall (PASS):** `clara context truepoint` returned the machine's
+  actual stored memories (belief + world_model + skill) from `~/.clara/clara.db`.
+- **Bridge / statusline against real `~/.claude` (PASS):** `clara sync status`
+  resolved the real auto-memory dir
+  (`~/.claude/projects/C--…-CLARA/memory/MEMORY.md`) and the real import source
+  (`~/.claude/CLAUDE.md`); `clara statusline` → `CLARA - 4 memories - global`.
+- **`clara doctor --deep` (PASS + useful):** correctly reported the real store
+  healthy, integrity ok, FTS present, schema v6, and surfaced a genuine FAILED
+  entry in the real install log (the R1 bug) — the health check earned its keep.
+- **Extractor calibration (NOT-A-BUG):** the rule-based `clara remember` is
+  intentionally narrow — `I use X` / `we deployed Y` / `Z runs on W` / `I
+  switched from A to B` (negation) all work; compound and third-person
+  sentences ("user prefers…") do not, with a guiding error. `user prefers pnpm`
+  in the README is the stored *data shape*, not a `clara remember` input.
+
 ## Summary table
 
 | ID | Title | Severity | Area | Status | Repro? |
 |----|-------|----------|------|--------|--------|
+| R1 | Plugin bootstrap `pip install "${ROOT}[mcp]"` fails on native Windows/Git Bash (MSYS path parsed as a PEP 508 requirement) — install strands | **HIGH** | Install/bootstrap | **Fixed + re-verified (real install)** | Y |
 | F1 | Hooks abort (exit≠0) when `$HOME` unset under `set -u` — violates "SessionStart always exits 0" | **MEDIUM** | Hooks/install | **Fixed + re-verified** | Y |
 | F2 | Negative `top_k` silently drops the lowest-ranked hit (`scored[:-1]`) | **MEDIUM** | Retrieval | **Fixed + re-verified** | Y |
 | F3 | README PyPI badge + `pip install clara-memory` — package not on PyPI | LOW (doc-truthfulness) | Docs | Open | Y |
@@ -93,6 +126,57 @@ both and added `tests/test_review_regressions.py`, re-run green.
 ---
 
 ## Findings
+
+### R1 — Plugin bootstrap install fails on native Windows + Git Bash — HIGH
+
+**Found by actually installing**, not by reading code. `clara doctor` on the
+real box showed a FAILED entry in `~/.clara/plugin/install.log`:
+```
+ERROR: Invalid requirement: '/c/Users/Administrator/Downloads/CLARA/CLARA[mcp]':
+       Expected package name at the start of dependency specifier
+=== clara install FAILED ===
+```
+
+**Repro (definitive, pip 25.0.1 AND 26.1.2):**
+```bash
+V=$(mktemp -d)/venv; python -m venv "$V"; VPY="$V/Scripts/python.exe"
+"$VPY" -m pip install --quiet "/c/Users/Administrator/Downloads/CLARA/CLARA[mcp]"
+# -> ERROR: Invalid requirement ... Expected package name   (exit 1, NOT installed)
+```
+**Root cause (FACT):** `scripts/bootstrap.sh` ran
+`"$VPY" -m pip install "${ROOT}[mcp]"`. Under Git Bash on Windows, `$ROOT` is an
+**MSYS path** (`/c/Users/...`). The venv's Python is **Windows-native** and does
+not recognize `/c/...` as a filesystem path, so pip falls through to PEP 508
+requirement parsing and rejects the string. The equivalent PowerShell path
+(`bootstrap.ps1`, `C:\...[mcp]`) works because pip recognizes the drive-letter
+path — which is exactly why my earlier "live" test (routed through `py -3.12` /
+PowerShell) reported success and **masked this**. The failing path is the one
+the `.cmd` dispatcher takes whenever Git Bash is present.
+
+**Impact (inference):** a native-Windows user with Git Bash installed gets no
+venv, no `clara-mcp`, and silently no memory — the "first-class Windows" claim
+breaks for exactly that configuration. HIGH per the rubric (install strands a
+normal user).
+
+**Counter-argument I considered:** "the PowerShell path works, so Windows is
+fine." Rejected — the `.cmd` line-1 `:; exec sh …` runs under Git Bash whenever
+it is on PATH, and Git Bash is extremely common on Windows dev boxes; that path
+was 100% broken.
+
+**Fix applied:** install from inside `$ROOT` with a relative spec —
+`( cd "$ROOT" && "$VPY" -m pip install ".[mcp]" )` (and the uv branch likewise).
+`.[mcp]` resolves via the OS on every platform.
+**Re-verified with a real install:** fresh Git Bash bootstrap built a working
+venv in 53s (was: instant failure), second call fast-paths rc=0, shim
+populated, `clara-mcp` runs. Guarded by
+`tests/test_review_regressions.py::TestR1BootstrapInstallSpec`.
+
+**Related minor (R2, LOW):** an *old* venv's `clara-mcp` opening the now-v6
+store logs `versioned schema migration failed … (traceback)` instead of a clean
+"schema newer than supported; opening read-only". Behavior is correct and
+fail-soft (the store is never written), but the wording is alarming. Cosmetic.
+
+---
 
 ### F1 — Hooks die "unbound variable" (exit ≠ 0) when `$HOME` is unset — MEDIUM
 

@@ -69,17 +69,23 @@ if [ "${1:-}" = "--install-worker" ]; then
   echo "python: $PY  venv: $VENV"
   status=1
   rm -rf "$VENV"
+  # Install target: NEVER pass "$ROOT[mcp]" to pip. On native Windows under
+  # Git Bash, $ROOT is an MSYS path (/c/Users/...) that the venv's *Windows*
+  # Python does not recognize as a filesystem path — pip then parses it as a
+  # PEP 508 requirement and fails ("Invalid requirement: Expected package
+  # name"). Installing from inside $ROOT with the relative ".[mcp]" spec
+  # resolves via the OS on every platform.
   if command -v uv >/dev/null 2>&1; then
     if uv venv --python "$PY" "$VENV"; then
       VPY=$(find_bin "$VENV" python) \
-        && uv pip install --python "$VPY" "${ROOT}[mcp]" \
+        && ( cd "$ROOT" && uv pip install --python "$VPY" ".[mcp]" ) \
         && status=0
     fi
   else
     if "$PY" -m venv "$VENV"; then
       VPY=$(find_bin "$VENV" python) \
         && "$VPY" -m pip install --quiet --upgrade pip \
-        && "$VPY" -m pip install --quiet "${ROOT}[mcp]" \
+        && ( cd "$ROOT" && "$VPY" -m pip install --quiet ".[mcp]" ) \
         && status=0
     fi
   fi
