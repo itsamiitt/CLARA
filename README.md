@@ -13,55 +13,97 @@ with full-text search, exposed to any coding-agent CLI over MCP. An optional
 full pipeline adds LLM fact extraction, embeddings, and vector retrieval on
 top of the same store.
 
-## Claude Code plugin
+CLARA doubles as a **Claude Code plugin** — session-start memory + knowledge-map
+injection, 15 MCP tools, a knowledge graph, and a document-lifecycle curator —
+and as a **standalone CLI + MCP server** for any agent (Codex, Gemini, Cursor,
+or your own). Both use the same single SQLite store.
 
-The repo doubles as a Claude Code plugin: session-start memory + knowledge-map
-injection, six memory MCP tools, a knowledge graph, and a document-lifecycle
-curator. Install from the marketplace:
+---
+
+# Installation
+
+> **Requirements:** Python **3.10+** on `PATH`, and `git`. Optionally
+> [`uv`](https://github.com/astral-sh/uv) (bootstrap uses it when present and
+> falls back to `pip` otherwise). On native Windows the plugin hooks run under
+> either PowerShell or Git Bash — both are supported.
+>
+> **PyPI note:** `clara-memory` is not published to PyPI yet, so `pip install
+> clara-memory` will not resolve. Install from the plugin marketplace (which
+> builds its own private environment) or from source, as shown below. A tagged
+> PyPI release is planned.
+
+## Option A — Claude Code plugin (recommended)
+
+From inside Claude Code:
 
 ```
 /plugin marketplace add itsamiitt/clara
 /plugin install clara@clara-marketplace
 ```
 
-The first session prints `CLARA is installing in the background` while a
-bootstrap script builds a private virtualenv (prefers `uv`, falls back to
-pip); from the second session on, memory context is injected automatically.
-Run `scripts/bootstrap.sh` manually to warm the environment up front, and
-`clara doctor` to check plugin health (schema version, flags, ledger counts,
-venv, install log).
+**What happens on first use.** The plugin ships a bootstrap that builds a
+private virtualenv from the plugin's own checkout (no PyPI needed) into
+`${CLAUDE_PLUGIN_DATA}/` (survives updates). The install runs in the
+background, so your **first session** prints:
 
-- **Platforms**: macOS, Linux, and WSL at launch; native Windows best-effort
-  (see "Supported platforms").
-- **Store choice**: the global store (`~/.clara/clara.db`) shares memory
-  across every project and is what the doc ledger keys on (worktrees and
-  clones of one repo share a ledger); a per-project store
-  (`clara init --project` → `./.clara/clara.db`) isolates memories but
-  gives up cross-project recall. Default to global.
-- **Kill switches**: `CLARA_GRAPH_ENABLED=0` disables the knowledge graph,
-  `CLARA_DOCS_ENABLED=0` the doc curator — independently. Tools report a
-  clear disabled error, projection/scan become no-ops, the fastpath omits
-  the corresponding context sections, and hooks short-circuit; the memory
-  core keeps working with both off.
-- **Versioning**: `plugin.json` carries a `version` for marketplace
-  installs — set and bump it for releases (commits are the effective
-  version while iterating).
-
-## Quick start (coding-agent memory, zero keys)
-
-```bash
-pip install "clara-memory[cli]"
-clara init
+```
+CLARA is installing in the background — memory will be available next session.
 ```
 
-`clara init` creates the store (`~/.clara/clara.db`, or `./.clara/clara.db`
-with `--project`), builds the FTS5 search index, and prints ready-to-paste
-wiring for your agent:
+The build takes ~30–60 s (once per plugin version). **From the second session
+on**, your memory context is injected automatically at session start and the
+`memory_*` tools are live. Nothing blocks the session while it installs.
 
-- **Claude Code** — `claude mcp add clara -- clara-mcp`, plus an optional
-  SessionStart hook that injects your memory at the start of every session:
+**Warm it up front (optional)** so the first session already has memory:
+
+```bash
+# macOS / Linux / WSL / Git Bash
+CLAUDE_PLUGIN_ROOT="$(pwd)" sh scripts/bootstrap.sh   # from the plugin checkout
+```
+```powershell
+# native Windows PowerShell
+$env:CLAUDE_PLUGIN_ROOT = (Get-Location).Path
+powershell -ExecutionPolicy Bypass -File scripts\win\bootstrap.ps1
+```
+
+**Verify plugin health at any time:**
+
+```bash
+clara doctor          # exit 0 healthy / 1 degraded / 2 unusable
+```
+It prints schema version, kill-switch flags, ledger counts, the resolved venv,
+and the tail of the install log — the first place to look if memory is missing.
+
+## Option B — standalone CLI + MCP server (any agent)
+
+Install from source (until the PyPI release lands):
+
+```bash
+# from a clone
+git clone https://github.com/itsamiitt/CLARA.git && cd CLARA
+pip install -e ".[cli]"        # or ".[mcp]" for the MCP server, ".[full]" for the LLM tier
+
+# or directly from git
+pip install "clara-memory[cli] @ git+https://github.com/itsamiitt/CLARA.git"
+```
+
+This puts two commands on your `PATH`: **`clara`** (the CLI) and **`clara-mcp`**
+(the MCP stdio server). Then:
+
+```bash
+clara init            # create the store + print ready-to-paste agent wiring
+```
+
+`clara init` creates the store (`~/.clara/clara.db`, or `./.clara/clara.db` with
+`--project`), builds the FTS5 index, and prints wiring for common agents:
+
+- **Claude Code (manual, without the plugin)** — register the MCP server and add
+  a SessionStart hook that injects memory:
+  ```bash
+  claude mcp add clara -- clara-mcp
+  ```
   ```json
-  {"hooks": {"SessionStart": [{"matcher": "startup|resume|compact",
+  {"hooks": {"SessionStart": [{"matcher": "startup|resume|clear|compact",
     "hooks": [{"type": "command", "command": "clara-mcp recall --top-k 12"}]}]}}
   ```
 - **OpenAI Codex CLI** — in `~/.codex/config.toml`:
@@ -69,29 +111,78 @@ wiring for your agent:
   [mcp_servers.clara]
   command = "clara-mcp"
   ```
-- **Gemini CLI / Cursor** — add `{"mcpServers": {"clara": {"command": "clara-mcp"}}}`
-  to their MCP config.
-- **Anything else** — `clara context "<task>"` prints a context block;
-  `clara remember "<text>"` stores facts from plain text. No MCP needed.
+- **Gemini CLI / Cursor** — add to their MCP config:
+  ```json
+  {"mcpServers": {"clara": {"command": "clara-mcp"}}}
+  ```
+- **Anything that can shell out** — `clara context "<task>"` prints a context
+  block; `clara remember "<text>"` stores facts from plain text. No MCP needed.
 
-The MCP server (`clara-mcp`) exposes **15 tools**: 6 memory tools
-(`memory_save`, `memory_search`, `memory_recent`, `memory_update`,
-`memory_forget`, `memory_stats`), 5 doc-curator tools (`docs_status`,
-`docs_classify`, `docs_supersede`, `docs_fulfill`, `docs_report`), and 4
-knowledge-graph tools (`graph_entity`, `graph_neighbors`, `graph_path`,
-`memory_link`). **Your agent's own model decides what to remember and
-recall** — CLARA does durable typed storage, ranked retrieval, and
-prompt-injection-safe context formatting. That's why no key is needed: the
-intelligence is the host model you already run.
+## Verify it works
 
-### When memory is read and written
+```bash
+clara doctor                 # store health
+echo '{}' | clara statusline # e.g. "CLARA - 0 memories - global"
+clara-mcp recall --top-k 3   # prints your memory context block (empty at first)
+```
 
-- **Session start**: the SessionStart hook (or your agent calling
-  `memory_search`) injects relevant memories.
-- **During a session**: the model calls `memory_save` when it learns
-  something durable, `memory_search` when it needs prior context.
-- **Housekeeping**: confidence decay and pruning run opportunistically when
-  the store is first opened each day — no cron, no background process.
+---
+
+# Usage
+
+## The 15 MCP tools
+
+Once wired, your agent's model calls these directly — **CLARA is storage +
+ranked retrieval; the host model is the intelligence** (that is why no API key
+is needed).
+
+- **Memory (6):** `memory_save`, `memory_search`, `memory_recent`,
+  `memory_update`, `memory_forget`, `memory_stats`.
+- **Docs curator (5):** `docs_status`, `docs_classify`, `docs_supersede`,
+  `docs_fulfill`, `docs_report`.
+- **Knowledge graph (4):** `graph_entity`, `graph_neighbors`, `graph_path`,
+  `memory_link`.
+
+## Slash commands (plugin)
+
+| Command | What it does |
+|---|---|
+| `/clara:remember <fact>` | store one durable fact (chooses the memory type) |
+| `/clara:recall <topic>` | search memory and answer from the hits |
+| `/clara:memories [n]` | show store stats + the most recent memories |
+| `/clara:forget <id\|desc>` | retire a memory (never hard-deletes) |
+| `/clara:graph [entity]` | entity card + relations, or graph stats |
+| `/clara:docs [path]` | a document's standing, or the repo rot report |
+| `/clara:docs-review [scope]` | interactive doc-rot review → one reviewable commit |
+| `/clara:done [plan]` | close out a completed plan, distilling it into memory |
+| `/clara:sync [export\|import\|status]` | bridge to Claude Code native memory |
+
+## How memory flows
+
+- **Session start** — the SessionStart hook injects a ranked `=== MEMORY
+  CONTEXT ===` block (top memories) plus a `[KNOWLEDGE MAP]` of authoritative
+  docs. Re-injected after `/clear` and `/compact`.
+- **During the session** — the model calls `memory_save` when it learns
+  something durable and `memory_search` when it needs prior context. You can
+  also drive it explicitly with the slash commands above.
+- **Housekeeping** — confidence decay, pruning, a rotated backup, and the
+  native-memory export run opportunistically the first time the store is opened
+  each day. No cron, no daemon.
+
+## Storing your first memory (CLI, zero keys)
+
+```bash
+clara remember "I use pnpm"                    # -> belief: user uses pnpm
+clara remember "We deployed the API to fly.io" # -> event
+clara remember "The database runs on postgres" # -> world_model
+clara context "package manager"                # -> ranked context block
+clara list                                     # inspect what's stored
+```
+
+The rule-based extractor (`clara remember`) is **precision-first** and matches
+canonical first-person forms (`I use X`, `we deployed Y`, `Z runs on W`,
+`I switched from A to B`). For richer capture, let a model call `memory_save`
+with explicit `subject`/`relation`/`object`, or enable the optional LLM tier.
 
 ### The `clara` CLI
 
@@ -137,6 +228,72 @@ Add to `~/.claude/settings.json` for an at-a-glance memory count:
 ```json
 {"statusLine": {"type": "command", "command": "clara statusline"}}
 ```
+
+## Configuration
+
+### Global vs project store
+
+One resolver decides the store for every entry point (hook, MCP, CLI), so what
+gets injected is exactly what gets read and written. Order (first match wins):
+
+1. `CLARA_DB_PATH` — explicit override, used verbatim.
+2. **Project store** — `<git toplevel>/.clara/clara.db`, *if that file exists*
+   (create it with `clara init --project`). Isolates a repo's memory but gives
+   up cross-project recall.
+3. **Global store** — `$CLARA_HOME/clara.db` else `~/.clara/clara.db`. **Default.**
+   Shared across every project; the doc ledger always lives here (keyed by repo
+   identity, so worktrees and clones of one repo share one ledger).
+
+`clara stats` and `clara doctor` print the resolved store and its scope.
+
+### Kill switches
+
+Disable the add-ons independently; the memory core keeps working with both off.
+Accepts `0/false/no/off` (any case):
+
+```bash
+CLARA_GRAPH_ENABLED=0   # no knowledge graph: graph tools return a clear
+                        # disabled error, projection is a no-op, [GRAPH] omitted
+CLARA_DOCS_ENABLED=0    # no doc curator: docs tools disabled, scan no-ops,
+                        # [KNOWLEDGE MAP] omitted, doc hooks short-circuit
+```
+
+### Write-path guardrails
+
+```bash
+CLARA_SECRET_POLICY=reject      # reject (default) | redact | off — refuses to
+                                # store credential-shaped content (store a
+                                # reference, not the secret)
+CLARA_MAX_CONTENT_BYTES=16384   # per-memory content cap
+CLARA_BACKUP_KEEP=7             # rotated snapshots kept in backups/
+CLARA_QUERY_EXPANSION=0         # disable dev-vocabulary synonym expansion
+```
+
+## Troubleshooting
+
+- **"CLARA is installing in the background" every session / memory never
+  appears.** The venv build is failing. Run `clara doctor` and read the
+  `install log` tail it prints, or open `~/.clara/plugin/install.log`
+  directly. Common causes: no Python 3.10+ on `PATH`, or no network for the
+  first `pip` install.
+- **`clara` / `clara-mcp` not found.** The plugin's venv is private (under
+  `${CLAUDE_PLUGIN_DATA}`) and not on your shell `PATH` — that is expected;
+  the plugin invokes it directly. For a shell-usable CLI, install Option B
+  (`pip install -e ".[cli]"`).
+- **Native Windows.** Hooks dispatch through polyglot `.cmd` files (PowerShell
+  body under `scripts/win/`); the MCP server is spawned via a real-executable
+  shim (`${CLAUDE_PLUGIN_DATA}/shim/clara-mcp`, resolves to `clara-mcp.exe`).
+  If a hook seems inert, confirm either PowerShell or Git Bash is available and
+  re-run `clara doctor`.
+- **`clara doctor` exits 2 (unusable).** The store is corrupt or newer than
+  your code. Restore the newest snapshot: `clara restore
+  ~/.clara/backups/<newest>.db --force` (a pre-restore backup is taken first).
+- **Schema "newer than supported".** An older CLARA opened a store a newer one
+  wrote — it opens read-only and never corrupts it. Upgrade the plugin/package
+  to write again.
+- **`clara remember` says "Nothing durable recognized."** The rule-based
+  extractor only matches canonical first-person forms. Rephrase (`I use X`), or
+  let a model call `memory_save` with explicit fields.
 
 ## The two tiers
 
