@@ -1,4 +1,4 @@
-﻿# POSIX shell scripts must stay LF - CRLF breaks /bin/sh on every target
+# POSIX shell scripts must stay LF - CRLF breaks /bin/sh on every target
 # platform (macOS/Linux/WSL).
 *.sh text eol=lf
 
