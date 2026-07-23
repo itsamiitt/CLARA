@@ -20,7 +20,7 @@ case "${CLARA_DOCS_ENABLED:-1}" in
     ;;
 esac
 
-BASE="${CLARA_HOME:-$HOME/.clara}"
+BASE="${CLARA_HOME:-${HOME:-/tmp}/.clara}"
 
 # Repo root: walk up from the hook cwd looking for .git (no subprocess).
 dir=$PWD

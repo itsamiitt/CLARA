@@ -162,6 +162,13 @@ class LexicalRetriever:
         if memory_types is not None and len(memory_types) == 0:
             return RetrievalResult()
 
+        # Clamp top_k: a negative value would become a Python slice
+        # ``scored[:-1]`` and silently drop the lowest-ranked hit instead of
+        # returning the requested count.
+        top_k = max(0, int(top_k))
+        if top_k == 0:
+            return RetrievalResult()
+
         query_tokens = tokenize(query or "")
         token_groups = expand_groups(query_tokens)
         search_tokens = flatten(token_groups)

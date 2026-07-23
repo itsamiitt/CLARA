@@ -17,7 +17,7 @@ case "${CLARA_DOCS_ENABLED:-1}" in
   0 | false | no | off) exit 0 ;;
 esac
 
-BASE="${CLARA_HOME:-$HOME/.clara}"
+BASE="${CLARA_HOME:-${HOME:-/tmp}/.clara}"
 [ -d "$BASE/proposals" ] || exit 0
 
 FLAG_DIR="$BASE/session-flags"
