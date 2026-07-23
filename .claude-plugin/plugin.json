@@ -1,16 +1,17 @@
 {
   "name": "clara",
   "displayName": "CLARA Memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-backend persistent memory for Claude Code: SQLite + FTS5 store, MCP memory tools, and session-start context injection. No API keys, no daemons.",
   "author": {
-    "name": "Amit"
+    "name": "Amit",
+    "email": "annu@thecloso.com"
   },
   "homepage": "https://github.com/itsamiitt/CLARA",
   "license": "MIT",
   "mcpServers": {
     "memory": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/clara-mcp-launch.sh"
+      "command": "${CLAUDE_PLUGIN_DATA}/shim/clara-mcp"
     }
   },
   "hooks": "./hooks/hooks.json"

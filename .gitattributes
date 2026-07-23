@@ -1,3 +1,9 @@
-# POSIX shell scripts must stay LF — CRLF breaks /bin/sh on every target
+﻿# POSIX shell scripts must stay LF - CRLF breaks /bin/sh on every target
 # platform (macOS/Linux/WSL).
 *.sh text eol=lf
+
+# Windows script bodies are CRLF (batch parsing is CRLF-native; PowerShell
+# tolerates both but stays consistent). The polyglot .cmd dispatchers guard
+# their sh line with a trailing '#' so the CR is commented out under sh.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,20 @@ _SCRIPTS = [
     "scripts/bootstrap.sh",
     "scripts/clara-mcp-launch.sh",
     "scripts/session-start.sh",
+    "scripts/session-stop.sh",
+    "scripts/read-annotate.sh",
+]
+_CMD_DISPATCHERS = [
+    "scripts/session-start.cmd",
+    "scripts/session-stop.cmd",
+    "scripts/read-annotate.cmd",
+]
+_PS1_BODIES = [
+    "scripts/win/bootstrap.ps1",
+    "scripts/win/session-start.ps1",
+    "scripts/win/session-stop.ps1",
+    "scripts/win/read-annotate.ps1",
+    "scripts/win/clara-mcp-launch.ps1",
 ]
 
 
@@ -40,13 +56,25 @@ class TestManifests:
         data = json.loads((_ROOT / ".claude-plugin" / "plugin.json").read_text("utf-8"))
         assert data["name"] == "clara"
         assert data["displayName"] == "CLARA Memory"
-        # The milestone spec wanted commit-SHA versioning (no version field),
-        # but `claude plugin validate --strict` fails without one — see the
-        # implementation log for the recorded deviation.
+        # `claude plugin validate --strict` requires a version, and the
+        # marketplace auto-update flow keys on it (bump = release).
         assert data["version"]
+        # The MCP entry must be a real executable path, NOT a shell script:
+        # stdio servers are spawned without a shell on native Windows. The
+        # extensionless shim resolves to clara-mcp.exe there (libuv appends
+        # .exe) and is a symlink to the venv binary on POSIX.
         command = data["mcpServers"]["memory"]["command"]
-        assert command == "${CLAUDE_PLUGIN_ROOT}/scripts/clara-mcp-launch.sh"
+        assert command == "${CLAUDE_PLUGIN_DATA}/shim/clara-mcp"
         assert data["hooks"] == "./hooks/hooks.json"
+
+    def test_plugin_version_matches_package(self):
+        plugin = json.loads((_ROOT / ".claude-plugin" / "plugin.json").read_text("utf-8"))
+        pyproject = (_ROOT / "pyproject.toml").read_text("utf-8")
+        match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+        assert match, "pyproject.toml must declare a version"
+        assert plugin["version"] == match.group(1), (
+            "plugin.json and pyproject.toml versions must move together"
+        )
 
     def test_marketplace_json(self):
         data = json.loads(
@@ -60,11 +88,21 @@ class TestManifests:
     def test_hooks_json(self):
         data = json.loads((_ROOT / "hooks" / "hooks.json").read_text("utf-8"))
         (session_start,) = data["hooks"]["SessionStart"]
-        assert session_start["matcher"] == "startup|resume|compact"
+        # clear + fork included: without them the memory block vanishes after
+        # /clear and never reaches forked subagent sessions.
+        assert session_start["matcher"] == "startup|resume|clear|compact|fork"
         (hook,) = session_start["hooks"]
         assert hook["type"] == "command"
-        assert hook["command"].endswith("/scripts/session-start.sh")
+        assert hook["command"].endswith("/scripts/session-start.cmd")
         assert "${CLAUDE_PLUGIN_ROOT}" in hook["command"]
+        # Every hook dispatches through a polyglot .cmd (sh on POSIX,
+        # PowerShell body on native Windows).
+        for event in ("PostToolUse", "Stop"):
+            for entry in data["hooks"][event]:
+                for h in entry["hooks"]:
+                    assert h["command"].endswith(".cmd"), (
+                        f"{event} hook must use a .cmd dispatcher"
+                    )
 
     def test_manifest_in_excludes_plugin_dirs(self):
         text = (_ROOT / "MANIFEST.in").read_text("utf-8")
@@ -94,6 +132,65 @@ class TestScripts:
             pytest.skip("no working bash (Windows WSL stub does not count)")
         proc = subprocess.run(
             [bash, "--posix", "-n", str(_ROOT / script)],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_python_floor_agrees_everywhere(self):
+        """bootstrap.sh, bootstrap.ps1 and pyproject requires-python must
+        gate on the same Python floor (3.10)."""
+        pyproject = (_ROOT / "pyproject.toml").read_text("utf-8")
+        assert 'requires-python = ">=3.10"' in pyproject
+        sh = (_ROOT / "scripts" / "bootstrap.sh").read_text("utf-8")
+        assert "sys.version_info >= (3, 10)" in sh
+        ps1 = (_ROOT / "scripts" / "win" / "bootstrap.ps1").read_text("utf-8")
+        assert "sys.version_info >= (3, 10)" in ps1
+
+
+class TestWindowsDispatch:
+    @pytest.mark.parametrize("dispatcher", _CMD_DISPATCHERS)
+    def test_cmd_polyglot_shape(self, dispatcher):
+        """Line 1 must be the sh branch (`:; exec sh ... #`), the rest the
+        batch branch. The trailing '#' comments out a CR under sh."""
+        text = (_ROOT / dispatcher).read_text("utf-8")
+        lines = text.splitlines()
+        assert lines[0].startswith(":; exec sh ")
+        assert lines[0].rstrip().endswith("#")
+        target = dispatcher.rsplit("/", 1)[1].replace(".cmd", "")
+        assert f"{target}.sh" in lines[0]
+        assert any(line.strip().lower() == "@echo off" for line in lines)
+        assert any("powershell" in line and f"{target}.ps1" in line for line in lines)
+
+    @pytest.mark.parametrize("body", _PS1_BODIES)
+    def test_ps1_exists_and_parses(self, body):
+        path = _ROOT / body
+        assert path.is_file(), f"{body} missing"
+        if sys.platform != "win32":
+            pytest.skip("PowerShell parse check runs on Windows")
+        probe = (
+            "$errs = $null; "
+            "[System.Management.Automation.PSParser]::Tokenize("
+            "(Get-Content -Raw '" + str(path) + "'), [ref]$errs) | Out-Null; "
+            "if ($errs.Count -gt 0) { exit 1 }"
+        )
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", probe],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, f"{body} has PowerShell parse errors"
+
+    @pytest.mark.parametrize("dispatcher", _CMD_DISPATCHERS)
+    def test_cmd_sh_branch_parses(self, dispatcher):
+        """The sh branch of the polyglot (line 1) must be valid sh."""
+        bash = _working_bash()
+        if bash is None:
+            pytest.skip("no working bash")
+        line1 = (_ROOT / dispatcher).read_text("utf-8").splitlines()[0]
+        proc = subprocess.run(
+            [bash, "--posix", "-n", "-c", line1],
             capture_output=True,
             text=True,
         )

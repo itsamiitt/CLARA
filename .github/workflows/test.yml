@@ -11,12 +11,18 @@ permissions:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          # Native Windows is first-class: one full-suite leg on the version
+          # most users run. Hook smoke tests live in plugin.yml.
+          - os: windows-latest
+            python-version: "3.12"
 
     steps:
       - name: Checkout repository
@@ -30,7 +36,9 @@ jobs:
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
+          path: |
+            ~/.cache/pip
+            ~\AppData\Local\pip\Cache
           key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             ${{ runner.os }}-pip-${{ matrix.python-version }}-
@@ -51,3 +59,21 @@ jobs:
         run: |
           pip install mypy
           mypy clara/ --ignore-missing-imports
+
+  bench:
+    name: Latency benchmarks (10k-row store)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,mcp]"
+
+      - name: Run benchmarks
+        run: pytest -m bench -q --tb=short

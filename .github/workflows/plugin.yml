@@ -41,6 +41,21 @@ jobs:
             echo "::error::always-on cost ${tokens} tok exceeds the 300-token budget"; exit 1
           fi
 
+      - name: Version bumped when plugin surface changed (PRs only)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- \
+            clara/ scripts/ hooks/ skills/ commands/ .claude-plugin/ pyproject.toml || true)
+          if [ -z "$changed" ]; then
+            echo "no plugin-surface changes; version bump not required"; exit 0
+          fi
+          if git diff "origin/${{ github.base_ref }}...HEAD" -- .claude-plugin/plugin.json | grep -q '"version"'; then
+            echo "plugin surface changed and version bumped — OK"; exit 0
+          fi
+          echo "::error::plugin surface changed but .claude-plugin/plugin.json version was not bumped (marketplace auto-update keys on it)"
+          exit 1
+
   quality:
     name: Scripts and fastpath
     runs-on: ubuntu-latest
@@ -70,4 +85,65 @@ jobs:
         run: python -c "import clara.fastpath.context, clara.fastpath.db, sys; bad = [m for m in ('sqlalchemy', 'asyncio', 'aiosqlite') if m in sys.modules]; assert not bad, f'heavy modules leaked into fastpath import: {bad}'"
 
       - name: Fastpath and plugin tests (incl. reversibility)
-        run: pytest tests/test_fastpath.py tests/test_plugin_layout.py tests/test_docs.py tests/test_verdicts.py tests/test_governance.py -q
+        run: pytest tests/test_fastpath.py tests/test_plugin_layout.py tests/test_docs.py tests/test_verdicts.py tests/test_governance.py tests/test_store.py -q
+
+  windows-native:
+    name: Native Windows hooks and store
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install -e ".[dev,mcp]"
+
+      - name: PowerShell script analysis
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+          $results = Invoke-ScriptAnalyzer -Path scripts/win -Severity Error
+          if ($results) { $results | Format-Table; exit 1 }
+
+      - name: Core tests on Windows
+        run: pytest tests/test_fastpath.py tests/test_plugin_layout.py tests/test_store.py tests/test_local_memory.py tests/test_reliability.py tests/test_security.py -q
+
+      - name: Hook smoke test (session-start.ps1 injects context)
+        shell: pwsh
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP "clara-smoke"
+          $data = Join-Path $smoke "plugin"
+          $base = Join-Path $smoke "home"
+          New-Item -ItemType Directory -Force $data, $base | Out-Null
+          $hash = (python -c "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest()[:12])" pyproject.toml).Trim()
+          $venv = Join-Path $data "venv-$hash"
+          python -m venv $venv --without-pip
+          Copy-Item "$env:SystemRoot\System32\where.exe" "$venv\Scripts\clara-mcp.exe"
+          $env:CLARA_HOME = $base
+          $env:PYTHONPATH = (Get-Location).Path
+          python -c "import asyncio, os; from clara.integrations.local_memory import LocalMemory`nasync def m():`n    mem = await LocalMemory.create(os.path.join(os.environ['CLARA_HOME'], 'clara.db'))`n    await mem.save(mem_type='belief', subject='ci', relation='runs_on', object='windows-latest')`n    await mem.close()`nasyncio.run(m())"
+          $env:CLAUDE_PLUGIN_DATA = $data
+          $env:CLAUDE_PLUGIN_ROOT = (Get-Location).Path
+          $env:CLAUDE_SESSION_ID = "ci-smoke"
+          $out = powershell -NoProfile -ExecutionPolicy Bypass -File scripts\win\session-start.ps1
+          if ($LASTEXITCODE -ne 0) { Write-Error "hook exited $LASTEXITCODE"; exit 1 }
+          if (-not (($out -join "`n") -match "MEMORY CONTEXT")) { Write-Error "no memory context injected: $out"; exit 1 }
+          if (-not (Test-Path (Join-Path $data "shim\clara-mcp.exe"))) { Write-Error "shim not populated"; exit 1 }
+          Write-Host "session-start.ps1 OK"
+
+      - name: Hook smoke test (.cmd dispatcher routes to PowerShell)
+        shell: pwsh
+        run: |
+          $env:CLARA_HOME = Join-Path $env:RUNNER_TEMP "clara-smoke\home"
+          $env:CLAUDE_PLUGIN_DATA = Join-Path $env:RUNNER_TEMP "clara-smoke\plugin"
+          $env:CLAUDE_PLUGIN_ROOT = (Get-Location).Path
+          $env:PYTHONPATH = (Get-Location).Path
+          cmd /c scripts\session-start.cmd | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 0) { Write-Error "dispatcher exited $LASTEXITCODE"; exit 1 }
+          if (-not (($out -join "`n") -match "MEMORY CONTEXT")) { Write-Error "dispatcher did not reach the PS body"; exit 1 }
+          Write-Host "session-start.cmd OK"

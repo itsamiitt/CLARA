@@ -2,11 +2,11 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|compact",
+        "matcher": "startup|resume|clear|compact|fork",
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/session-start.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/session-start.cmd"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/read-annotate.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/read-annotate.cmd"
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/session-stop.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/session-stop.cmd"
           }
         ]
       }
