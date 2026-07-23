@@ -18,9 +18,11 @@ find_bin() {
   return 1
 }
 
+# ${HOME:-/tmp} guards against `set -u` aborting when HOME is unset (rare, but
+# then the hook must still exit 0 per its contract, not die "unbound variable").
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-$HOME/.clara}/plugin}"
-BASE="${CLARA_HOME:-$HOME/.clara}"
+DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-${HOME:-/tmp}/.clara}/plugin}"
+BASE="${CLARA_HOME:-${HOME:-/tmp}/.clara}"
 
 # Session-cwd hint: lets the long-lived MCP server resolve the store for THIS
 # session's directory even when its own process cwd is stale. Best-effort.

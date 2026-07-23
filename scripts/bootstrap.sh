@@ -35,7 +35,7 @@ find_bin() {
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname -- "$SCRIPT_DIR")}"
-DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-$HOME/.clara}/plugin}"
+DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-${HOME:-/tmp}/.clara}/plugin}"
 
 # Keep $DATA/shim/clara-mcp pointing at the active venv's real binary. The
 # plugin's mcpServers command spawns this path directly (no shell, no
