@@ -33,7 +33,9 @@ from typing import Sequence
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select
+from sqlalchemy import String, bindparam, cast, select
+from sqlalchemy import text as sa_text
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from clara.db.models import Memory, MemoryStatus, MemoryType
@@ -198,60 +200,124 @@ class DecayScheduler:
     # Daily decay
     # ------------------------------------------------------------------
 
+    # Rows mutated per transaction. Bounds write-lock hold time so a decay
+    # pass over a 100k-row store never starves concurrent sessions; a crash
+    # mid-run is safe because ``metadata.last_decay_at`` anchors per-row.
+    BATCH_SIZE = 500
+
     async def run_daily_decay(self) -> dict[str, int]:
         """Apply exponential confidence decay to all active records.
+
+        Batched keyset pagination, one transaction per batch. Pure-decay
+        writes self-assign ``updated_at`` so the ORM ``onupdate`` does NOT
+        fire — decay is bookkeeping, not a content change, and letting it
+        bump ``updated_at`` flattened recency ranking store-wide every night.
+        Archival transitions are real state changes and do bump it.
 
         Returns a summary dict: ``{"decayed": N, "archived": M}``.
         """
         now = datetime.now(timezone.utc)
         decayed_count = 0
         archived_count = 0
+        last_id = ""
+        table = Memory.__table__
 
-        async with self._session_factory() as session:
-            async with session.begin():
-                # Fetch all active memories that actually decay
+        while True:
+            async with self._session_factory() as session, session.begin():
+                # Core column select — no ORM instances, no identity map, no
+                # unit-of-work flush: a decay pass reads plain values and
+                # writes two executemany statements per batch.
                 stmt = (
-                    select(Memory)
-                    .where(Memory.status == MemoryStatus.active)
-                    .where(Memory.decay_rate > 0.0)
+                    select(
+                        table.c.memory_id,
+                        table.c.memory_type,
+                        table.c.confidence,
+                        table.c.decay_rate,
+                        table.c.updated_at,
+                        table.c.metadata,
+                    )
+                    .where(table.c.status == "active")
+                    .where(table.c.decay_rate > 0.0)
+                    .where(cast(table.c.memory_id, String) > last_id)
+                    .order_by(cast(table.c.memory_id, String))
+                    .limit(self.BATCH_SIZE)
                 )
-                result = await session.execute(stmt)
-                records: Sequence[Memory] = result.scalars().all()
+                rows = (await session.execute(stmt)).all()
+                if not rows:
+                    break
+                last_id = max(str(row.memory_id) for row in rows)
 
-                for record in records:
-                    decay_anchor = _decay_anchor(record)
-                    days_elapsed = (now - decay_anchor).total_seconds() / 86_400.0
+                pending: list[dict[str, object]] = []
+                archive_pending: list[dict[str, object]] = []
+                for row in rows:
+                    meta = dict(row.metadata) if isinstance(row.metadata, dict) else {}
+                    anchor_raw = meta.get("last_decay_at")
+                    anchor = None
+                    if isinstance(anchor_raw, str):
+                        try:
+                            anchor = _ensure_aware(datetime.fromisoformat(anchor_raw))
+                        except ValueError:
+                            anchor = None
+                    if anchor is None:
+                        anchor = _ensure_aware(row.updated_at)
+                    days_elapsed = (now - anchor).total_seconds() / 86_400.0
                     if days_elapsed <= 0:
                         continue
 
-                    old_confidence = record.confidence
                     new_confidence = compute_decayed_confidence(
-                        old_confidence,
-                        record.decay_rate,
-                        days_elapsed,
+                        float(row.confidence), float(row.decay_rate), days_elapsed
                     )
-                    meta = dict(record.metadata_) if record.metadata_ else {}
                     meta["last_decay_at"] = now.isoformat()
-                    record.metadata_ = meta
-
-                    if (
-                        new_confidence < self._archival_threshold
-                        and record.memory_type != MemoryType.skill
-                    ):
-                        record.status = MemoryStatus.archived
-                        record.confidence = new_confidence
-                        record.updated_at = now
+                    entry = {
+                        "b_mid": row.memory_id,
+                        "b_conf": new_confidence,
+                        "b_meta": meta,
+                    }
+                    is_skill = str(row.memory_type) in ("skill", "MemoryType.skill")
+                    if new_confidence < self._archival_threshold and not is_skill:
+                        archive_pending.append(entry)
                         archived_count += 1
-                        logger.info(
-                            "Archived memory %s (type=%s, confidence=%.4f -> %.4f)",
-                            record.memory_id,
-                            record.memory_type.value,
-                            old_confidence,
-                            new_confidence,
-                        )
                     else:
-                        record.confidence = new_confidence
+                        pending.append(entry)
                         decayed_count += 1
+
+                # Pure decay: self-assigned updated_at — bookkeeping must not
+                # look like a content change or recency ranking flattens.
+                if pending:
+                    await session.execute(
+                        sa_update(table)
+                        .where(table.c.memory_id == bindparam("b_mid"))
+                        .values(
+                            {
+                                "confidence": bindparam("b_conf"),
+                                "metadata": bindparam("b_meta"),
+                                "updated_at": table.c.updated_at,
+                            }
+                        ),
+                        pending,
+                    )
+                # Archival: a real state change — updated_at bumps.
+                if archive_pending:
+                    await session.execute(
+                        sa_update(table)
+                        .where(table.c.memory_id == bindparam("b_mid"))
+                        .values(
+                            {
+                                "confidence": bindparam("b_conf"),
+                                "metadata": bindparam("b_meta"),
+                                "status": "archived",
+                                "updated_at": now,
+                            }
+                        ),
+                        archive_pending,
+                    )
+                    logger.info(
+                        "Archived %d memories below threshold %.2f",
+                        len(archive_pending),
+                        self._archival_threshold,
+                    )
+                if len(rows) < self.BATCH_SIZE:
+                    break
 
         summary = {"decayed": decayed_count, "archived": archived_count}
         logger.info("Daily decay complete: %s", summary)
@@ -274,47 +340,65 @@ class DecayScheduler:
         events_archived = 0
         skills_deprecated = 0
 
-        async with self._session_factory() as session:
-            async with session.begin():
-                # --- 1. Stale events ----------------------------------
-                event_cutoff = now - timedelta(days=self._event_stale_days)
-                stmt = (
-                    select(Memory)
-                    .where(Memory.memory_type == MemoryType.event)
-                    .where(Memory.status == MemoryStatus.active)
-                    .where(Memory.created_at < event_cutoff)
-                )
-                result = await session.execute(stmt)
-                stale_events: Sequence[Memory] = result.scalars().all()
-
-                for event in stale_events:
-                    linked = (event.metadata_ or {}).get("related_beliefs", [])
-                    if not linked:
-                        event.status = MemoryStatus.archived
-                        event.updated_at = now
-                        events_archived += 1
-                        logger.info(
-                            "Pruned stale event %s (created_at=%s, no linked beliefs)",
-                            event.memory_id,
-                            event.created_at.isoformat(),
+        # --- 1. Stale events (pushed down + batched) ------------------
+        # ``related_beliefs`` absent or an empty list means unlinked; the
+        # json_extract pushdown keeps linked events from ever being loaded.
+        event_cutoff = now - timedelta(days=self._event_stale_days)
+        unlinked = sa_text(
+            "(json_extract(metadata, '$.related_beliefs') IS NULL "
+            "OR json_extract(metadata, '$.related_beliefs') = '[]')"
+        )
+        while True:
+            async with self._session_factory() as session, session.begin():
+                ids = [
+                    row[0]
+                    for row in (
+                        await session.execute(
+                            select(Memory.memory_id)
+                            .where(Memory.memory_type == MemoryType.event)
+                            .where(Memory.status == MemoryStatus.active)
+                            .where(Memory.created_at < event_cutoff)
+                            .where(unlinked)
+                            .limit(self.BATCH_SIZE)
                         )
+                    ).all()
+                ]
+                if not ids:
+                    break
+                await session.execute(
+                    sa_update(Memory)
+                    .where(Memory.memory_id.in_(ids))
+                    .values(status=MemoryStatus.archived, updated_at=now)
+                    .execution_options(synchronize_session=False)
+                )
+                events_archived += len(ids)
+                logger.info("Pruned %d stale unlinked events", len(ids))
+                if len(ids) < self.BATCH_SIZE:
+                    break
 
-                # --- 2. Unused skills ---------------------------------
-                # NOTE: the cutoff must NOT use ``updated_at`` — the daily
-                # decay job dirties every skill row each night, which fires
-                # the ORM ``onupdate`` hook and resets ``updated_at``, so an
-                # ``updated_at``-based predicate can never match and skills
-                # become immortal. Real usage lives in ``metadata.last_used``
-                # (stamped by SkillStore.record_outcome), falling back to
-                # ``created_at`` for skills that were never exercised.
-                skill_cutoff = now - timedelta(days=self._skill_unused_days)
+        # --- 2. Unused skills (batched) -------------------------------
+        # NOTE: the cutoff must NOT use ``updated_at`` — real usage lives in
+        # ``metadata.last_used`` (stamped by SkillStore.record_outcome and by
+        # search-hit access recording), falling back to ``created_at`` for
+        # skills that were never exercised.
+        skill_cutoff = now - timedelta(days=self._skill_unused_days)
+        last_id = ""
+        while True:
+            async with self._session_factory() as session, session.begin():
                 stmt = (
                     select(Memory)
                     .where(Memory.memory_type == MemoryType.skill)
                     .where(Memory.status == MemoryStatus.active)
+                    .where(cast(Memory.memory_id, String) > last_id)
+                    .order_by(cast(Memory.memory_id, String))
+                    .limit(self.BATCH_SIZE)
                 )
-                result = await session.execute(stmt)
-                active_skills: Sequence[Memory] = result.scalars().all()
+                active_skills: Sequence[Memory] = (
+                    (await session.execute(stmt)).scalars().all()
+                )
+                if not active_skills:
+                    break
+                last_id = max(str(s.memory_id.hex) for s in active_skills)
 
                 for skill in active_skills:
                     last_used = _skill_last_used(skill)
@@ -328,6 +412,8 @@ class DecayScheduler:
                         skill.memory_id,
                         last_used.isoformat(),
                     )
+                if len(active_skills) < self.BATCH_SIZE:
+                    break
 
         summary = {
             "events_archived": events_archived,

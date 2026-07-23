@@ -127,7 +127,7 @@ class TestProjectGitignore:
         monkeypatch.chdir(tmp_path)
         assert _run(["init", "--project", "--agent", "generic"]) == 0
         content = (tmp_path / ".clara" / ".gitignore").read_text(encoding="utf-8")
-        assert content == "clara.db*\n.maintenance\nquarantine/\n"
+        assert content == "clara.db*\n.maintenance*\nbackups/\nquarantine/\n"
         assert "warning:" not in capsys.readouterr().err
 
     def test_init_migrates_star_gitignore(self, tmp_path, monkeypatch, capsys):
@@ -137,7 +137,7 @@ class TestProjectGitignore:
         (clara_dir / ".gitignore").write_text("*\n", encoding="utf-8")
         assert _run(["init", "--project", "--agent", "generic"]) == 0
         content = (clara_dir / ".gitignore").read_text(encoding="utf-8")
-        assert content == "clara.db*\n.maintenance\nquarantine/\n"
+        assert content == "clara.db*\n.maintenance*\nbackups/\nquarantine/\n"
         assert capsys.readouterr().err.count("warning:") == 1
 
     def test_init_leaves_custom_gitignore_alone(self, tmp_path, monkeypatch, capsys):

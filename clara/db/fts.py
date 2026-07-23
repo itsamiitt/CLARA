@@ -18,16 +18,22 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from clara.db.migrations import FTS_TEXT_EXPR, _fts_trigger_ddl
+
 logger = logging.getLogger(__name__)
 
 FTS_TABLE = "memories_fts"
 
-# The indexed text is the serialized content JSON. JSON keys appear in every
-# row, so their inverse document frequency is ~0 and they contribute nothing
-# to BM25 — while all searchable values (subject/relation/object/name/
-# properties/…) are covered without fragile per-key extraction in triggers.
-_TEXT_EXPR = "lower(CAST({row}.content AS TEXT))"
+# The indexed text is the serialized content JSON plus tags/origin metadata,
+# shared with migration 5 (clara/db/migrations.py) so triggers written by
+# either path index identical text. JSON keys appear in every row, so their
+# inverse document frequency is ~0 and they contribute nothing to BM25 —
+# while all searchable values are covered without per-key extraction.
+_TEXT_EXPR = FTS_TEXT_EXPR
 
+# Triggers come from the shared column-scoped builder in clara.db.migrations
+# — a bare AFTER UPDATE trigger would reindex every row on bookkeeping
+# writes (decay, access counts), which is a full-store FTS rebuild nightly.
 _DDL = [
     f"""
     CREATE VIRTUAL TABLE IF NOT EXISTS {FTS_TABLE} USING fts5(
@@ -39,36 +45,7 @@ _DDL = [
         tokenize='porter unicode61'
     )
     """,
-    f"""
-    CREATE TRIGGER IF NOT EXISTS {FTS_TABLE}_ai AFTER INSERT ON memories BEGIN
-        INSERT INTO {FTS_TABLE}(memory_id, user_id, memory_type, status, text)
-        VALUES (
-            new.memory_id,
-            coalesce(new.user_id, ''),
-            new.memory_type,
-            new.status,
-            {_TEXT_EXPR.format(row='new')}
-        );
-    END
-    """,
-    f"""
-    CREATE TRIGGER IF NOT EXISTS {FTS_TABLE}_ad AFTER DELETE ON memories BEGIN
-        DELETE FROM {FTS_TABLE} WHERE memory_id = old.memory_id;
-    END
-    """,
-    f"""
-    CREATE TRIGGER IF NOT EXISTS {FTS_TABLE}_au AFTER UPDATE ON memories BEGIN
-        DELETE FROM {FTS_TABLE} WHERE memory_id = old.memory_id;
-        INSERT INTO {FTS_TABLE}(memory_id, user_id, memory_type, status, text)
-        VALUES (
-            new.memory_id,
-            coalesce(new.user_id, ''),
-            new.memory_type,
-            new.status,
-            {_TEXT_EXPR.format(row='new')}
-        );
-    END
-    """,
+    *_fts_trigger_ddl(FTS_TABLE),
 ]
 
 _BACKFILL = f"""
@@ -76,7 +53,8 @@ _BACKFILL = f"""
     SELECT memory_id, coalesce(user_id, ''), memory_type, status,
            {_TEXT_EXPR.format(row='memories')}
     FROM memories
-    WHERE memory_id NOT IN (SELECT memory_id FROM {FTS_TABLE})
+    WHERE status = 'active'
+      AND memory_id NOT IN (SELECT memory_id FROM {FTS_TABLE})
 """
 
 

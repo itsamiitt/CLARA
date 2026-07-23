@@ -30,7 +30,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from clara.flags import DOCS_DISABLED_HINT, docs_enabled
 from clara.integrations.local_memory import LocalMemory
+from clara.store import global_db_path, resolve_store, secure_store_file
 
 logger = logging.getLogger(__name__)
 
@@ -41,76 +43,226 @@ SERVER_NAME = "clara-memory"
 # when the store is opened and the last pass is older than this.
 MAINTENANCE_INTERVAL_SECONDS = 24 * 3600
 
+# A held maintenance lock older than this is a crash residue, not a runner.
+_MAINTENANCE_LOCK_STALE_S = 6 * 3600
+
 # ---------------------------------------------------------------------------
-# Store location + lazy singleton
+# Store resolution + per-store cache
 # ---------------------------------------------------------------------------
 
 
 def default_db_path() -> str:
-    """Resolve the global SQLite store path, creating the parent dir."""
-    explicit = os.environ.get("CLARA_DB_PATH")
-    if explicit:
-        path = Path(explicit)
-    else:
-        base = Path(os.environ.get("CLARA_HOME") or (Path.home() / ".clara"))
-        path = base / "clara.db"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return str(path)
+    """Resolve the store path for the current anchor, creating the parent dir.
+
+    Kept (name and all) for the CLI and tests; delegates to the shared
+    resolver so every entry point agrees on the store.
+    """
+    return str(resolve_store(create=True).db_path)
 
 
-_memory: LocalMemory | None = None
+# One LocalMemory per resolved store file. A session normally touches one
+# store; the cap covers a user hopping between a few repos with project
+# stores without accumulating engines forever.
+_MAX_CACHED_STORES = 4
+
+_memories: dict[str, LocalMemory] = {}
 _memory_lock = asyncio.Lock()
+
+_server_ref: Any = None  # the FastMCP instance, set by build_server()
+
+_ANCHOR_TTL_S = 30.0
+_anchor_cache: tuple[float, str] | None = None
+
+
+async def _session_anchor() -> str:
+    """Directory anchoring store resolution for this call.
+
+    Order: MCP workspace roots (reflect the client even when the server
+    process cwd is stale) -> the session-cwd file a hook wrote (covers
+    mid-session ``cd`` when the client never refreshes roots) -> process cwd.
+    Cached briefly: a roots round-trip per tool call would be waste.
+    """
+    global _anchor_cache
+    now = time.monotonic()
+    if _anchor_cache is not None and now - _anchor_cache[0] < _ANCHOR_TTL_S:
+        return _anchor_cache[1]
+    anchor: str | None = None
+    if _server_ref is not None:
+        try:
+            ctx = _server_ref.get_context()
+            roots_result = await ctx.session.list_roots()
+            path_str = str(roots_result.roots[0].uri)
+            if path_str.startswith("file://"):
+                from urllib.request import url2pathname
+
+                candidate = url2pathname(path_str[7:])
+                if os.path.isdir(candidate):
+                    anchor = candidate
+        except Exception:  # noqa: BLE001 — roots are optional
+            anchor = None
+    if anchor is None:
+        session_id = os.environ.get("CLAUDE_SESSION_ID")
+        if session_id:
+            base = Path(os.environ.get("CLARA_HOME") or (Path.home() / ".clara"))
+            hint = base / "session-cwd" / session_id
+            try:
+                if hint.is_file() and time.time() - hint.stat().st_mtime < 12 * 3600:
+                    candidate = hint.read_text(encoding="utf-8").strip()
+                    if candidate and os.path.isdir(candidate):
+                        anchor = candidate
+            except OSError:
+                anchor = None
+    if anchor is None:
+        anchor = os.getcwd()
+    _anchor_cache = (now, anchor)
+    return anchor
+
+
+async def _get_memory_at(key: str) -> LocalMemory:
+    memory = _memories.get(key)
+    if memory is None:
+        async with _memory_lock:
+            memory = _memories.get(key)
+            if memory is None:
+                memory = await LocalMemory.create(key)
+                _memories[key] = memory
+                while len(_memories) > _MAX_CACHED_STORES:
+                    evicted_key, evicted = next(iter(_memories.items()))
+                    del _memories[evicted_key]
+                    try:
+                        await evicted.close()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("evicted store close failed", exc_info=True)
+                # Maintenance rides the first open of a store, off the
+                # tool-call path so the first save/search does not pay for
+                # a decay pass.
+                asyncio.get_running_loop().create_task(
+                    _run_maintenance_if_due(memory, key)
+                )
+    return memory
 
 
 async def _get_memory() -> LocalMemory:
-    global _memory
-    if _memory is None:
-        async with _memory_lock:
-            if _memory is None:
-                _memory = await LocalMemory.create(default_db_path())
-                await _run_maintenance_if_due(_memory, default_db_path())
-    return _memory
+    """The memory store for this call's anchor (project store when opted in)."""
+    anchor = await _session_anchor()
+    return await _get_memory_at(str(resolve_store(anchor, create=True).db_path))
+
+
+def _docs_db_path() -> str:
+    """The doc ledger's store: always global (worktrees/clones share one
+    ledger, keyed by repo_id), honoring the CLARA_DB_PATH explicit override."""
+    path = global_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    secure_store_file(path)
+    return str(path)
+
+
+async def _get_docs_memory() -> LocalMemory:
+    return await _get_memory_at(_docs_db_path())
 
 
 async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
-    """Run decay + pruning inline when the last pass is stale.
+    """Run backup + decay + pruning when the last pass is stale.
 
     Replaces the APScheduler cron jobs for the zero-backend profile: no
     daemon, no timer — maintenance rides the first store access of the day.
-    All failures are logged and swallowed; memory availability must never
-    depend on housekeeping.
+    An O_EXCL lock file makes the pass single-winner across concurrent
+    sessions; the ``.maintenance`` marker records cadence only. All failures
+    are logged and swallowed; memory availability must never depend on
+    housekeeping.
     """
     marker = Path(db_path + ".maintenance")
+    lock_path = Path(db_path + ".maintenance.lock")
     try:
         if marker.exists():
             age = time.time() - marker.stat().st_mtime
             if age < MAINTENANCE_INTERVAL_SECONDS:
                 return
-        from clara.scheduler.decay import DecayScheduler
-
-        scheduler = DecayScheduler(memory._session_factory)
-        decay_summary = await scheduler.run_daily_decay()
-        prune_summary = await scheduler.run_weekly_pruning()
-        graph_summary = "graph: skipped"
         try:
-            from clara.config import ClaraConfig
-            from clara.graph.maintain import maintenance_summary, run_graph_maintenance
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime < _MAINTENANCE_LOCK_STALE_S:
+                    return  # another session is running the pass
+                lock_path.unlink()
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except (OSError, FileExistsError):
+                return
+        try:
+            os.write(fd, f"{os.getpid()},{time.time():.0f}".encode())
+            os.close(fd)
 
-            config = ClaraConfig.from_env()
-            async with memory._session_factory() as session, session.begin():
-                graph_counts = await run_graph_maintenance(
-                    session,
-                    archival_threshold=config.archival_threshold,
-                    stale_days=config.event_stale_days,
-                )
-            graph_summary = maintenance_summary(graph_counts)
-        except Exception:  # noqa: BLE001 — graph housekeeping is best-effort
-            logger.exception("Graph maintenance failed")
-        marker.touch()
-        logger.info(
-            "Opportunistic maintenance: %s %s %s",
-            decay_summary, prune_summary, graph_summary,
-        )
+            # Backup first: VACUUM INTO must not run inside a write
+            # transaction, and a pre-decay snapshot is the more useful one.
+            from clara.db.backup import backup_db
+
+            backup_db(db_path, reason="daily")
+
+            from clara.scheduler.decay import DecayScheduler
+
+            scheduler = DecayScheduler(memory._session_factory)
+            decay_summary = await scheduler.run_daily_decay()
+            prune_summary = await scheduler.run_weekly_pruning()
+
+            # Sweep retired rows out of the FTS indexes (there is no per-row
+            # retire trigger — see clara/db/migrations.py fts_gc_statements).
+            try:
+                import sqlite3 as _sqlite3
+
+                from clara.db.migrations import fts_gc_statements
+
+                def _fts_gc() -> None:
+                    gc_conn = _sqlite3.connect(db_path)
+                    try:
+                        gc_conn.execute("PRAGMA busy_timeout = 30000")
+                        for statement in fts_gc_statements():
+                            try:
+                                gc_conn.execute(statement)
+                            except _sqlite3.OperationalError:
+                                pass  # FTS table absent in this build
+                        gc_conn.commit()
+                    finally:
+                        gc_conn.close()
+
+                await asyncio.to_thread(_fts_gc)
+            except Exception:  # noqa: BLE001 — index GC is best-effort
+                logger.exception("FTS garbage collection failed")
+            graph_summary = "graph: skipped"
+            try:
+                from clara.config import ClaraConfig
+                from clara.graph.maintain import maintenance_summary, run_graph_maintenance
+
+                config = ClaraConfig.from_env()
+                async with memory._session_factory() as session, session.begin():
+                    graph_counts = await run_graph_maintenance(
+                        session,
+                        archival_threshold=config.archival_threshold,
+                        stale_days=config.event_stale_days,
+                    )
+                graph_summary = maintenance_summary(graph_counts)
+            except Exception:  # noqa: BLE001 — graph housekeeping is best-effort
+                logger.exception("Graph maintenance failed")
+            sync_summary = "sync: skipped"
+            try:
+                from clara.bridge.exporter import export_native
+
+                anchor = await _session_anchor()
+                exported = await asyncio.to_thread(export_native, db_path, anchor)
+                sync_summary = f"sync: {exported}"
+            except ImportError:
+                pass
+            except Exception:  # noqa: BLE001 — bridge export is best-effort
+                logger.exception("Native-memory export failed")
+            marker.touch()
+            logger.info(
+                "Opportunistic maintenance: %s %s %s %s",
+                decay_summary, prune_summary, graph_summary, sync_summary,
+            )
+        finally:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
     except Exception:  # noqa: BLE001 — housekeeping must never block memory
         logger.exception("Opportunistic maintenance failed")
 
@@ -131,6 +283,8 @@ def build_server():
         ) from exc
 
     server = FastMCP(SERVER_NAME)
+    global _server_ref
+    _server_ref = server
 
     @server.tool()
     async def memory_save(
@@ -253,23 +407,13 @@ def build_server():
         return await memory.stats()
 
     async def _repo_root(repo: str | None) -> str:
-        """Resolve the repo root: explicit arg → MCP workspace roots → cwd."""
+        """Resolve the repo root: explicit arg → session anchor (MCP roots →
+        session-cwd hint → server cwd)."""
         from clara.docs.scan import find_repo_root
 
         if repo is not None:
             return repo
-        root: str | None = None
-        try:
-            ctx = server.get_context()
-            roots_result = await ctx.session.list_roots()
-            path_str = str(roots_result.roots[0].uri)
-            if path_str.startswith("file://"):
-                from urllib.request import url2pathname
-
-                root = url2pathname(path_str[7:])
-        except Exception:  # noqa: BLE001 — roots are optional; fall back to cwd
-            root = None
-        return root if root is not None else find_repo_root(os.getcwd())
+        return find_repo_root(await _session_anchor())
 
     @server.tool()
     async def docs_status(path_or_query: str, repo: str | None = None) -> dict[str, Any]:
@@ -288,11 +432,14 @@ def build_server():
         from clara.docs.report import get_status
         from clara.repoid import repo_id as compute_repo_id
 
+        if not docs_enabled():
+            return {"found": False, "disabled": True, "error": DOCS_DISABLED_HINT}
+
         root = await _repo_root(repo)
 
         def _lookup() -> dict[str, Any]:
             rid = compute_repo_id(root)
-            conn = _sqlite3.connect(default_db_path())
+            conn = _sqlite3.connect(_docs_db_path())
             conn.row_factory = _sqlite3.Row
             try:
                 status = get_status(conn, rid, path_or_query)
@@ -323,7 +470,7 @@ def build_server():
         T1 authoritative / T2 working / T3 scratch / TX quarantined. Always
         give a one-sentence rationale. Idempotent for unchanged content.
         """
-        memory = await _get_memory()
+        memory = await _get_docs_memory()
         return await memory.docs_classify(
             await _repo_root(repo), path=path, doc_type=doc_type, tier=tier,
             rationale=rationale,
@@ -342,7 +489,7 @@ def build_server():
         get annotated; the new document becomes the current guidance. Also
         records a `supersedes` edge in the knowledge graph when present.
         """
-        memory = await _get_memory()
+        memory = await _get_docs_memory()
         return await memory.docs_supersede(
             await _repo_root(repo), old_path=old_path, new_path=new_path,
             rationale=rationale,
@@ -366,7 +513,7 @@ def build_server():
         lifecycle transition, and provenance graph edges commit together.
         Returns {doc_id, memory_ids, edge_ids}.
         """
-        memory = await _get_memory()
+        memory = await _get_docs_memory()
         return await memory.docs_fulfill(
             await _repo_root(repo), path=path, distilled=distilled,
             evidence=evidence, rationale=rationale,
@@ -383,7 +530,7 @@ def build_server():
         user and act only on their instruction. scope: reserved (only 'repo'
         today).
         """
-        memory = await _get_memory()
+        memory = await _get_docs_memory()
         return await memory.docs_report(await _repo_root(repo))
 
     @server.tool()

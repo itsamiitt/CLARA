@@ -364,9 +364,11 @@ class TestDoctorPluginHealth:
         capsys.readouterr()
         code = _run_cli(["doctor"])
         out = capsys.readouterr().out
+        from clara.db.migrations import SCHEMA_VERSION
+
         assert code in (0, 1)
         assert "plugin:" in out
-        assert "schema: v3" in out
+        assert f"schema: v{SCHEMA_VERSION}" in out
         assert "flags: graph=OFF docs=on" in out
         assert "quarantine manifests:" in out
         assert "venv:" in out
