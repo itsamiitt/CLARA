@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clara-memory"
-version = "0.1.0"
+version = "0.2.0"
 description = "Cognitive Living Architecture for Reliable Agents — a structured, living-memory system for autonomous AI agents."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [
-    { name = "Amit", email = "itsamiitt@github.local" },
+    { name = "Amit", email = "annu@thecloso.com" },
 ]
 keywords = [
     "ai",
@@ -109,9 +109,10 @@ include = ["clara*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-v --tb=short -m 'not stress'"
+addopts = "-v --tb=short -m 'not stress and not bench'"
 markers = [
     "stress: heavy load tests, excluded from default run",
+    "bench: latency benchmarks over synthetic stores, excluded from default run",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",
