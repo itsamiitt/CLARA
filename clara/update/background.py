@@ -43,12 +43,14 @@ class BackgroundWriter:
         *,
         cache: MemoryCache | None = None,
         lance_engine: LanceRetrievalEngine | None = None,
+        similarity_threshold: float | None = None,
         max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
     ) -> None:
         self._session_factory = session_factory
         self._embedding_engine = embedding_engine
         self._cache = cache
         self._lance_engine = lance_engine
+        self._similarity_threshold = similarity_threshold
         self._queue: asyncio.Queue[tuple[ExtractedFact, str | None] | None] = asyncio.Queue(
             maxsize=max_queue_size
         )
@@ -143,10 +145,15 @@ class BackgroundWriter:
                     cache=self._cache,
                     lance_engine=self._lance_engine,
                 )
+                updater_kwargs: dict[str, Any] = {"cache": self._cache}
+                if self._similarity_threshold is not None:
+                    # Match the wait=True path: the configured threshold must
+                    # apply regardless of whether the write is synchronous.
+                    updater_kwargs["similarity_threshold"] = self._similarity_threshold
                 updater = MemoryUpdateEngine(
                     session,
                     self._embedding_engine,
                     retriever,
-                    cache=self._cache,
+                    **updater_kwargs,
                 )
                 await updater.process(fact, user_id=user_id)

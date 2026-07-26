@@ -27,7 +27,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _BUSY_TIMEOUT_MS = 30_000  # matches SQLITE_BUSY_TIMEOUT_MS in clara/agent.py
 
@@ -331,6 +331,26 @@ def _migration_6(conn: sqlite3.Connection) -> None:
     _migration_5(conn)
 
 
+def _migration_7(conn: sqlite3.Connection) -> None:
+    """Composite index on the hot sort key.
+
+    The SessionStart fastpath and the ILIKE fallback both do
+    ``WHERE status='active' ORDER BY updated_at DESC``; without this index
+    that is a full scan + filesort of every active row on each session start.
+    Kept in sync with the matching Index in clara/db/models.py (parity test).
+    """
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_memories_status_updated "
+        "ON memories (status, updated_at DESC)"
+    )
+    # graph_aliases is queried by node_id on every add_alias (resolve.py) but
+    # its PK is (alias_norm, user_id), so that lookup was a full scan.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_graph_aliases_node "
+        "ON graph_aliases (node_id)"
+    )
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_1),
     (2, _migration_2),
@@ -338,6 +358,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (4, _migration_4),
     (5, _migration_5),
     (6, _migration_6),
+    (7, _migration_7),
 ]
 
 

@@ -30,11 +30,21 @@ def create_app(
     config = config or ClaraConfig.from_env()
 
     global _AUTH_WARNED
+    if config.auth_required and not config.api_tokens:
+        # Fail closed. Without tokens the only "identity" would be a
+        # client-supplied header, which is indistinguishable from no auth —
+        # starting anyway would present security that does not exist.
+        raise RuntimeError(
+            "CLARA_AUTH_REQUIRED is set but no API tokens are configured. Set "
+            "CLARA_API_TOKENS='user:token' (token at least 16 characters), or "
+            "unset CLARA_AUTH_REQUIRED to run in local single-user mode."
+        )
     if not config.auth_required and not _AUTH_WARNED:
         _AUTH_WARNED = True
         logger.warning(
-            "CLARA API is starting with auth_required=False: requests may act on "
-            "any user_id without an X-User-ID header. Set CLARA_AUTH_REQUIRED=true "
+            "CLARA API is starting with auth_required=False: any client that can "
+            "reach the port may read and write every user's memories. Bind to "
+            "localhost only. Set CLARA_AUTH_REQUIRED=true with CLARA_API_TOKENS "
             "(or put the API behind an authenticating gateway) before exposing it."
         )
 
@@ -68,20 +78,35 @@ def create_app(
         lifespan=lifespan,
     )
 
-    # Opt-in CORS: set CLARA_CORS_ORIGINS to a comma-separated origin list
-    # (use "*" for any origin). Off by default to stay safe for local use.
+    # Opt-in CORS: set CLARA_CORS_ORIGINS to a comma-separated origin list.
+    # Off by default to stay safe for local use. "*" is accepted but then
+    # credentials are refused: Starlette reflects the caller's origin when a
+    # wildcard is combined with allow_credentials, which would hand every
+    # website on the internet credentialed access to the memory store.
     cors_origins = [
         origin.strip()
         for origin in os.environ.get("CLARA_CORS_ORIGINS", "").split(",")
         if origin.strip()
     ]
     if cors_origins:
+        wildcard = "*" in cors_origins
+        if wildcard and len(cors_origins) > 1:
+            logger.warning(
+                "CLARA_CORS_ORIGINS contains '*' alongside explicit origins; "
+                "the wildcard makes the others redundant."
+            )
+        if wildcard:
+            logger.warning(
+                "CLARA_CORS_ORIGINS='*' allows any origin, so credentialed "
+                "cross-origin requests are disabled. List explicit origins to "
+                "allow credentials."
+            )
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=cors_origins,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_origins=["*"] if wildcard else cors_origins,
+            allow_credentials=not wildcard,
+            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-User-ID"],
         )
 
     app.include_router(interaction_router)

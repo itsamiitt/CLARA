@@ -107,7 +107,16 @@ if ($InstallWorker) {
 
     $uv = Get-Command uv -ErrorAction SilentlyContinue
     if ($uv) {
-        & uv venv --python $py $venv
+        # Resolve the concrete interpreter the probe selected BEFORE handing it
+        # to uv. `uv venv --python py` would resolve the py launcher's *default*
+        # interpreter (possibly < 3.10), ignoring the "-3.12" in $pyArgs and
+        # then failing the requires-python>=3.10 install in a loop.
+        $uvPython = $py
+        if ($pyArgs.Count -gt 0) {
+            $resolved = (& $py @($pyArgs + @("-c", "import sys; print(sys.executable)")) 2>$null | Select-Object -First 1)
+            if ($LASTEXITCODE -eq 0 -and $resolved) { $uvPython = $resolved.Trim() }
+        }
+        & uv venv --python $uvPython $venv
         if ($LASTEXITCODE -eq 0) {
             $vpy = Find-VenvBin $venv "python"
             if ($vpy) {

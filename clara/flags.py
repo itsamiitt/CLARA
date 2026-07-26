@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import os
 
-_FALSY = {"0", "false", "no", "off"}
+# The single definition of "off" for every CLARA boolean env var. ``config.py``
+# imports this so a value like "enabled" cannot mean disabled in one process
+# and enabled in another (the hook scripts test the same four strings).
+FALSY = {"0", "false", "no", "off"}
+_FALSY = FALSY
 
 GRAPH_DISABLED_HINT = (
     "the knowledge-graph add-on is disabled (CLARA_GRAPH_ENABLED=0); "

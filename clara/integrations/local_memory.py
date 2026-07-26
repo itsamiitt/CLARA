@@ -17,12 +17,13 @@ The only state on disk is a single SQLite file. LanceDB stays dormant via the
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import sqlite3
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -106,8 +107,57 @@ _MAX_TAGS = 64
 _MAX_TAG_LENGTH = 256
 
 
-def _guard_content(fields: dict[str, Any], tags: list[str] | None) -> None:
-    """Enforce the secret policy and size caps on one save's fields."""
+def _clean_text(value: Any) -> Any:
+    """Strip surrounding whitespace; map whitespace-only text to ``None``."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return value
+
+
+def _redact_value(value: Any) -> tuple[Any, list[str]]:
+    """Redact secrets anywhere inside a str, list, or dict value.
+
+    Recursive because ``properties``/``steps``/``trigger_conditions`` carry
+    nested user content; a credential in any of them used to survive the
+    ``redact`` policy because only three top-level strings were scrubbed.
+    """
+    if isinstance(value, str):
+        return security.redact(value)
+    if isinstance(value, list):
+        cleaned: list[Any] = []
+        names: list[str] = []
+        for item in value:
+            clean_item, matched = _redact_value(item)
+            cleaned.append(clean_item)
+            names.extend(matched)
+        return cleaned, names
+    if isinstance(value, dict):
+        cleaned_map: dict[Any, Any] = {}
+        names = []
+        for key, item in value.items():
+            clean_key, key_matched = _redact_value(key)
+            clean_item, matched = _redact_value(item)
+            cleaned_map[clean_key] = clean_item
+            names.extend(key_matched)
+            names.extend(matched)
+        return cleaned_map, names
+    return value, []
+
+
+def _guard_and_redact(
+    fields: dict[str, Any], tags: list[str] | None
+) -> tuple[dict[str, Any], list[str] | None, list[str]]:
+    """Enforce tag caps, the size cap, and the secret policy on one save.
+
+    Returns ``(fields, tags, redacted_names)``. Under ``reject`` (the default)
+    a match raises and nothing is written; under ``redact`` *every* scanned
+    field comes back scrubbed, so the caller can persist the return values
+    directly. Lives here rather than in ``save()`` so that every write path —
+    including ``docs_fulfill``, which calls ``_route_save`` directly — is
+    covered; a guard one layer above the routing function is a guard that a
+    future caller can forget.
+    """
     if tags is not None:
         if len(tags) > _MAX_TAGS:
             raise ValueError(f"too many tags ({len(tags)} > {_MAX_TAGS}).")
@@ -127,12 +177,27 @@ def _guard_content(fields: dict[str, Any], tags: list[str] | None) -> None:
         )
     policy = security.secret_policy()
     if policy == "off":
-        return
+        return fields, tags, []
     scan_text = payload + " " + " ".join(str(t) for t in (tags or []))
     if policy == "reject":
         name = security.find_secret(scan_text)
         if name is not None:
             raise security.SecretRejected(name)
+        return fields, tags, []
+
+    if security.find_secret(scan_text) is None:
+        return fields, tags, []
+    clean_fields: dict[str, Any] = {}
+    names: list[str] = []
+    for key, value in fields.items():
+        clean_value, matched = _redact_value(value)
+        clean_fields[key] = clean_value
+        names.extend(matched)
+    clean_tags = tags
+    if tags:
+        clean_tags, tag_matches = _redact_value(list(tags))
+        names.extend(tag_matches)
+    return clean_fields, clean_tags, sorted(set(names))
 
 
 def _coerce_types(types: Sequence[str] | None) -> list[MemoryType] | None:
@@ -214,6 +279,32 @@ class LocalMemory:
         logger.info("LocalMemory closed")
 
     # ------------------------------------------------------------------
+    # Public accessors (sanctioned entry points for other subsystems)
+    # ------------------------------------------------------------------
+
+    @property
+    def db_path(self) -> str:
+        """Filesystem path of the backing SQLite store."""
+        return self._db_path
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """The session factory, for subsystems that manage their own txn."""
+        return self._session_factory
+
+    @contextlib.asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        """Yield a session in an open transaction, committed on clean exit.
+
+        The sanctioned way to run a unit of work against the store. CLI, docs,
+        bridge, and MCP previously reached through ``_session_factory`` /
+        ``_engine`` because no public accessor existed — that made every
+        internal refactor a breaking change for four modules.
+        """
+        async with self._session_factory() as session, session.begin():
+            yield session
+
+    # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
 
@@ -253,31 +344,6 @@ class LocalMemory:
                 f"Unknown mem_type {mem_type!r}. Expected one of {sorted(VALID_TYPES)}."
             )
 
-        _guard_content(
-            {
-                "subject": subject,
-                "relation": relation,
-                "object": object,
-                "event_type": event_type,
-                "name": name,
-                "trigger_conditions": trigger_conditions,
-                "steps": steps,
-                "entity_type": entity_type,
-                "properties": properties,
-                "description": description,
-                "domain": domain,
-            },
-            tags,
-        )
-        redacted: list[str] = []
-        if security.secret_policy() == "redact":
-            subject, r1 = security.redact(subject) if subject else (subject, [])
-            object, r2 = security.redact(object) if object else (object, [])
-            description, r3 = (
-                security.redact(description) if description else (description, [])
-            )
-            redacted = [*r1, *r2, *r3]
-
         async def _attempt() -> tuple[str, str]:
             async with self._session_factory() as session, session.begin():
                 record = await self._route_save(
@@ -298,14 +364,11 @@ class LocalMemory:
                     confidence=confidence,
                     source=source,
                     user_id=user_id,
+                    tags=tags,
                 )
                 if confidence is not None:
                     record.confidence = max(0.0, min(1.0, float(confidence)))
                 meta = dict(record.metadata_) if record.metadata_ else {}
-                if tags:
-                    meta["tags"] = list(tags)
-                if redacted:
-                    meta["redacted"] = sorted(set(redacted))
                 # Stamp provenance on new writes; world-model upserts of an
                 # existing record keep their original repo_id.
                 meta.setdefault("repo_id", _cached_repo_id())
@@ -336,7 +399,93 @@ class LocalMemory:
         confidence: float | None,
         source: str,
         user_id: str | None,
+        tags: list[str] | None = None,
     ) -> Memory:
+        if mem_type not in VALID_TYPES:
+            raise ValueError(
+                f"Unknown mem_type {mem_type!r}. Expected one of {sorted(VALID_TYPES)}."
+            )
+        fields, tags, redacted = _guard_and_redact(
+            {
+                "subject": subject,
+                "relation": relation,
+                "object": object,
+                "event_type": event_type,
+                "name": name,
+                "trigger_conditions": trigger_conditions,
+                "steps": steps,
+                "entity_type": entity_type,
+                "properties": properties,
+                "description": description,
+                "domain": domain,
+            },
+            tags,
+        )
+        # Whitespace-only text is not a fact: normalize before the required-field
+        # checks below so "   " fails validation instead of being stored.
+        subject = _clean_text(fields["subject"])
+        relation = _clean_text(fields["relation"])
+        object = _clean_text(fields["object"])
+        event_type = _clean_text(fields["event_type"])
+        name = _clean_text(fields["name"])
+        entity_type = _clean_text(fields["entity_type"])
+        description = _clean_text(fields["description"])
+        domain = _clean_text(fields["domain"])
+        trigger_conditions = fields["trigger_conditions"]
+        steps = fields["steps"]
+        properties = fields["properties"]
+
+        record = await LocalMemory._route_save_record(
+            session,
+            mem_type=mem_type,
+            subject=subject,
+            relation=relation,
+            object=object,
+            is_negation=is_negation,
+            event_type=event_type,
+            name=name,
+            trigger_conditions=trigger_conditions,
+            steps=steps,
+            entity_type=entity_type,
+            properties=properties,
+            description=description,
+            domain=domain,
+            confidence=confidence,
+            source=source,
+            user_id=user_id,
+        )
+        if tags or redacted:
+            meta = dict(record.metadata_) if record.metadata_ else {}
+            if tags:
+                meta["tags"] = list(tags)
+            if redacted:
+                meta["redacted"] = redacted
+            record.metadata_ = meta
+        return record
+
+    @staticmethod
+    async def _route_save_record(
+        session: AsyncSession,
+        *,
+        mem_type: str,
+        subject: str | None,
+        relation: str | None,
+        object: str | None,
+        is_negation: bool,
+        event_type: str | None,
+        name: str | None,
+        trigger_conditions: list[str] | None,
+        steps: list[str] | None,
+        entity_type: str | None,
+        properties: dict[str, Any] | None,
+        description: str | None,
+        domain: str | None,
+        confidence: float | None,
+        source: str,
+        user_id: str | None,
+    ) -> Memory:
+        """Dispatch to the per-type store. Guarded callers only — use
+        :meth:`_route_save`, which applies the write guards first."""
         if mem_type == MemoryType.belief.value:
             if not (subject and relation and object):
                 raise ValueError(
@@ -840,39 +989,64 @@ class LocalMemory:
                     "hint": "use memory_save for the belief without graph sugar"}
         src_type = entity_types[0] if entity_types and len(entity_types) > 0 else None
         dst_type = entity_types[1] if entity_types and len(entity_types) > 1 else None
-        async with self._session_factory() as session, session.begin():
-            src_node = await resolve_node(
-                session, src, user_id=user_id, entity_type=src_type, create=True
-            )
-            dst_node = await resolve_node(
-                session, dst, user_id=user_id, entity_type=dst_type, create=True
-            )
-        saved = await self.save(
-            mem_type="belief",
-            subject=src,
-            relation=relation,
-            object=dst,
-            confidence=confidence,
-            description=description,
-            user_id=user_id,
-        )
-        async with self._session_factory() as session:
-            edge_row = (
-                await session.execute(
-                    sa_text(
-                        "SELECT edge_id FROM graph_edges WHERE belief_id = :bid "
-                        "ORDER BY rowid DESC LIMIT 1"
-                    ),
-                    {"bid": saved["memory_id"]},
+
+        async def _attempt() -> dict[str, Any]:
+            # One transaction for node resolution, the belief save, and the edge
+            # lookup. Previously these were three separate transactions: if the
+            # save raised (e.g. SecretRejected) the two nodes were left
+            # orphaned, and the edge was guessed with ORDER BY rowid DESC, which
+            # can return the wrong row under concurrent writers.
+            async with self._session_factory() as session, session.begin():
+                src_node = await resolve_node(
+                    session, src, user_id=user_id, entity_type=src_type, create=True
                 )
-            ).first()
-        return {
-            "belief_id": saved["memory_id"],
-            "edge_id": edge_row[0] if edge_row else None,
-            "src_node": src_node["display_name"] if src_node else src,
-            "dst_node": dst_node["display_name"] if dst_node else dst,
-            "action": "linked",
-        }
+                dst_node = await resolve_node(
+                    session, dst, user_id=user_id, entity_type=dst_type, create=True
+                )
+                record = await self._route_save(
+                    session,
+                    mem_type="belief",
+                    subject=src,
+                    relation=relation,
+                    object=dst,
+                    is_negation=False,
+                    event_type=None,
+                    name=None,
+                    trigger_conditions=None,
+                    steps=None,
+                    entity_type=None,
+                    properties=None,
+                    description=description,
+                    domain=None,
+                    confidence=confidence,
+                    source="user_direct",
+                    user_id=user_id,
+                )
+                if confidence is not None:
+                    record.confidence = max(0.0, min(1.0, float(confidence)))
+                meta = dict(record.metadata_) if record.metadata_ else {}
+                meta.setdefault("repo_id", _cached_repo_id())
+                record.metadata_ = meta
+                belief_id = str(record.memory_id)
+                # Deterministic: the projection stamps belief_id = memory_id on
+                # the edge it just created for this belief, in this transaction.
+                edge_row = (
+                    await session.execute(
+                        sa_text(
+                            "SELECT edge_id FROM graph_edges WHERE belief_id = :bid"
+                        ),
+                        {"bid": belief_id},
+                    )
+                ).first()
+                return {
+                    "belief_id": belief_id,
+                    "edge_id": edge_row[0] if edge_row else None,
+                    "src_node": src_node["display_name"] if src_node else src,
+                    "dst_node": dst_node["display_name"] if dst_node else dst,
+                    "action": "linked",
+                }
+
+        return await with_sqlite_retry(_attempt, what="memory_link")
 
     async def graph_rebuild(self, *, from_scratch: bool = False) -> dict[str, int]:
         """Regenerate graph tables from active memories (CLI entry point)."""

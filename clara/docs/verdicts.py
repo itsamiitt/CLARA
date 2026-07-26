@@ -13,8 +13,10 @@ commit in one transaction or not at all.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -28,6 +30,24 @@ if TYPE_CHECKING:
     from clara.integrations.local_memory import LocalMemory
 
 _TIERS = {"T0", "T1", "T2", "T3", "TX"}
+
+# doc_type is policy-extensible (clara.yml defines repo-specific types), so it
+# is validated by shape rather than membership. The stored value is echoed into
+# the always-on [KNOWLEDGE MAP] block of every future session, so anything that
+# could forge structure there — newlines, code fences, control characters — has
+# to be rejected at the boundary rather than escaped at each render site.
+_DOC_TYPE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}\Z")
+
+
+def _validate_doc_type(doc_type: str) -> str:
+    cleaned = (doc_type or "").strip()
+    if not _DOC_TYPE_RE.match(cleaned):
+        raise ValueError(
+            f"invalid doc_type {doc_type!r}: expected 1-40 characters of "
+            "letters, digits, space, '.', '_' or '-' starting with a letter "
+            "or digit (e.g. 'plan', 'adr', 'runbook')."
+        )
+    return cleaned
 
 
 def _now() -> str:
@@ -182,6 +202,7 @@ async def classify(
     """
     if tier is not None and tier not in _TIERS:
         raise ValueError(f"unknown tier {tier!r}; expected one of {sorted(_TIERS)}")
+    doc_type = _validate_doc_type(doc_type)
     verdict = f"classify:{doc_type}" + (f":{tier}" if tier else "")
     async with memory._session_factory() as session, session.begin():
         doc = await _doc_by_path(session, repo, path)
@@ -324,12 +345,11 @@ async def fulfill(
                 confidence=confidence,
                 source="agent_reflection",
                 user_id=None,
+                tags=tags,
             )
             if confidence is not None:
                 record.confidence = max(0.0, min(1.0, float(confidence)))
             meta = dict(record.metadata_) if record.metadata_ else {}
-            if tags:
-                meta["tags"] = list(tags)
             meta["provenance"] = {
                 "source": "docs_fulfill", "doc_id": doc["doc_id"], "tier": doc["tier"],
             }
@@ -393,7 +413,20 @@ def _git_mv(root: str, src: str, dst: str) -> bool:
     import subprocess
     from pathlib import Path
 
-    (Path(root) / dst).parent.mkdir(parents=True, exist_ok=True)
+    # `dst` is built from policy.archive_dir, which comes from the repo's own
+    # clara.yml — untrusted when the repo was cloned. Refuse anything that
+    # escapes the work tree *before* mkdir, or an absolute/`..` archive_dir
+    # would create directories outside the repository.
+    root_path = Path(root).resolve()
+    try:
+        target = (root_path / dst).resolve()
+        target.relative_to(root_path)
+    except (OSError, ValueError):
+        logger.warning(
+            "refusing to move %s outside the repository (archive target %r)", src, dst
+        )
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.run(
             ["git", "mv", src, dst], cwd=root, capture_output=True, text=True,
@@ -473,7 +506,14 @@ async def restore(
                 {"did": doc["doc_id"]},
             )
         ).first()
-        evidence = json.loads(original[0]) if original else {}
+        evidence: dict[str, Any] = {}
+        if original:
+            # A hand-edited or truncated attestation must not make restore
+            # unusable — fall back to the defaults below (scan.py does the same).
+            with contextlib.suppress(ValueError, TypeError):
+                loaded = json.loads(original[0])
+                if isinstance(loaded, dict):
+                    evidence = loaded
         back_rel = evidence.get("from") or doc["rel_path"]
         prior_lifecycle = evidence.get("prior_lifecycle") or "active"
         moved = False
