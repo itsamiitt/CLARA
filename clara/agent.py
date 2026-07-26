@@ -329,6 +329,7 @@ class ClaraMemory:
                 embedding_engine,
                 cache=cache,
                 lance_engine=lance_engine,
+                similarity_threshold=similarity_threshold,
             ),
             similarity_threshold=similarity_threshold,
             retrieval_top_k=retrieval_top_k,
@@ -554,22 +555,24 @@ class ClaraMemory:
 
         async with self._session_factory() as session:
             self._bind_session_context(session)
-            async with session.begin():
-                reasoning = ReasoningEngine(
-                    session,
-                    self._embedding_engine,
-                    self._extractor,
-                    llm_provider=self._llm_provider,
-                    llm_model=self._llm_model,
-                    ollama_base_url=os.environ.get(ENV_OLLAMA_BASE_URL),
-                    cache=self._cache,
-                )
-                response = await reasoning.respond(
-                    interaction.raw_text,
-                    user_id=interaction.user_id,
-                    system_prompt=system_prompt,
-                    top_k=top_k,
-                )
+            # respond() manages its own transaction boundaries so the LLM
+            # network call is not made while a write transaction is open — do
+            # not wrap it in session.begin() here.
+            reasoning = ReasoningEngine(
+                session,
+                self._embedding_engine,
+                self._extractor,
+                llm_provider=self._llm_provider,
+                llm_model=self._llm_model,
+                ollama_base_url=os.environ.get(ENV_OLLAMA_BASE_URL),
+                cache=self._cache,
+            )
+            response = await reasoning.respond(
+                interaction.raw_text,
+                user_id=interaction.user_id,
+                system_prompt=system_prompt,
+                top_k=top_k,
+            )
 
         return {
             "response": response.text,

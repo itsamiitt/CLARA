@@ -69,9 +69,28 @@ async def ensure_fts(engine: AsyncEngine) -> bool:
         return False
     try:
         async with engine.begin() as conn:
+            existed = (
+                await conn.execute(
+                    text(
+                        "SELECT 1 FROM sqlite_master "
+                        f"WHERE type='table' AND name='{FTS_TABLE}'"
+                    )
+                )
+            ).first() is not None
             for statement in _DDL:
                 await conn.execute(text(statement))
-            await conn.execute(text(_BACKFILL))
+            # The backfill is a full anti-join (memories vs FTS) that used to
+            # run on every store open — expensive at scale and pointless when
+            # the triggers already keep an existing table in sync. Only run it
+            # when we just created the table, or when it is provably empty.
+            if not existed:
+                await conn.execute(text(_BACKFILL))
+            else:
+                empty = (
+                    await conn.execute(text(f"SELECT 1 FROM {FTS_TABLE} LIMIT 1"))
+                ).first() is None
+                if empty:
+                    await conn.execute(text(_BACKFILL))
         return True
     except Exception as exc:  # noqa: BLE001 — availability probe, fail soft
         logger.warning("FTS5 index unavailable (%s); lexical search will scan", exc)

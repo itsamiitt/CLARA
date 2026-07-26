@@ -685,9 +685,73 @@ async def _cmd_import(args: argparse.Namespace) -> int:
         f"conflicts-updated {stats['conflicts_updated']}, "
         f"skipped-secret {stats['skipped_secret']}"
     )
+    if stats.get("skipped_malformed"):
+        print(
+            f"warning: skipped {stats['skipped_malformed']} malformed line(s) — "
+            "the file may be truncated or corrupt",
+            file=sys.stderr,
+        )
+    if stats.get("other_kinds"):
+        # Graph rows rebuild from memories; doc-ledger rows (attestations,
+        # classifications) do not, so their loss is not silent.
+        print(
+            f"note: {stats['other_kinds']} non-memory record(s) (graph/docs) "
+            "were not imported; graph rebuilds from memories, but doc-ledger "
+            "judgments do not — re-run `clara docs scan` on the target repo.",
+            file=sys.stderr,
+        )
     if stats["imported"] or stats["conflicts_updated"]:
         print("hint: run `clara graph rebuild` to project imported memories "
               "into the knowledge graph")
+    return 0
+
+
+async def _cmd_uninstall(args: argparse.Namespace) -> int:
+    """Remove plugin runtime state; keep memories unless --purge-memories."""
+    import os as _os
+    import shutil
+
+    base = Path(_os.environ.get("CLARA_HOME") or (Path.home() / ".clara"))
+    data_dir = Path(_os.environ.get("CLAUDE_PLUGIN_DATA") or (base / "plugin"))
+
+    removed: list[str] = []
+    # Runtime artifacts only: venvs, the shim, the "current" pointer, logs, and
+    # the per-session sidecar dirs. The memory DB is deliberately excluded.
+    runtime_targets = [
+        data_dir,
+        base / "session-flags",
+        base / "session-cwd",
+    ]
+    for target in runtime_targets:
+        if target.exists():
+            try:
+                shutil.rmtree(target)
+                removed.append(str(target))
+            except OSError as exc:
+                print(f"warning: could not remove {target}: {exc}", file=sys.stderr)
+
+    if args.purge_memories:
+        for name in ("clara.db", "clara.db-wal", "clara.db-shm", "backups"):
+            target = base / name
+            if target.exists():
+                try:
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                    removed.append(str(target))
+                except OSError as exc:
+                    print(f"warning: could not remove {target}: {exc}", file=sys.stderr)
+
+    if removed:
+        print("removed:")
+        for path in removed:
+            print(f"  {path}")
+    else:
+        print("nothing to remove (already clean)")
+    if not args.purge_memories:
+        print(f"memories kept at {base / 'clara.db'} "
+              "(re-run with --purge-memories to delete them)")
     return 0
 
 
@@ -971,6 +1035,16 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("mcp", help="Run the MCP stdio server (same as clara-mcp).")
 
+    p_uninstall = sub.add_parser(
+        "uninstall",
+        help="Remove CLARA's private venv, shim, and install log (keeps memories).",
+    )
+    p_uninstall.add_argument(
+        "--purge-memories",
+        action="store_true",
+        help="ALSO delete the memory store and backups (irreversible).",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -998,8 +1072,21 @@ def main(argv: list[str] | None = None) -> None:
         "restore": _cmd_restore,
         "statusline": _cmd_statusline,
         "sync": _cmd_sync,
+        "uninstall": _cmd_uninstall,
     }[args.command]
-    raise SystemExit(asyncio.run(handler(args)))
+    try:
+        raise SystemExit(asyncio.run(handler(args)))
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        raise SystemExit(130) from None
+    except Exception as exc:  # noqa: BLE001 — top-level: no raw traceback to users
+        # Exit code 70 (EX_SOFTWARE) for an unexpected internal failure, kept
+        # distinct from 1 (operation failed) and 2 (usage/precondition error).
+        print(f"error: {exc}", file=sys.stderr)
+        logging.getLogger(__name__).debug("unhandled CLI error", exc_info=True)
+        raise SystemExit(70) from exc
 
 
 if __name__ == "__main__":

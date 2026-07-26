@@ -53,12 +53,31 @@ jobs:
       - name: Run tests
         run: pytest --cov=clara --cov-report=term-missing --cov-fail-under=70 --tb=short -q
 
-      - name: Run type check (optional)
-        if: matrix.python-version == '3.12'
-        continue-on-error: true
+  lint:
+    name: Lint & type check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
         run: |
-          pip install mypy
-          mypy clara/ --ignore-missing-imports
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,api,mcp]"
+          pip install ruff mypy
+
+      # Blocking, not advisory: pyproject declares strict lint/type rules, so
+      # CI enforces them instead of letting regressions land silently.
+      - name: Ruff
+        run: ruff check clara tests
+
+      - name: Mypy
+        run: mypy clara
 
   bench:
     name: Latency benchmarks (10k-row store)

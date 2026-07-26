@@ -16,10 +16,11 @@ Pipeline:
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
@@ -28,6 +29,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
 from clara.extraction.extractor import ExtractedFact
 from clara.memory.belief import BeliefMemory, SourceType
+from clara.memory.event import EventStore
+from clara.memory.skill import SkillStore
+from clara.memory.world_model import WorldModelStore
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
 from clara.retrieval.engine import RetrievalEngine, ScoredMemory
@@ -106,14 +110,6 @@ _WORLD_MODEL_RELATIONS: frozenset[str] = frozenset({
 _IDENTITY_RELATIONS: frozenset[str] = frozenset({
     "is", "is_a", "type_of", "instance_of",
 })
-
-# Per-type decay rates, matching the dedicated stores
-# (EventStore: 0.0, SkillStore: 0.02, WorldModelStore: 0.005).
-_DECAY_RATE_BY_TYPE: dict[MemoryType, float] = {
-    MemoryType.event: 0.0,
-    MemoryType.skill: 0.02,
-    MemoryType.world_model: 0.005,
-}
 
 
 def _normalize_relation(relation: str) -> str:
@@ -261,6 +257,9 @@ class MemoryUpdateEngine:
         self._embedder = embedding_engine
         self._retriever = retrieval_engine
         self._belief_memory = BeliefMemory(session)
+        self._world_model = WorldModelStore(session)
+        self._event_store = EventStore(session)
+        self._skill_store = SkillStore(session)
         self._cache = cache
         self._similarity_threshold = similarity_threshold
 
@@ -352,11 +351,18 @@ class MemoryUpdateEngine:
         *,
         user_id: str | None = None,
     ) -> list[ScoredMemory]:
-        """Embed the fact and search for similar memories."""
+        """Embed the fact and search for similar memories.
+
+        ``track_access=False``: this is the write pipeline's internal
+        duplicate probe, not a user recall — bumping ``access_count`` on
+        candidates here would let every ``remember()`` distort the
+        usage-frequency ranking term (``recall()`` opts out the same way).
+        """
         result = await self._retriever.search(
             self._fact_text(fact),
             top_k=SEARCH_TOP_K,
             user_id=user_id,
+            track_access=False,
         )
         return result.all
 
@@ -370,9 +376,19 @@ class MemoryUpdateEngine:
             text = f"not {text}"
         return text
 
-    def _fact_embedding(self, fact: ExtractedFact) -> list[float]:
+    async def _fact_embedding(self, fact: ExtractedFact) -> list[float]:
+        """Embed the canonical fact text off the event loop.
+
+        ``embed()`` is a synchronous provider HTTP call and this runs inside
+        an open write transaction — calling it inline would stall the whole
+        event loop for one network round-trip per fact while holding the WAL
+        writer slot (the retrieval engine uses the same executor hop).
+        """
+        loop = asyncio.get_running_loop()
+        text = self._fact_text(fact)
+        raw = await loop.run_in_executor(None, self._embedder.embed, text)
         return normalize_embedding_dimensions(
-            self._embedder.embed(self._fact_text(fact)),
+            raw,
             target_dimensions=VECTOR_DIMENSIONS,
         )
 
@@ -391,8 +407,10 @@ class MemoryUpdateEngine:
                 limit=100,
             )
         except Exception:
-            logger.debug(
-                "Exact belief candidate lookup failed; falling back to similarity-only search",
+            logger.warning(
+                "Exact belief candidate lookup failed; falling back to "
+                "similarity-only search (duplicate detection is weakened until "
+                "this is resolved)",
                 exc_info=True,
             )
             return []
@@ -464,7 +482,7 @@ class MemoryUpdateEngine:
                     source=_map_source_type(fact.source_type),
                     raw_text=fact.raw_text,
                     user_id=user_id,
-                    embedding=self._fact_embedding(fact),
+                    embedding=await self._fact_embedding(fact),
                 )
                 return UpdateResult(
                     action_taken=ActionTaken.superseded,
@@ -516,7 +534,7 @@ class MemoryUpdateEngine:
                 best.memory.memory_id,
                 source=_map_source_type(fact.source_type),
                 raw_text=fact.raw_text,
-                embedding=self._fact_embedding(fact),
+                embedding=await self._fact_embedding(fact),
             )
             return UpdateResult(
                 action_taken=ActionTaken.reinforced,
@@ -555,10 +573,12 @@ class MemoryUpdateEngine:
     ) -> Memory:
         """Persist a fact as a new Memory record.
 
-        Uses :class:`BeliefMemory.store` for beliefs; for other types,
-        creates the record directly.
+        Routes every type through its dedicated store (BeliefMemory,
+        WorldModelStore, EventStore, SkillStore) so the content shape, decay
+        rate, graph projection, and world-model race handling are defined in
+        exactly one place instead of being re-implemented here.
         """
-        embedding = self._fact_embedding(fact)
+        embedding = await self._fact_embedding(fact)
 
         if memory_type == MemoryType.belief:
             return await self._belief_memory.store(
@@ -573,64 +593,59 @@ class MemoryUpdateEngine:
                 embedding=embedding,
             )
 
-        # Non-belief types: create directly, but with the same content
-        # shape the dedicated stores produce, so the rows are visible to
-        # WorldModelStore/EventStore/SkillStore queries and — critically —
-        # world_model rows carry the entity_type/name keys the partial
-        # unique index `uq_memories_world_model_identity` guards on.
-        now = datetime.now(timezone.utc)
-        content: dict[str, Any] = {
-            "subject": fact.subject,
-            "relation": fact.relation,
-            "object": fact.object,
-        }
-        if fact.domain:
-            content["domain"] = fact.domain
-        if fact.is_negation:
-            content["is_negation"] = True
-
+        # world_model routes through its dedicated store: WorldModelStore.upsert
+        # handles the concurrent-create race on the partial unique index
+        # `uq_memories_world_model_identity` (begin_nested + merge retry) and
+        # does the graph projection. Hand-inserting here used to raise an
+        # unhandled IntegrityError that aborted the whole remember() transaction
+        # when a duplicate active entity slipped past conflict detection.
         if memory_type == MemoryType.world_model:
-            content["name"] = fact.subject
             if _normalize_relation(fact.relation) in _IDENTITY_RELATIONS:
-                content["entity_type"] = fact.object
-                content["properties"] = {}
+                entity_type = fact.object
+                properties: dict[str, Any] = {}
             else:
-                content["entity_type"] = "entity"
-                content["properties"] = {fact.relation: fact.object}
-        elif memory_type == MemoryType.event:
-            content["event_type"] = fact.relation
-            content["event_status"] = "created"
-        elif memory_type == MemoryType.skill:
-            content["name"] = fact.object
-            content["trigger_conditions"] = []
-            content["steps"] = []
+                entity_type = "entity"
+                properties = {fact.relation: fact.object}
+            return await self._world_model.upsert(
+                entity_type=entity_type,
+                name=fact.subject,
+                properties=properties,
+                domain=fact.domain,
+                user_id=user_id,
+                confidence=fact.confidence,
+                source_type=fact.source_type,
+                raw_text=fact.raw_text,
+                embedding=embedding,
+            )
 
-        decay_rate = _DECAY_RATE_BY_TYPE.get(memory_type, 0.02)
+        if memory_type == MemoryType.event:
+            return await self._event_store.create(
+                subject=fact.subject,
+                event_type=fact.relation,
+                description=fact.raw_text or "",
+                domain=fact.domain,
+                user_id=user_id,
+                confidence=fact.confidence,
+                source_type=fact.source_type,
+                raw_text=fact.raw_text,
+                embedding=embedding,
+            )
 
-        record = Memory(
-            memory_type=memory_type,
-            user_id=user_id,
-            content=content,
-            embedding=embedding,
-            confidence=fact.confidence,
-            status=MemoryStatus.active,
-            decay_rate=decay_rate,
-            created_at=now,
-            updated_at=now,
-            metadata_={
-                "source_type": fact.source_type,
-                "raw_text": fact.raw_text,
-            },
-        )
-        self._session.add(record)
-        await self._session.flush()
-        if memory_type == MemoryType.world_model:
-            # This branch bypasses WorldModelStore, so project directly
-            # (fail-soft inside the projection).
-            from clara.graph import project as graph_project
+        if memory_type == MemoryType.skill:
+            return await self._skill_store.create(
+                name=fact.object,
+                trigger_conditions=[],
+                steps=[],
+                description=fact.raw_text or "",
+                domain=fact.domain,
+                user_id=user_id,
+                confidence=fact.confidence,
+                source_type=fact.source_type,
+                raw_text=fact.raw_text,
+                embedding=embedding,
+            )
 
-            await graph_project.project_world_model_upserted(self._session, record)
-        return record
+        raise ValueError(f"unsupported memory_type for storage: {memory_type!r}")
 
     async def _mark_superseded(
         self,

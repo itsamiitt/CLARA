@@ -61,6 +61,23 @@ def _cap(line: str) -> str:
     return line if len(line) <= _LINE_CAP else line[: _LINE_CAP - 1] + "…"
 
 
+def _defang(raw: object, *, max_len: int = 40) -> str:
+    """Make a stored free-text field safe to interpolate into this block.
+
+    ``doc_type`` is agent-supplied via ``docs_classify`` and this block is
+    injected into *every* future session, so a newline or a code fence here
+    would be a persistence primitive. Validated at the write boundary too
+    (``clara.docs.verdicts._validate_doc_type``); this is the render-side
+    backstop for rows written before that check existed.
+    """
+    cleaned = "".join(
+        ch for ch in str(raw or "") if ord(ch) >= 0x20 and ord(ch) != 0x7F
+    )
+    cleaned = cleaned.replace("`", "'").replace("(", "[").replace(")", "]")
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:max_len] if cleaned else "unknown"
+
+
 def _git_dirty_md(root: str) -> list[str]:
     try:
         proc = subprocess.run(
@@ -278,14 +295,15 @@ def build_map(cwd: str) -> str | None:
         if t1:
             lines.append(f"authoritative (T1): {len(t1)}")
             for rel_path, _tier, _lc, doc_type, _sig, _sb in t1[: _LIST_CAPS["t1"]]:
-                lines.append(_cap(f"  {_quote_path(rel_path)} ({doc_type})"))
+                lines.append(_cap(f"  {_quote_path(rel_path)} ({_defang(doc_type)})"))
             if len(t1) > _LIST_CAPS["t1"]:
                 lines.append(f"  +{len(t1) - _LIST_CAPS['t1']} more")
         if t2:
             lines.append(f"active work (T2): {len(t2)}")
             for rel_path, _tier, _lc, doc_type, sig, _sb in t2[: _LIST_CAPS["t2"]]:
                 pct = _checkbox_pct(sig)
-                suffix = f"{doc_type}, {pct}" if pct else doc_type
+                safe_type = _defang(doc_type)
+                suffix = f"{safe_type}, {pct}" if pct else safe_type
                 lines.append(_cap(f"  {_quote_path(rel_path)} ({suffix})"))
             if len(t2) > _LIST_CAPS["t2"]:
                 lines.append(f"  +{len(t2) - _LIST_CAPS['t2']} more")

@@ -202,6 +202,13 @@ class Memory(Base):
             "memory_type",
             "status",
         ),
+        # Hot sort key: WHERE status='active' ORDER BY updated_at DESC on the
+        # session-start fastpath and the ILIKE fallback (migration 7).
+        Index(
+            "ix_memories_status_updated",
+            "status",
+            text("updated_at DESC"),
+        ),
         # Enforces one active world-model record per (user, entity_type, name)
         # so concurrent upserts collide with an IntegrityError instead of
         # duplicating. NOTE: SQLite-only — the json_extract() key expressions

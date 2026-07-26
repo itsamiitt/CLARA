@@ -21,7 +21,9 @@ from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Sequence
 
-from sqlalchemy import and_, event, inspect as sa_inspect, select
+from sqlalchemy import and_, event, func, inspect as sa_inspect, select
+from sqlalchemy import text as sa_text
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -265,6 +267,24 @@ class LanceRetrievalEngine:
             functools.partial(self._sync_records_sync, records=list(records)),
         )
 
+    def existing_ids_sync(self) -> set[str]:
+        """All memory_ids currently present in the Lance table.
+
+        Used by reconciliation to find SQLite rows whose vectors never reached
+        Lance (e.g. a crash between SQLite commit and the background flush).
+        """
+        table = self._ensure_table_sync()
+        try:
+            rows = table.search().select(["memory_id"]).to_list()
+        except Exception:  # noqa: BLE001 — reconciliation is best-effort
+            logger.exception("Could not list Lance memory_ids for reconciliation")
+            return set()
+        return {str(row["memory_id"]) for row in rows if row.get("memory_id")}
+
+    async def existing_ids(self) -> set[str]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.existing_ids_sync)
+
     async def flush_pending(self) -> None:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self.flush_pending_sync)
@@ -338,7 +358,18 @@ class LanceRetrievalEngine:
 
     @staticmethod
     def _escape(value: str) -> str:
-        return value.replace("'", "''")
+        # Reject values that could break out of the single-quoted SQL literal
+        # in the DataFusion filter. Doubling quotes alone is not enough if the
+        # dialect honours backslash escapes, so control chars and backslashes
+        # are refused outright rather than escaped. user_id reaches here from
+        # request scope, so this is a real (if narrow) injection boundary.
+        text = str(value)
+        if "\\" in text or any(ord(ch) < 0x20 for ch in text):
+            raise LanceSearchError(
+                "unsafe characters in a vector filter value "
+                "(backslash or control character)"
+            )
+        return text.replace("'", "''")
 
     def _ensure_table_sync(self):
         with self._table_lock:
@@ -510,6 +541,48 @@ class RetrievalEngine:
     @property
     def lance(self) -> LanceRetrievalEngine:
         return self._lance
+
+    async def reconcile_vectors(self, *, batch_size: int = 1000) -> dict[str, int]:
+        """Backfill Lance with active memories missing from the vector table.
+
+        Closes the durability gap where a crash between the SQLite commit and
+        the background Lance flush leaves rows queryable lexically but invisible
+        to vector recall forever. Re-enqueues the stored embeddings (no
+        re-embedding needed) for any active id absent from Lance. Fail-soft: a
+        Lance error returns what was done so far rather than raising into the
+        maintenance job.
+        """
+        try:
+            present = await self._lance.existing_ids()
+        except Exception:  # noqa: BLE001 — best-effort maintenance
+            logger.exception("Vector reconciliation skipped: could not read Lance")
+            return {"checked": 0, "backfilled": 0}
+
+        checked = 0
+        backfilled = 0
+        missing: list[LanceMemoryRecord] = []
+        result = await self._session.execute(
+            select(Memory).where(Memory.status == MemoryStatus.active)
+        )
+        for memory in result.scalars():
+            checked += 1
+            if str(memory.memory_id) in present:
+                continue
+            snapshot = _snapshot_memory(memory)
+            if snapshot is not None and snapshot.vector is not None:
+                missing.append(snapshot)
+                backfilled += 1
+            if len(missing) >= batch_size:
+                self._lance.enqueue_records(missing)
+                missing = []
+        if missing:
+            self._lance.enqueue_records(missing)
+        logger.info(
+            "Vector reconciliation: checked %d active memories, re-enqueued %d",
+            checked,
+            backfilled,
+        )
+        return {"checked": checked, "backfilled": backfilled}
 
     async def search(
         self,
@@ -723,13 +796,45 @@ class RetrievalEngine:
         self,
         memories: list[Memory],
     ) -> None:
+        """Bump ``access_count``/``last_accessed`` without touching ``updated_at``.
+
+        A raw UPDATE rather than ORM attribute mutation: assigning to
+        ``memory.metadata_`` fires the ``updated_at`` ``onupdate`` hook, and a
+        read must never look like a content change or the recency term would
+        inflate on every search, letting frequently-searched memories
+        self-reinforce. ``LocalMemory._record_accesses`` does the same.
+        """
+        if not memories:
+            return
         now_iso = datetime.now(timezone.utc).isoformat()
+        memory_ids = [memory.memory_id for memory in memories]
+        await self._session.execute(
+            sa_update(Memory)
+            .where(Memory.memory_id.in_(memory_ids))
+            .values(
+                metadata_=func.json_set(
+                    func.json_set(
+                        func.coalesce(Memory.metadata_, sa_text("'{}'")),
+                        "$.access_count",
+                        func.coalesce(
+                            func.json_extract(Memory.metadata_, "$.access_count"), 0
+                        )
+                        + 1,
+                    ),
+                    "$.last_accessed",
+                    now_iso,
+                ),
+                updated_at=Memory.updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        # Keep the in-session copies consistent with the row we just wrote so
+        # callers scoring off metadata_ do not see a stale access_count.
         for memory in memories:
             meta: dict[str, Any] = dict(memory.metadata_) if memory.metadata_ else {}
             meta["access_count"] = int(meta.get("access_count", 0)) + 1
             meta["last_accessed"] = now_iso
-            memory.metadata_ = meta
-        await self._session.flush()
+            memory.__dict__["metadata_"] = meta
 
     @staticmethod
     def _group_scored(scored: Sequence[ScoredMemory]) -> RetrievalResult:

@@ -154,8 +154,6 @@ async def import_file(
 async def _stamp_provenance(
     memory: LocalMemory, memory_id: str, provenance: dict[str, Any]
 ) -> None:
-    import json as _json
-
     from sqlalchemy import text as sa_text
 
     async with memory._session_factory() as session, session.begin():
@@ -173,7 +171,6 @@ async def _stamp_provenance(
                     "mid": memory_id.replace("-", ""),
                 },
             )
-        _ = _json  # placate linters; kept for future structured values
 
 
 async def import_native(

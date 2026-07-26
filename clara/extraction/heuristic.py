@@ -44,9 +44,13 @@ _EVENT_VERBS = (
 
 _SKILL_VERBS = "know|knows|learned|learnt|mastered"
 
-
-def _first_person(match: re.Match[str]) -> str:
-    return "user"
+# Demonstrative/expletive subjects that carry no entity — never a real fact
+# subject. First-person ("I", "we") is intentionally NOT here: those are
+# meaningful and normalized elsewhere.
+_NON_SUBJECTS = frozenset({
+    "this", "that", "these", "those", "it", "there",
+    "which", "what", "here", "they", "he", "she",
+})
 
 
 class _Pattern:
@@ -200,6 +204,11 @@ class HeuristicExtractor:
                     relation = raw.get("relation") or ""
                     object_ = raw.get("object") or ""
                     if not subject or not relation or not object_:
+                        continue
+                    # Drop demonstrative/expletive subjects: "This is a problem"
+                    # would otherwise yield world_model "This is_a problem",
+                    # which contradicts the module's precision-first doctrine.
+                    if subject.strip().lower() in _NON_SUBJECTS:
                         continue
                     key = (
                         subject.lower(), relation.lower(), object_.lower(),

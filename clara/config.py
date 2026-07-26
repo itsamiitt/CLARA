@@ -21,8 +21,13 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+
+from clara.flags import FALSY as _FALSY
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Default values (keep in sync with per-module defaults)
@@ -46,6 +51,49 @@ _DEFAULT_CACHE_URL: str | None = None
 _DEFAULT_AUTH_REQUIRED = False
 _DEFAULT_GRAPH_ENABLED = True
 _DEFAULT_DOCS_ENABLED = True
+
+_MIN_TOKEN_LENGTH = 16
+
+
+def _api_tokens() -> tuple[tuple[str, str], ...]:
+    """Parse ``CLARA_API_TOKENS`` (``user:token,user2:token2``).
+
+    Malformed or short entries are dropped with a warning rather than silently
+    accepted: a token weak enough to guess is worse than no API at all, and a
+    typo'd pair that silently disappeared would look like a working config.
+    """
+    raw = os.environ.get("CLARA_API_TOKENS", "").strip()
+    if not raw:
+        return ()
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        user_id, sep, token = entry.partition(":")
+        user_id, token = user_id.strip(), token.strip()
+        if not sep or not user_id or not token:
+            logger.warning(
+                "ignoring malformed CLARA_API_TOKENS entry (expected 'user:token')"
+            )
+            continue
+        if len(token) < _MIN_TOKEN_LENGTH:
+            logger.warning(
+                "ignoring CLARA_API_TOKENS entry for %r: token is shorter than "
+                "%d characters",
+                user_id,
+                _MIN_TOKEN_LENGTH,
+            )
+            continue
+        if user_id in seen:
+            logger.warning(
+                "ignoring duplicate CLARA_API_TOKENS entry for %r", user_id
+            )
+            continue
+        seen.add(user_id)
+        pairs.append((user_id, token))
+    return tuple(pairs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,8 +141,13 @@ class ClaraConfig:
             Optional retrieval cache URL. Use ``"memory://"`` for the built-in
             in-process cache or a Redis URL for shared cache storage.
         auth_required:
-            When ``True``, API routes require an ``X-User-ID`` header and
-            reject requests that try to act on a different ``user_id``.
+            When ``True``, API routes require a bearer token from
+            ``api_tokens`` and reject requests that try to act on a different
+            ``user_id``. The app refuses to start if no tokens are configured.
+        api_tokens:
+            ``(user_id, token)`` pairs parsed from ``CLARA_API_TOKENS``
+            (``user:token,user2:token2``). The authenticated identity is
+            derived from the presented token — never from a client header.
     """
 
     # Database
@@ -125,6 +178,7 @@ class ClaraConfig:
     start_scheduler: bool = True
     cache_url: str | None = _DEFAULT_CACHE_URL
     auth_required: bool = _DEFAULT_AUTH_REQUIRED
+    api_tokens: tuple[tuple[str, str], ...] = ()
 
     # Plugin add-on kill switches (see also clara.flags for the per-call
     # helpers long-lived processes use)
@@ -159,33 +213,76 @@ class ClaraConfig:
         * ``CLARA_START_SCHEDULER``
         * ``CLARA_CACHE_URL``
         * ``CLARA_AUTH_REQUIRED``
+        * ``CLARA_API_TOKENS``
+        * ``CLARA_GRAPH_ENABLED``
+        * ``CLARA_DOCS_ENABLED``
+
+        Unparseable or out-of-range numeric values are logged at WARNING and
+        fall back to the default rather than being applied or silently dropped.
         """
         def _str(key: str, default: str) -> str:
             return os.environ.get(key, "").strip() or default
 
-        def _int(key: str, default: int) -> int:
-            raw = os.environ.get(key, "").strip()
-            if not raw:
-                return default
-            try:
-                return int(raw)
-            except ValueError:
-                return default
+        def _warn(key: str, raw: str, default: object, why: str) -> None:
+            # Loud rather than silent: a typo'd tuning var that quietly reverts
+            # to the default is indistinguishable from one that took effect.
+            logger.warning(
+                "ignoring %s=%r (%s); using default %r", key, raw, why, default
+            )
 
-        def _float(key: str, default: float) -> float:
+        def _int(
+            key: str,
+            default: int,
+            *,
+            minimum: int | None = None,
+            maximum: int | None = None,
+        ) -> int:
             raw = os.environ.get(key, "").strip()
             if not raw:
                 return default
             try:
-                return float(raw)
+                value = int(raw)
             except ValueError:
+                _warn(key, raw, default, "not an integer")
                 return default
+            if minimum is not None and value < minimum:
+                _warn(key, raw, default, f"below the minimum of {minimum}")
+                return default
+            if maximum is not None and value > maximum:
+                _warn(key, raw, default, f"above the maximum of {maximum}")
+                return default
+            return value
+
+        def _float(
+            key: str,
+            default: float,
+            *,
+            minimum: float | None = None,
+            maximum: float | None = None,
+        ) -> float:
+            raw = os.environ.get(key, "").strip()
+            if not raw:
+                return default
+            try:
+                value = float(raw)
+            except ValueError:
+                _warn(key, raw, default, "not a number")
+                return default
+            if minimum is not None and value < minimum:
+                _warn(key, raw, default, f"below the minimum of {minimum}")
+                return default
+            if maximum is not None and value > maximum:
+                _warn(key, raw, default, f"above the maximum of {maximum}")
+                return default
+            return value
 
         def _bool(key: str, default: bool) -> bool:
+            # Shares clara.flags' falsy set so one env var cannot read as
+            # enabled in the MCP server and disabled here.
             raw = os.environ.get(key, "").strip().lower()
             if not raw:
                 return default
-            return raw in {"1", "true", "yes", "on"}
+            return raw not in _FALSY
 
         return cls(
             db_url=_str("CLARA_DB_URL", _DEFAULT_DB_URL),
@@ -197,14 +294,31 @@ class ClaraConfig:
             ollama_base_url=_str("CLARA_OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL),
             ollama_llm_model=_str("CLARA_OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL),
             ollama_embed_model=_str("CLARA_OLLAMA_EMBED_MODEL", _DEFAULT_OLLAMA_EMBED_MODEL),
-            retrieval_top_k=_int("CLARA_RETRIEVAL_TOP_K", _DEFAULT_RETRIEVAL_TOP_K),
-            similarity_threshold=_float("CLARA_SIMILARITY_THRESHOLD", _DEFAULT_SIMILARITY_THRESHOLD),
-            archival_threshold=_float("CLARA_ARCHIVAL_THRESHOLD", _DEFAULT_ARCHIVAL_THRESHOLD),
-            event_stale_days=_int("CLARA_EVENT_STALE_DAYS", _DEFAULT_EVENT_STALE_DAYS),
-            skill_unused_days=_int("CLARA_SKILL_UNUSED_DAYS", _DEFAULT_SKILL_UNUSED_DAYS),
+            retrieval_top_k=_int(
+                "CLARA_RETRIEVAL_TOP_K", _DEFAULT_RETRIEVAL_TOP_K, minimum=1, maximum=1000
+            ),
+            similarity_threshold=_float(
+                "CLARA_SIMILARITY_THRESHOLD",
+                _DEFAULT_SIMILARITY_THRESHOLD,
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            archival_threshold=_float(
+                "CLARA_ARCHIVAL_THRESHOLD",
+                _DEFAULT_ARCHIVAL_THRESHOLD,
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            event_stale_days=_int(
+                "CLARA_EVENT_STALE_DAYS", _DEFAULT_EVENT_STALE_DAYS, minimum=1
+            ),
+            skill_unused_days=_int(
+                "CLARA_SKILL_UNUSED_DAYS", _DEFAULT_SKILL_UNUSED_DAYS, minimum=1
+            ),
             start_scheduler=_bool("CLARA_START_SCHEDULER", True),
-            cache_url=_str("CLARA_CACHE_URL", "memory://") if os.environ.get("CLARA_CACHE_URL") else None,
+            cache_url=_str("CLARA_CACHE_URL", "memory://") if os.environ.get("CLARA_CACHE_URL", "").strip() else None,
             auth_required=_bool("CLARA_AUTH_REQUIRED", _DEFAULT_AUTH_REQUIRED),
+            api_tokens=_api_tokens(),
             graph_enabled=_bool("CLARA_GRAPH_ENABLED", _DEFAULT_GRAPH_ENABLED),
             docs_enabled=_bool("CLARA_DOCS_ENABLED", _DEFAULT_DOCS_ENABLED),
         )

@@ -13,7 +13,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from clara.core.text import sanitize_memory_text
+
 GRAPH_TOKEN_BUDGET = 400
+
+# Node names are agent-supplied (they come from belief subjects/objects) and are
+# stored verbatim, so every one of them is sanitised at render time — this block
+# is concatenated onto the context the host model reads as trusted background.
+# Names are short by nature; the cap keeps one node from eating the budget.
+_NAME_MAX_LEN = 80
 
 
 def _approx_tokens(text: str) -> int:
@@ -27,24 +35,30 @@ def _date(value: Any, *, reconstructed: bool) -> str:
     return f"~{raw}" if reconstructed else raw
 
 
+def _safe(value: object) -> str:
+    return sanitize_memory_text(value, max_len=_NAME_MAX_LEN)
+
+
 def _display(node: dict[str, Any] | None, node_id: str) -> str:
     if node is None:
         return node_id[:8]
-    return str(node.get("display_name") or node.get("canonical_name") or node_id[:8])
+    name = node.get("display_name") or node.get("canonical_name") or node_id[:8]
+    return _safe(name) or node_id[:8]
 
 
 def format_edge_line(edge: dict[str, Any], nodes: dict[str, dict[str, Any]]) -> str:
     """One triple-shaped line for an edge."""
     src = _display(nodes.get(edge["src_id"]), edge["src_id"])
     dst = _display(nodes.get(edge["dst_id"]), edge["dst_id"])
+    relation = _safe(edge["relation"])
     reconstructed = edge.get("temporal_precision") == "reconstructed"
     if edge.get("invalid_at"):
         span = (
             f"{_date(edge.get('valid_from'), reconstructed=reconstructed)}"
             f" → {_date(edge.get('invalid_at'), reconstructed=False)}"
         )
-        return f"- ✗ {src} {edge['relation']} {dst} ({span})"
-    line = f"- {src} {edge['relation']} {dst} ({float(edge.get('confidence') or 0):.2f}"
+        return f"- ✗ {src} {relation} {dst} ({span})"
+    line = f"- {src} {relation} {dst} ({float(edge.get('confidence') or 0):.2f}"
     if reconstructed:
         line += f", since {_date(edge.get('valid_from'), reconstructed=True)}"
     line += ")"
@@ -66,7 +80,7 @@ def render_graph_section(
     for seed_display, edges in groups:
         lines = [format_edge_line(edge, nodes) for edge in edges]
         if lines:
-            sections.append((seed_display, lines))
+            sections.append((_safe(seed_display), lines))
     if not sections:
         return ""
 

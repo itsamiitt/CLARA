@@ -229,7 +229,18 @@ class ReflectionEngine:
         return list(result.scalars().all())
 
     async def run(self, user_id: str | None = None) -> list[UpdateResult]:
+        """Detect patterns and persist one insight each.
+
+        Must NOT be called inside an open transaction: each insight's LLM call
+        is made with no transaction held, then that single insight is persisted
+        in its own ``session.begin()``. Previously the whole per-user loop ran
+        inside one transaction, pinning the SQLite writer slot across every
+        pattern's network round-trip and rolling back all users' insights on a
+        single late failure.
+        """
         memories = await self.recent_memories(user_id=user_id)
+        # Release the read snapshot before the first network call.
+        await self._session.rollback()
         if not memories:
             return []
 
@@ -256,7 +267,8 @@ class ReflectionEngine:
                 is_negation=False,
                 raw_text=insight_text,
             )
-            stored.append(await self._updater.process(fact, user_id=user_id))
+            async with self._session.begin():
+                stored.append(await self._updater.process(fact, user_id=user_id))
 
         return stored
 
@@ -291,6 +303,17 @@ class ReflectionEngine:
                 prompt,
                 pattern,
             )
+        return self._degraded(pattern, f"unknown provider {provider!r}")
+
+    def _degraded(self, pattern: PatternCandidate, reason: str) -> str:
+        """Return the templated fallback, but WARN so a misconfigured provider
+        is visible. Previously this substitution was silent, so a missing API
+        key produced permanently-stored canned "insights" indistinguishable
+        from real ones."""
+        logger.warning(
+            "reflection degraded to template text (%s); insight for %r is not "
+            "LLM-generated", reason, f"{pattern.subject} {pattern.relation}",
+        )
         return fallback_reflection_text(pattern)
 
     def _model_name(self) -> str:
@@ -305,10 +328,10 @@ class ReflectionEngine:
 
     async def _call_openai(self, prompt: str, pattern: PatternCandidate) -> str:
         if _openai is None:
-            return fallback_reflection_text(pattern)
+            return self._degraded(pattern, "openai SDK not installed")
         api_key = os.environ.get(ENV_OPENAI_KEY)
         if not api_key:
-            return fallback_reflection_text(pattern)
+            return self._degraded(pattern, f"{ENV_OPENAI_KEY} not set")
 
         client = _openai.AsyncOpenAI(api_key=api_key)
         response = await client.chat.completions.create(
@@ -323,10 +346,10 @@ class ReflectionEngine:
 
     async def _call_anthropic(self, prompt: str, pattern: PatternCandidate) -> str:
         if _anthropic is None:
-            return fallback_reflection_text(pattern)
+            return self._degraded(pattern, "anthropic SDK not installed")
         api_key = os.environ.get(ENV_ANTHROPIC_KEY)
         if not api_key:
-            return fallback_reflection_text(pattern)
+            return self._degraded(pattern, f"{ENV_ANTHROPIC_KEY} not set")
 
         client = _anthropic.AsyncAnthropic(api_key=api_key)
         response = await client.messages.create(
@@ -357,10 +380,10 @@ class ReflectionEngine:
         message = getattr(response, "message", None)
         if message is not None:
             content = getattr(message, "content", "") or ""
-            return str(content).strip() or fallback_reflection_text(pattern)
+            return str(content).strip() or self._degraded(pattern, "empty ollama response")
         if isinstance(response, dict):
             payload = response.get("message", {})
             if isinstance(payload, dict):
                 content = str(payload.get("content", "") or "").strip()
-                return content or fallback_reflection_text(pattern)
-        return fallback_reflection_text(pattern)
+                return content or self._degraded(pattern, "empty ollama response")
+        return self._degraded(pattern, "unexpected ollama response shape")

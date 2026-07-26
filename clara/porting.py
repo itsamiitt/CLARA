@@ -25,6 +25,26 @@ from clara.db.migrations import SCHEMA_VERSION, ensure_schema, get_version
 
 FORMAT_VERSION = 1
 
+
+def _parse_ts(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp allowing the "T" or space separator.
+
+    Returns ``None`` for anything unparseable so callers can fall back to a
+    safe default (keep the existing row) rather than trust a lexical compare.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(text.replace(" ", "T", 1))
+        except ValueError:
+            return None
+
 # Canonical column order for the memories table (see _MEMORIES_DDL in
 # clara/db/migrations.py). The SQL column is named "metadata"; the ORM
 # attribute metadata_ is an implementation detail that must not leak into
@@ -186,7 +206,14 @@ def import_records(
         "skipped_content": 0,
         "conflicts_updated": 0,
         "skipped_secret": 0,
+        # Non-memory rows the export emits (graph:*, docs:*). Import does not
+        # replay them yet; the CLI surfaces this count so an --include-docs
+        # export doesn't silently lose attestations (which are unrebuildable
+        # judgments, unlike the graph).
         "other_kinds": 0,
+        # Body lines that were not valid JSON — surfaced so a truncated file
+        # is not mistaken for a clean import.
+        "skipped_malformed": 0,
     }
     conn = sqlite3.connect(db_path)
     try:
@@ -228,6 +255,7 @@ def import_records(
             try:
                 record = json.loads(line)
             except ValueError:
+                stats["skipped_malformed"] += 1
                 continue
             if record.get("kind") != "memory":
                 stats["other_kinds"] += 1
@@ -238,7 +266,15 @@ def import_records(
             record["memory_id"] = memory_id
 
             if not allow_secrets and security.secret_policy() != "off":
-                blob = json.dumps(record.get("content", {}), ensure_ascii=False)
+                # Scan metadata too (tags/provenance), matching the live write
+                # path — a credential in a tag must not slip through on import.
+                blob = json.dumps(
+                    {
+                        "content": record.get("content", {}),
+                        "metadata": record.get("metadata", {}),
+                    },
+                    ensure_ascii=False,
+                )
                 if security.find_secret(blob) is not None:
                     stats["skipped_secret"] += 1
                     continue
@@ -252,9 +288,13 @@ def import_records(
                     stats["skipped_id"] += 1
                     continue
                 if on_conflict == "newest":
-                    theirs = str(record.get("updated_at") or "")
-                    ours = str(existing[0] or "")
-                    if theirs <= ours:
+                    theirs = _parse_ts(record.get("updated_at"))
+                    ours = _parse_ts(existing[0])
+                    # Parse before comparing: timestamps in the wild mix the
+                    # "T" and space separators, and a lexical compare makes a
+                    # newer space-separated time lose to an older "T" one
+                    # (space 0x20 < "T" 0x54). Unparseable → keep existing.
+                    if theirs is None or ours is None or theirs <= ours:
                         stats["skipped_id"] += 1
                         continue
                 stats["conflicts_updated"] += 1

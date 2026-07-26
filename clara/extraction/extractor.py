@@ -217,7 +217,10 @@ async def _call_openai(text: str, model: str) -> str:
         temperature=0.0,
         response_format={"type": "json_object"},
     )
-    return response.choices[0].message.content or "[]"
+    # Return the raw content (even if empty). Coercing an empty completion to
+    # "[]" used to report status="ok" with zero facts, hiding a failed call as
+    # a successful no-fact extraction — let the parser flag it malformed.
+    return response.choices[0].message.content or ""
 
 
 async def _call_anthropic(text: str, model: str) -> str:
@@ -245,8 +248,10 @@ async def _call_anthropic(text: str, model: str) -> str:
         messages=[{"role": "user", "content": text}],
         temperature=0.0,
     )
-    # Anthropic returns content as a list of content blocks
-    return response.content[0].text or "[]"
+    # Anthropic returns content as a list of content blocks. Return raw (even
+    # if empty) so an empty completion is flagged malformed rather than masked
+    # as a successful zero-fact extraction.
+    return response.content[0].text or ""
 
 
 def _ensure_ollama_model(base_url: str, model: str) -> None:

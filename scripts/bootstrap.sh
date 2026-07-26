@@ -20,8 +20,9 @@ set -u
 
 log() { printf 'clara: %s\n' "$*" >&2; }
 
-# Venv binary layouts: POSIX bin/, Windows Scripts/ (best-effort — the plugin
-# targets macOS/Linux/WSL; see README "Supported platforms").
+# Venv binary layouts: POSIX bin/, Windows Scripts/. macOS, Linux, WSL, and
+# native Windows are all first-class (native Windows uses the .ps1 scripts;
+# this bash path also runs under Git Bash). See README "Supported platforms".
 # Keep in sync with clara-mcp-launch.sh / session-start.sh.
 find_bin() {
   for _cand in "$1/bin/$2" "$1/Scripts/$2" "$1/Scripts/$2.exe"; do

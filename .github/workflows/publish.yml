@@ -57,11 +57,20 @@ jobs:
       - name: Install from wheel
         run: |
           python -m pip install --upgrade pip
-          pip install dist/*.whl
-          pip install pytest pytest-asyncio pytest-mock aiosqlite hypothesis
+          # Install the wheel WITH its test extras so the API/MCP suites run
+          # instead of importorskip-ing away. Previously the minimal deps meant
+          # a green run proved almost nothing about the wheel.
+          pip install "$(echo dist/*.whl)[dev,api,mcp]"
 
-      - name: Run tests
-        run: pytest --tb=short -q
+      - name: Run tests against the installed wheel
+        # Run from a throwaway dir with --pyargs so the imported package is the
+        # installed wheel, not the ./clara source tree that would otherwise
+        # shadow it at the repo root.
+        run: |
+          mkdir -p _wheel_test && cd _wheel_test
+          cp -r ../tests ./tests
+          cp ../pyproject.toml ./pyproject.toml
+          pytest tests --tb=short -q -p no:cacheprovider
 
   publish:
     name: Publish to PyPI

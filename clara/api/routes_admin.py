@@ -1,16 +1,40 @@
-"""Administrative and dashboard-style API routes."""
+"""Administrative and dashboard-style API routes.
+
+Every route here is scoped to the authenticated user, exactly like
+``routes_memory``. These endpoints return full memory ``content``, so an
+unscoped query would hand any authenticated caller every other user's
+memories — they are no more privileged than ``/memory/search`` and must not
+read as a cross-tenant view.
+"""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from clara.agent import ClaraMemory
-from clara.api.dependencies import get_agent, get_current_user, get_session
+from clara.api.dependencies import (
+    get_agent,
+    get_current_user,
+    get_session,
+    resolve_user_scope,
+)
 from clara.db.models import Memory, MemoryStatus, MemoryType
 
 router = APIRouter()
+
+
+def _scope_filters(current_user: str | None) -> list[ColumnElement[bool]]:
+    """Row filter for the caller. Empty in local unauthenticated mode."""
+    effective_user_id = resolve_user_scope(
+        requested_user_id=None,
+        current_user=current_user,
+    )
+    if effective_user_id is None:
+        return []
+    return [Memory.user_id == effective_user_id]
 
 
 def _memory_payload(memory: Memory) -> dict[str, object]:
@@ -34,6 +58,7 @@ async def stats(
     rows = (
         await session.execute(
             select(Memory.memory_type, Memory.status, func.count())
+            .where(*_scope_filters(current_user))
             .group_by(Memory.memory_type, Memory.status)
             .order_by(Memory.memory_type, Memory.status)
         )
@@ -55,7 +80,7 @@ async def conflicts(
     rows = (
         await session.execute(
             select(Memory)
-            .where(Memory.status == MemoryStatus.superseded)
+            .where(Memory.status == MemoryStatus.superseded, *_scope_filters(current_user))
             .order_by(Memory.updated_at.desc())
             .limit(limit)
         )
@@ -84,6 +109,7 @@ async def decay_report(
             .where(Memory.memory_type == MemoryType.belief)
             .where(Memory.status == MemoryStatus.active)
             .where(Memory.confidence < threshold)
+            .where(*_scope_filters(current_user))
             .order_by(Memory.confidence.asc(), Memory.updated_at.asc())
             .limit(limit)
         )
@@ -102,6 +128,7 @@ async def skills_leaderboard(
             select(Memory)
             .where(Memory.memory_type == MemoryType.skill)
             .where(Memory.status == MemoryStatus.active)
+            .where(*_scope_filters(current_user))
             .order_by(Memory.confidence.desc())
             .limit(limit * 10)
         )

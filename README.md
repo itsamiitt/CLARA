@@ -1,8 +1,5 @@
-<!-- Badges -->
-<p align="center">
-  <a href="https://pypi.org/project/clara-memory/"><img src="https://img.shields.io/pypi/v/clara-memory?color=blue&label=PyPI" alt="PyPI version"></a>
-  <a href="https://pypi.org/project/clara-memory/"><img src="https://img.shields.io/pypi/pyversions/clara-memory?label=Python" alt="Python 3.10+"></a>
-</p>
+<!-- Badges: PyPI badges intentionally omitted until the package is published
+     (they would render "not found"). Re-add once a v* tag ships to PyPI. -->
 
 <h1 align="center">CLARA</h1>
 <p align="center"><b>Cognitive Living Architecture for Reliable Agents</b></p>
@@ -53,6 +50,11 @@ CLARA is installing in the background — memory will be available next session.
 The build takes ~30–60 s (once per plugin version). **From the second session
 on**, your memory context is injected automatically at session start and the
 `memory_*` tools are live. Nothing blocks the session while it installs.
+
+Because the `memory` MCP server points at a shim the bootstrap creates, that
+server is not available during the very first session (and briefly into the
+second if the build is still running) — expected, not an error. Warm it up
+front to skip the wait.
 
 **Warm it up front (optional)** so the first session already has memory:
 
@@ -201,7 +203,14 @@ clara restore FILE [--force]            replace the store with a snapshot
 clara sync [export|import|status]       bridge to Claude Code native memory
 clara statusline                        one-line summary for a statusLine command
 clara mcp                               run the MCP stdio server (same as clara-mcp)
+clara uninstall [--purge-memories]      remove the private venv/shim/logs (keeps memories)
+
+clara docs scan|status|report|archive|restore    doc-curator ledger operations
+clara graph rebuild|stats|show|path|doctor|merge|export   knowledge-graph operations
 ```
+
+The `docs` and `graph` groups are also reachable as the `/clara:docs` and
+`/clara:graph` slash commands inside Claude Code.
 
 ### Native-memory bridge
 
@@ -263,11 +272,61 @@ CLARA_DOCS_ENABLED=0    # no doc curator: docs tools disabled, scan no-ops,
 ```bash
 CLARA_SECRET_POLICY=reject      # reject (default) | redact | off — refuses to
                                 # store credential-shaped content (store a
-                                # reference, not the secret)
+                                # reference, not the secret). redact scrubs
+                                # every field (subject/object/properties/steps/
+                                # tags/…), not just the top-level strings.
 CLARA_MAX_CONTENT_BYTES=16384   # per-memory content cap
 CLARA_BACKUP_KEEP=7             # rotated snapshots kept in backups/
 CLARA_QUERY_EXPANSION=0         # disable dev-vocabulary synonym expansion
 ```
+
+### Retrieval / decay tuning
+
+Invalid or out-of-range values are logged at WARNING and fall back to the
+default (they are never applied silently):
+
+```bash
+CLARA_RETRIEVAL_TOP_K=8          # default results per query (1–1000)
+CLARA_SIMILARITY_THRESHOLD=0.82  # duplicate-detection cosine cutoff (0–1)
+CLARA_ARCHIVAL_THRESHOLD=0.15    # auto-archive below this confidence (0–1)
+CLARA_EVENT_STALE_DAYS=90        # prune unlinked events older than this
+CLARA_SKILL_UNUSED_DAYS=60       # deprecate skills unused this long
+```
+
+### REST API auth (optional `[api]` tier)
+
+The API is off by default and, when run, binds `127.0.0.1`. It has no
+implicit identity — enable real auth before exposing it:
+
+```bash
+CLARA_AUTH_REQUIRED=true                 # require a bearer token
+CLARA_API_TOKENS=alice:s3cret-…,bob:…    # user:token pairs (token ≥16 chars)
+CLARA_API_HOST=127.0.0.1                 # bind address (default loopback)
+CLARA_CORS_ORIGINS=https://app.example   # explicit origins; "*" disables creds
+```
+
+With `CLARA_AUTH_REQUIRED=true` the app refuses to start unless tokens are set,
+and every route (including `/admin/*`) is scoped to the token's user.
+
+### Repo policy (`clara.yml`)
+
+Teams tune the doc curator and knowledge graph with a committed `clara.yml` at
+the repository root: document tiers, type patterns, staleness windows, archive
+behavior, and terminology aliases. See [`clara.yml.example`](clara.yml.example)
+for the full shape. `archive_dir` must be a repo-relative path (absolute or
+`..` values are rejected at load time).
+
+## Removing CLARA
+
+Disable it from Claude Code via `/plugin`, then remove the state it wrote:
+
+```bash
+clara uninstall            # removes the private venv, shim, and install log
+rm -rf ~/.clara            # ALSO removes the memory store — omit to keep memories
+```
+
+`clara uninstall` never deletes your memory database; drop `~/.clara`
+separately only if you want the stored memories gone too.
 
 ## Troubleshooting
 
@@ -446,7 +505,16 @@ pytest -m stress      # heavy concurrency tier
 ```
 
 The suite runs entirely without API keys or network — all providers are
-faked; SQLite, FTS5, and LanceDB run embedded and real.
+faked. SQLite and FTS5 run embedded and real; LanceDB is provisioned with a
+real per-test path, but vector ranking itself is exercised through fakes
+(the ANN ordering is not asserted end-to-end).
+
+Lint and type checks (enforced in CI, not optional):
+
+```bash
+ruff check clara tests
+mypy clara
+```
 
 ## Project documents
 

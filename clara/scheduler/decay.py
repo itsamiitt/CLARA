@@ -1,19 +1,21 @@
 """
 CLARA — Decay Scheduler
 
-Runs two scheduled jobs using APScheduler:
+Runs three scheduled jobs using APScheduler:
 
 1. **Daily confidence decay** (every day at 02:00 UTC)
    Applies exponential decay to every active memory record:
 
        confidence_t = confidence_0 × e^(−decay_rate × days_since_updated)
 
-   Decay rates (stored per-record in ``Memory.decay_rate``):
+   Decay rates (stored per-record in ``Memory.decay_rate``; keep in sync with
+   the per-store constants that write them — clara.memory.belief/skill/
+   world_model and clara.update.engine):
      - belief_stable   → 0.005
      - belief_volatile → 0.02
-     - event           → 0.0   (events never decay)
-     - skill           → 0.01
-     - world_model     → 0.03
+     - event           → 0.0    (events never decay)
+     - skill           → 0.02   (SKILL_DECAY_RATE)
+     - world_model     → 0.005  (WORLD_MODEL_DECAY_RATE)
 
    Records whose confidence drops below the archival threshold (0.15)
    are set to ``status = "archived"``, except skills, which remain active
@@ -22,6 +24,9 @@ Runs two scheduled jobs using APScheduler:
 2. **Weekly pruning** (every Sunday at 02:30 UTC)
    - Archive events older than 90 days that have no linked beliefs.
    - Deprecate skills unused for more than 60 days.
+
+3. **Daily reflection** (every day at 03:00 UTC)
+   Generate tenant-scoped insight beliefs from recent memories.
 """
 
 from __future__ import annotations
@@ -68,6 +73,17 @@ def _ensure_aware(dt: datetime) -> datetime:
     return dt
 
 
+def _id_cursor(memory_id: object) -> str:
+    """Keyset cursor string matching ``cast(memory_id, String)`` on SQLite.
+
+    SQLite stores ``Uuid`` as 32-char dashless hex, so the cursor must be the
+    dashless form for the ``>`` comparison to advance correctly. Accepts a
+    ``uuid.UUID`` (``.hex``) or a string the driver already returned.
+    """
+    hex_attr = getattr(memory_id, "hex", None)
+    return hex_attr if isinstance(hex_attr, str) else str(memory_id).replace("-", "")
+
+
 def _decay_anchor(record: Memory) -> datetime:
     """Use the last decay timestamp when present, else fall back to updated_at."""
     meta = dict(record.metadata_) if record.metadata_ else {}
@@ -80,19 +96,27 @@ def _decay_anchor(record: Memory) -> datetime:
     return _ensure_aware(record.updated_at)
 
 def _skill_last_used(record: Memory) -> datetime:
-    """Last real usage of a skill: ``metadata.last_used`` (stamped by
-    SkillStore.record_outcome) when parseable, else ``created_at``.
+    """Last real usage of a skill: the most recent of ``metadata.last_used``
+    (stamped by SkillStore.record_outcome) and ``metadata.last_accessed``
+    (stamped when the skill is a search hit), else ``created_at``.
 
-    Deliberately ignores ``updated_at``, which the daily decay job resets
-    every night via the ORM ``onupdate`` hook.
+    A skill surfaced in context every day but never explicitly outcome-scored
+    was previously deprecated after 60 days because only ``last_used`` was
+    consulted while access recording writes ``last_accessed``. Deliberately
+    ignores ``updated_at``, which the daily decay job resets every night via
+    the ORM ``onupdate`` hook.
     """
     meta = dict(record.metadata_) if record.metadata_ else {}
-    last_used_raw = meta.get("last_used")
-    if isinstance(last_used_raw, str):
-        try:
-            return _ensure_aware(datetime.fromisoformat(last_used_raw))
-        except ValueError:
-            pass
+    candidates: list[datetime] = []
+    for key in ("last_used", "last_accessed"):
+        raw = meta.get(key)
+        if isinstance(raw, str):
+            try:
+                candidates.append(_ensure_aware(datetime.fromisoformat(raw)))
+            except ValueError:
+                pass
+    if candidates:
+        return max(candidates)
     return _ensure_aware(record.created_at)
 
 
@@ -245,7 +269,12 @@ class DecayScheduler:
                 rows = (await session.execute(stmt)).all()
                 if not rows:
                     break
-                last_id = max(str(row.memory_id) for row in rows)
+                # Cursor must match what `cast(memory_id, String)` produces —
+                # SQLite stores Uuid as 32-char dashless hex, so the dashed
+                # str(uuid) form used previously sorted below every hex digit
+                # and re-fetched the prior batch's max row forever (the weekly
+                # skill loop already uses .hex; keep them consistent).
+                last_id = max(_id_cursor(row.memory_id) for row in rows)
 
                 pending: list[dict[str, object]] = []
                 archive_pending: list[dict[str, object]] = []
@@ -398,7 +427,7 @@ class DecayScheduler:
                 )
                 if not active_skills:
                     break
-                last_id = max(str(s.memory_id.hex) for s in active_skills)
+                last_id = max(_id_cursor(s.memory_id) for s in active_skills)
 
                 for skill in active_skills:
                     last_used = _skill_last_used(skill)
@@ -431,29 +460,33 @@ class DecayScheduler:
         insights_generated = 0
 
         async with self._session_factory() as session:
-            async with session.begin():
-                result = await session.execute(select(Memory.user_id).distinct())
-                user_ids = list(result.scalars().all())
-                concrete_user_ids = sorted({user_id for user_id in user_ids if user_id is not None})
-                has_legacy_rows = any(user_id is None for user_id in user_ids)
+            # No outer transaction: ReflectionEngine.run() opens a write
+            # transaction per insight so the per-user LLM calls are not made
+            # while a transaction is held. The user-list read below releases
+            # its own snapshot before run() is called.
+            result = await session.execute(select(Memory.user_id).distinct())
+            user_ids = list(result.scalars().all())
+            await session.rollback()
+            concrete_user_ids = sorted({user_id for user_id in user_ids if user_id is not None})
+            has_legacy_rows = any(user_id is None for user_id in user_ids)
 
-                reflection = ReflectionEngine(
-                    session,
-                    self._embedding_engine,
-                    llm_provider=self._llm_provider or "openai",
-                    llm_model=self._llm_model,
-                    insight_generator=self._reflection_generator,
-                )
+            reflection = ReflectionEngine(
+                session,
+                self._embedding_engine,
+                llm_provider=self._llm_provider or "openai",
+                llm_model=self._llm_model,
+                insight_generator=self._reflection_generator,
+            )
 
-                for user_id in concrete_user_ids:
-                    results = await reflection.run(user_id=user_id)
-                    users_processed += 1
-                    insights_generated += len(results)
+            for user_id in concrete_user_ids:
+                results = await reflection.run(user_id=user_id)
+                users_processed += 1
+                insights_generated += len(results)
 
-                if not concrete_user_ids and has_legacy_rows:
-                    results = await reflection.run(user_id=None)
-                    users_processed += 1
-                    insights_generated += len(results)
+            if not concrete_user_ids and has_legacy_rows:
+                results = await reflection.run(user_id=None)
+                users_processed += 1
+                insights_generated += len(results)
 
         summary = {
             "users_processed": users_processed,

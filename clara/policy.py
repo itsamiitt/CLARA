@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -115,6 +115,25 @@ def _as_str(value: object, *, path: Path, key: str, non_empty: bool = False) -> 
     return value
 
 
+def _as_repo_relative_dir(value: str, *, path: Path, key: str) -> str:
+    """Reject a directory that would escape the repository.
+
+    ``clara.yml`` is committed to the repo, so cloning an untrusted repository
+    imports its policy. This value later feeds a ``mkdir -p`` and a ``git mv``,
+    so an absolute path or one containing ``..`` must be refused at load time
+    rather than at the (also-guarded) move site.
+    """
+    cleaned = value.strip().replace("\\", "/")
+    parts = [part for part in cleaned.split("/") if part not in ("", ".")]
+    if PurePosixPath(cleaned).is_absolute() or Path(cleaned).is_absolute():
+        raise ValueError(f"{path}: {key} must be relative to the repository root")
+    if ".." in parts:
+        raise ValueError(f"{path}: {key} must not contain '..'")
+    if not parts:
+        raise ValueError(f"{path}: {key} must name a directory")
+    return "/".join(parts)
+
+
 def _as_str_list(value: object, *, path: Path, key: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{path}: {key} must be a list of strings, got {value!r}")
@@ -172,8 +191,10 @@ def load_policy(root: str | os.PathLike[str] | None = None) -> Policy:
     if "version" in raw:
         kwargs["version"] = _as_int(raw["version"], path=path, key="version")
     if "archive_dir" in raw:
-        kwargs["archive_dir"] = _as_str(
-            raw["archive_dir"], path=path, key="archive_dir", non_empty=True
+        kwargs["archive_dir"] = _as_repo_relative_dir(
+            _as_str(raw["archive_dir"], path=path, key="archive_dir", non_empty=True),
+            path=path,
+            key="archive_dir",
         )
     if "tiers" in raw:
         kwargs["tiers"] = _as_pattern_map(raw["tiers"], path=path, key="tiers")

@@ -26,7 +26,6 @@ from clara.extraction.extractor import (
     ENV_OPENAI_KEY,
     LLM_MAX_RETRIES,
     LLM_TIMEOUT_SECONDS,
-    ExtractedFact,
     FactExtractor,
     _anthropic,
     _openai,
@@ -111,12 +110,22 @@ class ReasoningEngine:
         system_prompt: str | None = None,
         top_k: int = 8,
     ) -> ReasoningResponse:
-        """Run retrieval, reasoning, and response-fact persistence."""
+        """Run retrieval, reasoning, and response-fact persistence.
+
+        The three phases keep separate transaction boundaries: retrieval reads,
+        then the read snapshot is released *before* the LLM call so the writer
+        slot is not held across a network round-trip, then persistence runs in
+        its own write transaction. The caller must NOT wrap this in an open
+        transaction, or the release below is a no-op.
+        """
         retrieval_result, memory_context = await self._assembler.assemble(
             query,
             user_id=user_id,
             top_k=top_k,
         )
+        # Release any implicit read transaction before the network call.
+        await self._session.rollback()
+
         response_text = await self._generate_response(
             query,
             memory_context,
@@ -124,18 +133,28 @@ class ReasoningEngine:
         )
 
         stored: list[UpdateResult] = []
-        if response_text.strip():
-            facts = await self._extractor.extract(response_text)
-            for fact in facts:
-                # These facts come from the assistant's own generated reply,
-                # not from the user. The extractor's default source_type is
-                # "user_direct" (trust weight 1.0), which would let a
-                # hallucinated claim supersede a genuine user-stated belief
-                # at the >0.6 confidence threshold. Downgrade to
-                # agent_inference (0.5) so model output can never outrank
-                # what the user actually said.
-                fact = replace(fact, source_type="agent_inference")
-                stored.append(await self._updater.process(fact, user_id=user_id))
+        async with self._session.begin():
+            # Persist what the USER said first, at full trust. Previously only
+            # the assistant's reply was extracted, so a fact stated by the user
+            # ("I switched to Rust") was stored only if the model happened to
+            # restate it — and then at the downgraded agent_inference weight.
+            # Extract the user's own text at user_direct (the extractor's
+            # default) so it can supersede stale beliefs like remember() does.
+            if query.strip():
+                for fact in await self._extractor.extract(query):
+                    stored.append(await self._updater.process(fact, user_id=user_id))
+            if response_text.strip():
+                facts = await self._extractor.extract(response_text)
+                for fact in facts:
+                    # These facts come from the assistant's own generated reply,
+                    # not from the user. The extractor's default source_type is
+                    # "user_direct" (trust weight 1.0), which would let a
+                    # hallucinated claim supersede a genuine user-stated belief
+                    # at the >0.6 confidence threshold. Downgrade to
+                    # agent_inference (0.5) so model output can never outrank
+                    # what the user actually said.
+                    fact = replace(fact, source_type="agent_inference")
+                    stored.append(await self._updater.process(fact, user_id=user_id))
 
         return ReasoningResponse(
             text=response_text,

@@ -21,11 +21,23 @@ BEGIN_PREFIX = "<!-- clara:begin"
 END_MARKER = "<!-- clara:end -->"
 PROVENANCE_RE = re.compile(r"<!--clara:[0-9a-f]{8}-->")
 
+FENCE_VERSION = 1
+
 _FENCE_RE = re.compile(
     r"<!-- clara:begin v=(?P<version>\d+) store=(?P<store>[a-z]+) "
     r"sha=(?P<sha>[0-9a-f]{12}) ts=(?P<ts>[^ ]+) -->\n"
     r"(?P<body>.*?)"
     r"<!-- clara:end -->",
+    re.DOTALL,
+)
+
+# Lenient recognizer: any begin marker through the next end marker, even when
+# the attribute line is malformed (an edited sha, a rewritten ts) or carries a
+# newer version. Used to tell "no fence" apart from "a fence we can't parse" so
+# a perturbed fence is treated as a conflict instead of triggering a second
+# fence to be appended on every subsequent export.
+_LOOSE_FENCE_RE = re.compile(
+    re.escape(BEGIN_PREFIX) + r".*?" + re.escape(END_MARKER),
     re.DOTALL,
 )
 
@@ -68,12 +80,29 @@ def replace_section(text: str, new_body: str, *, store: str, ts: str) -> SpliceR
     fence = render_fence(new_body, store=store, ts=ts)
     match = find_fence(text)
     if match is None:
+        loose = _LOOSE_FENCE_RE.search(text)
+        if loose is not None:
+            # A fence is present but unparseable (edited attribute line, or a
+            # newer version we don't understand). Treat it as a conflict and
+            # leave the file untouched — appending a fresh fence here is what
+            # caused duplicate fences to accumulate.
+            body = loose.group(0)
+            inner = body[len(BEGIN_PREFIX):-len(END_MARKER)]
+            _, _, after = inner.partition("-->")
+            return SpliceResult(
+                text=text, changed=False, conflict_body=(after or inner).strip("\n")
+            )
         prefix = text
         if prefix and not prefix.endswith("\n"):
             prefix += "\n"
         if prefix.strip():
             prefix += "\n"
         return SpliceResult(text=prefix + fence + "\n", changed=True, conflict_body=None)
+
+    if int(match.group("version")) != FENCE_VERSION:
+        # Recognised shape but a newer version — do not rewrite it with a v1
+        # body; surface the body so the caller can import and a human resolves.
+        return SpliceResult(text=text, changed=False, conflict_body=match.group("body"))
 
     on_disk_body = match.group("body")
     recorded_sha = match.group("sha")
@@ -88,5 +117,10 @@ def replace_section(text: str, new_body: str, *, store: str, ts: str) -> SpliceR
 
 
 def strip_fences(text: str) -> str:
-    """Text with every CLARA fence removed — the import view of a file."""
-    return _FENCE_RE.sub("", text)
+    """Text with every CLARA fence removed — the import view of a file.
+
+    Strips well-formed fences first, then any leftover malformed fence
+    (begin…end) so a perturbed marker's comment lines are never re-imported as
+    memory content.
+    """
+    return _LOOSE_FENCE_RE.sub("", _FENCE_RE.sub("", text))
