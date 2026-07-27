@@ -270,7 +270,7 @@ The build takes about two minutes, once per plugin version (measured on a
 Windows machine using the bundled interpreter, three cold installs: 113 s,
 114 s and 130 s; a warm pip cache and a faster disk cut it). **From the second
 session on**, your memory context is
-injected automatically at session start and the `memory_*` tools are live.
+injected automatically at session start and the `memory_*` tools are live. The block ends with a `[MEMORY PROTOCOL]` footer that tells the model, every session, to save facts the moment they appear, batch with `memory_save_many`, and search before asking — real-time memory is an instruction the session starts with, not a habit it must remember.
 Nothing blocks the session while it installs.
 
 Because the `memory` MCP server points at a shim the bootstrap creates, that

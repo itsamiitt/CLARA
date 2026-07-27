@@ -15,8 +15,11 @@ sanitizer is a scanner port of ``clara.core.text.sanitize_memory_text``
 (kept in lockstep by a parity test).
 
 Output contract: at most ``TOKEN_BUDGET`` (approx.) tokens — over budget the
-oldest entries are dropped first; an empty or missing store emits nothing;
-exit code is always 0.
+oldest entries are dropped first. The protocol footer is emitted on every
+usable session, including a missing or empty store (a first session is when
+the model most needs telling to save); only an unusable store — schema too
+new, unreadable — silences it, because its advice would then be known-bad.
+Exit code is always 0.
 """
 
 from __future__ import annotations
@@ -338,6 +341,28 @@ _PROJECT_ROWS: tuple[tuple[str, str], ...] = (
 _PROJECT_MAX_PER_ROW = 4
 
 
+def build_protocol_block() -> str:
+    """Standing instructions for the session: the tools are live, use them NOW.
+
+    Static text, no store access. This ships in the same plugin as the MCP
+    server, so if this hook ran, the memory tools are configured; the last
+    line covers the one state where they are configured but not attached.
+    """
+    return (
+        "[MEMORY PROTOCOL]\n"
+        "CLARA memory tools are connected over MCP (memory_*). Use them in "
+        "real time, not at session end:\n"
+        "- save each durable fact the moment it appears (memory_save; two or "
+        "more at once -> one memory_save_many call, never parallel saves)\n"
+        "- memory_search before asking the user for preferences, stack "
+        "choices or past decisions — the answer may already be stored\n"
+        "- on a correction, save the new belief and negate the old one "
+        "(is_negation: true)\n"
+        "- if the memory_* tools are missing from your tool list, say so and "
+        "suggest /mcp or a session restart — do not silently skip saving"
+    )
+
+
 def build_project_block(cwd: str) -> str | None:
     """Render a compact ``[PROJECT]`` header for the repo at *cwd*.
 
@@ -464,14 +489,21 @@ def main(argv: list[str] | None = None) -> int:
     if os.environ.get("CLARA_FASTPATH_DEBUG"):
         print(f"clara fastpath: repo_id={rid} store={db_path}", file=sys.stderr)
     block: str | None = None
+    store_unusable = False
     if db_path is not None:
         conn = db.open_store(db_path)
-        if conn is not None:
+        if conn is None:
+            # Schema newer than this code: the server will refuse writes too,
+            # so the protocol footer's "save in real time" would be bad
+            # advice. This is the one state where the footer stays silent.
+            store_unusable = True
+        else:
             try:
                 memories = db.fetch_active(conn)
                 block = build_context(memories, time.time(), rid)
             except sqlite3.Error as exc:
                 print(f"clara fastpath: {db_path}: read failed ({exc})", file=sys.stderr)
+                store_unusable = True
             finally:
                 conn.close()
     # The project header goes first: it frames everything below it, and it is
@@ -501,6 +533,21 @@ def main(argv: list[str] | None = None) -> int:
         if block or project_block:
             print()
         print(map_block)
+
+    # The protocol footer is the difference between memory that exists and
+    # memory that gets used. The block above shows *content*; nothing told
+    # the model the tools are live or that saving happens in real time --
+    # observed: an agent finished a whole audit, then fired its saves in one
+    # end-of-session burst against a wedged server and lost half of them.
+    # Emitted even when the store is missing or empty, because a brand-new
+    # user's first session is exactly when the model must start saving
+    # unprompted. The one silent state is an unusable store (schema too new,
+    # unreadable): the server will refuse writes there, and instructing the
+    # model to save in real time against it would be advice known to fail.
+    if not store_unusable:
+        if block or project_block or map_block:
+            print()
+        print(build_protocol_block())
     return 0
 
 

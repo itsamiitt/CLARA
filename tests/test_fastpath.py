@@ -102,9 +102,18 @@ class TestContextOutput:
 
         proc = _run_context(tmp_path, _clean_env(tmp_path))
         assert proc.returncode == 0, proc.stderr
-        assert proc.stdout.strip() == expected.strip()
-        assert "=== MEMORY CONTEXT ===" in proc.stdout
+        # Parity is over the MEMORY CONTEXT block only: the hook also emits
+        # the protocol footer (and, in a real repo, project/docs blocks),
+        # which recent() deliberately does not — it is context for a model,
+        # not instructions for one.
+        start = proc.stdout.index("=== MEMORY CONTEXT ===")
+        end = proc.stdout.index("=== END MEMORY CONTEXT ===") + len(
+            "=== END MEMORY CONTEXT ==="
+        )
+        assert proc.stdout[start:end].strip() == expected.strip()
         assert "ripgrep over grep" in proc.stdout
+        # The footer must be present and after the block, every session.
+        assert "[MEMORY PROTOCOL]" in proc.stdout[end:]
 
     async def test_global_env_store_used(self, tmp_path):
         store = tmp_path / "global.db"
@@ -119,12 +128,15 @@ class TestContextOutput:
         assert proc.returncode == 0, proc.stderr
         assert "=== MEMORY CONTEXT ===" in proc.stdout
 
-    def test_no_store_emits_nothing(self, tmp_path):
+    def test_no_store_emits_only_the_protocol(self, tmp_path):
+        # A missing store is the first-session state: no content to show,
+        # but the footer is exactly what teaches the model to start saving.
         proc = _run_context(tmp_path, _clean_env(tmp_path))
         assert proc.returncode == 0, proc.stderr
-        assert proc.stdout == ""
+        assert "=== MEMORY CONTEXT ===" not in proc.stdout
+        assert proc.stdout.strip().startswith("[MEMORY PROTOCOL]")
 
-    async def test_empty_store_emits_nothing(self, tmp_path):
+    async def test_empty_store_emits_only_the_protocol(self, tmp_path):
         store = tmp_path / ".clara" / "clara.db"
         store.parent.mkdir(parents=True)
         memory = await LocalMemory.create(str(store))
@@ -132,7 +144,8 @@ class TestContextOutput:
 
         proc = _run_context(tmp_path, _clean_env(tmp_path))
         assert proc.returncode == 0, proc.stderr
-        assert proc.stdout == ""
+        assert "=== MEMORY CONTEXT ===" not in proc.stdout
+        assert "[MEMORY PROTOCOL]" in proc.stdout
 
     def test_newer_schema_emits_nothing_and_warns(self, tmp_path):
         store = tmp_path / ".clara" / "clara.db"
@@ -147,6 +160,9 @@ class TestContextOutput:
 
         proc = _run_context(tmp_path, _clean_env(tmp_path))
         assert proc.returncode == 0
+        # Unusable store: no content AND no protocol — telling the model to
+        # save in real time against a store the server will refuse to write
+        # would be advice known to fail.
         assert proc.stdout == ""
         assert "newer" in proc.stderr
 
@@ -378,3 +394,31 @@ class TestOutputEncodingIsNeverFatal:
         proc = _run_context(tmp_path, env)
         assert proc.returncode == 0, proc.stderr[-300:]
         assert "MEMORY CONTEXT" in proc.stdout
+
+
+class TestProtocolFooter:
+    """The block shows content; the footer makes the model USE the tools.
+
+    Observed without it: an agent finished a whole audit, then fired every
+    save in one end-of-session burst against a wedged server and lost half.
+    Real-time saving is a behaviour the session has to be told about at the
+    moment it starts — a skill only helps once it is invoked.
+    """
+
+    def test_emitted_even_on_an_empty_store(self, tmp_path):
+        # A brand-new user's first session is exactly when the model must
+        # start saving unprompted; an empty store must not mute the protocol.
+        proc = _run_context(tmp_path, _clean_env(tmp_path))
+        assert proc.returncode == 0
+        assert "[MEMORY PROTOCOL]" in proc.stdout
+        assert "memory_save_many" in proc.stdout
+        assert "real time" in proc.stdout
+
+    def test_tells_the_model_what_to_do_when_tools_are_missing(self, tmp_path):
+        proc = _run_context(tmp_path, _clean_env(tmp_path))
+        assert "/mcp" in proc.stdout
+        assert "do not silently skip saving" in proc.stdout
+
+    def test_search_before_asking_is_standing_policy(self, tmp_path):
+        proc = _run_context(tmp_path, _clean_env(tmp_path))
+        assert "memory_search before asking" in proc.stdout
