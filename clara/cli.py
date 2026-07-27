@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import shutil
@@ -990,7 +991,34 @@ async def _cmd_sync(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _make_output_lossy() -> None:
+    """Never let an un-encodable character fail a command.
+
+    CLARA's own output uses a handful of non-ASCII glyphs (em dashes, arrows,
+    check marks). Windows consoles still run legacy code pages, and anything
+    under ``LC_ALL=C`` or ``PYTHONIOENCODING=ascii`` gets an ASCII stdout.
+    Printing an em dash there raises UnicodeEncodeError, which argparse does
+    not catch: verified before this existed, ``clara sync`` died with
+
+        error: 'ascii' codec can't encode character '\\u2014' ... (exit 70)
+
+    after having already done the import — so the work succeeded and the
+    command still reported failure. Degrading one glyph to "?" is strictly
+    better than failing a command that worked.
+
+    Mirrors _make_stdout_lossy in clara/fastpath/context.py, which fixed the
+    same class of bug on the session-start path. stderr is reconfigured too:
+    that is where the error text above was written.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        # Not every stream is reconfigurable (a pipe, pytest's capture object);
+        # that is fine, it just means there is nothing to harden here.
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+
+
 def main(argv: list[str] | None = None) -> None:
+    _make_output_lossy()
     parser = argparse.ArgumentParser(
         prog="clara",
         description="CLARA memory: zero-key persistent memory for coding agents.",

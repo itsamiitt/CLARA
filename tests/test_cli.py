@@ -149,3 +149,66 @@ class TestProjectGitignore:
         assert _run(["init", "--project", "--agent", "generic"]) == 0
         assert (clara_dir / ".gitignore").read_text(encoding="utf-8") == custom
         assert "warning:" not in capsys.readouterr().err
+
+
+class TestAsciiConsole:
+    """CLARA must not fail a command because the console is legacy-encoded.
+
+    Windows consoles still run legacy code pages, and LC_ALL=C or
+    PYTHONIOENCODING=ascii both produce an ASCII stdout. CLARA's output uses a
+    few non-ASCII glyphs, and printing one there raises UnicodeEncodeError.
+    argparse does not catch it, so `clara sync` exited 70 *after* completing the
+    import -- the work succeeded and the command still reported failure.
+
+    Exercised through a real subprocess: the bug lives in how the interpreter
+    configures stdout at startup, which in-process capture replaces and would
+    therefore hide.
+    """
+
+    def _clara(self, args, cwd, env_extra):
+        import os
+        import subprocess
+        import sys
+
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "ascii"
+        env.pop("CLARA_DB_PATH", None)
+        # Drop pytest-cov's hooks: the child would write statement-only
+        # coverage beside the parent's branch data, and combining the two
+        # fails the whole run with "Can't combine statement coverage data
+        # with branch data" -- an INTERNALERROR after every test passed.
+        for key in [k for k in env if k.startswith(("COV_CORE", "COVERAGE"))]:
+            env.pop(key, None)
+        env.update(env_extra)
+        return subprocess.run(
+            [sys.executable, "-m", "clara.cli", *args],
+            cwd=str(cwd), env=env, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=180,
+        )
+
+    def test_sync_survives_an_ascii_stdout(self, tmp_path):
+        home = tmp_path / "home"
+        (home / ".clara").mkdir(parents=True)
+        project = tmp_path / "project"
+        project.mkdir()
+        # The second line does not extract, which is what triggers the
+        # "did not extract — re-run with --verbatim" notice containing U+2014.
+        (project / "CLAUDE.md").write_text(
+            "# Notes\n- We use Kafka for events.\n- Something vague here.\n",
+            encoding="utf-8",
+        )
+        result = self._clara(
+            ["sync"], project, {"CLARA_HOME": str(home / ".clara")}
+        )
+        assert result.returncode == 0, (
+            f"clara sync failed on an ASCII console:\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert "codec can't encode" not in (result.stdout + result.stderr)
+
+    def test_stats_survives_an_ascii_stdout(self, tmp_path):
+        home = tmp_path / "home"
+        (home / ".clara").mkdir(parents=True)
+        result = self._clara(["stats"], tmp_path, {"CLARA_HOME": str(home / ".clara")})
+        assert result.returncode == 0, result.stderr
+        assert "codec can't encode" not in (result.stdout + result.stderr)
