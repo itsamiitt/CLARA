@@ -78,6 +78,37 @@ class TestNormalize:
         assert normalize_relation(raw) == expected
 
     @pytest.mark.parametrize(
+        ("active", "converse"),
+        [
+            ("hosts", "hosted_on"),
+            ("switched_from", "switched_to"),
+        ],
+    )
+    def test_converse_relations_never_share_a_lemma(self, active, converse):
+        # Regression: "hosts" normalised to "hosted_on" and "switched_from" to
+        # "switched_to". src/dst are untouched by normalisation, so collapsing a
+        # converse pair records the exact opposite of what the caller said.
+        assert normalize_relation(active) != normalize_relation(converse)
+
+    def test_no_lemma_group_mixes_a_relation_with_its_converse(self):
+        # Guards the whole table, not just the two pairs fixed above: an active
+        # verb must never normalise onto a directional lemma built from a
+        # different preposition.
+        from clara.graph.normalize import _RELATION_GROUPS
+
+        suffixes = ("_on", "_to", "_from", "_with", "_in", "_of", "_by")
+        for lemma, variants in _RELATION_GROUPS.items():
+            lemma_suffix = next((s for s in suffixes if lemma.endswith(s)), None)
+            for variant in variants:
+                variant_suffix = next((s for s in suffixes if variant.endswith(s)), None)
+                if variant_suffix is None:
+                    continue
+                assert variant_suffix == lemma_suffix, (
+                    f"{variant!r} normalises to {lemma!r}: different direction, "
+                    "so the stored triple would mean something else"
+                )
+
+    @pytest.mark.parametrize(
         ("raw", "expected"),
         [
             ("PostgreSQL!", "postgresql"),

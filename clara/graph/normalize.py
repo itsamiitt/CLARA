@@ -74,6 +74,12 @@ SEED_ALIASES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 # Lemma groups: every listed variant maps to the canonical snake_case form.
+#
+# A group may only contain variants that mean the SAME thing in the SAME
+# direction. Converse pairs ("A hosts B" vs "A hosted_on B") must never share a
+# lemma: collapsing them keeps src/dst untouched and so silently reverses the
+# claim. Leaving an unmatched relation un-normalised is always safer than
+# recording the opposite of what the caller said.
 _RELATION_GROUPS: dict[str, list[str]] = {
     "uses": ["use", "uses", "using", "used", "uses_the"],
     "depends_on": ["depend", "depends", "depend_on", "depends_on", "depending_on"],
@@ -81,7 +87,9 @@ _RELATION_GROUPS: dict[str, list[str]] = {
     "prefers": ["prefer", "prefers", "preferred"],
     "runs_on": ["run_on", "runs_on", "running_on", "ran_on"],
     "written_in": ["written_in", "write_in", "writes_in", "wrote_in"],
-    "hosted_on": ["host", "hosts", "hosted", "hosted_on", "hosting_on"],
+    # "A hosts B" (A is the host) is the converse of "A hosted_on B" (B is).
+    "hosts": ["host", "hosts", "hosting", "hosted"],
+    "hosted_on": ["hosted_on", "hosting_on"],
     "migrated_to": ["migrate", "migrated", "migrates", "migrate_to", "migrated_to", "migrating_to"],
     "owns": ["own", "owns", "owned"],
     "maintains": ["maintain", "maintains", "maintained"],
@@ -95,7 +103,9 @@ _RELATION_GROUPS: dict[str, list[str]] = {
     "part_of": ["part_of", "is_part_of"],
     "is_a": ["is", "is_a", "are", "was", "be"],
     "has": ["has", "have", "had"],
-    "switched_to": ["switch_to", "switched_to", "switches_to", "switched_from"],
+    # switched_from is the opposite of switched_to, not a spelling of it.
+    "switched_to": ["switch_to", "switched_to", "switches_to"],
+    "switched_from": ["switch_from", "switched_from", "switches_from"],
     "avoids": ["avoid", "avoids", "avoided"],
     "recommends": ["recommend", "recommends", "recommended"],
     "tests_with": ["test_with", "tests_with", "tested_with"],
