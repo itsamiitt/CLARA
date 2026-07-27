@@ -33,3 +33,9 @@ decisions first, execute once, produce ONE reviewable commit.**
 5. Report the summary: actions taken, skipped items, the commit/PR ref.
    Remind that `git revert` + `clara docs scan` undoes the repo side while
    promoted memories intentionally persist.
+
+**Finding the CLI.** A plugin-only install does not put `clara` on `PATH` —
+the bootstrap keeps it in the plugin's own venv and shims it to
+`$CLAUDE_PLUGIN_DATA/shim/clara` (default `~/.clara/plugin/shim/clara`, plus
+`clara.exe` on Windows). If a bare `clara ...` call reports "command not
+found", re-run it with that path instead of telling the user it is broken.

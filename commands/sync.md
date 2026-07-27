@@ -15,3 +15,9 @@ Run the CLARA ⇄ native-memory bridge and report what happened.
 4. Never edit MEMORY.md or CLAUDE.md by hand here — the bridge owns the
    fenced section, and everything else belongs to the user (or to Claude's
    own auto-memory writes).
+
+**Finding the CLI.** A plugin-only install does not put `clara` on `PATH` —
+the bootstrap keeps it in the plugin's own venv and shims it to
+`$CLAUDE_PLUGIN_DATA/shim/clara` (default `~/.clara/plugin/shim/clara`, plus
+`clara.exe` on Windows). If a bare `clara ...` call reports "command not
+found", re-run it with that path instead of telling the user it is broken.

@@ -51,16 +51,27 @@ function Set-CurrentPointer([string]$DataDir, [string]$Venv) {
 }
 
 function Update-ClaraShim([string]$DataDir, [string]$Venv) {
+    # clara-mcp is required: the plugin's mcpServers entry spawns this exact
+    # path. clara is best-effort but matters just as much in practice -- a
+    # plugin-only install never puts the CLI on PATH, so `clara doctor`,
+    # `clara sync` and the /clara:sync and /clara:docs slash commands (which
+    # shell out to it) all failed with "command not found" for exactly the
+    # users who installed the recommended way. Mirrors ensure_shim in
+    # scripts/bootstrap.sh.
     $bin = Find-VenvBin $Venv "clara-mcp"
     if (-not $bin) { return $false }
     $shimDir = Join-Path $DataDir "shim"
     $null = New-Item -ItemType Directory -Force $shimDir
     try {
         Copy-Item -Path $bin -Destination (Join-Path $shimDir "clara-mcp.exe") -Force
-        return $true
     } catch {
         return $false
     }
+    $cli = Find-VenvBin $Venv "clara"
+    if ($cli) {
+        try { Copy-Item -Path $cli -Destination (Join-Path $shimDir "clara.exe") -Force } catch {}
+    }
+    return $true
 }
 
 function Find-ClaraPython {

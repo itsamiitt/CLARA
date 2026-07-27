@@ -58,9 +58,11 @@ background, so your **first session** prints:
 CLARA is installing in the background — memory will be available next session.
 ```
 
-The build takes ~30–60 s (once per plugin version). **From the second session
-on**, your memory context is injected automatically at session start and the
-`memory_*` tools are live. Nothing blocks the session while it installs.
+The build takes roughly one to two minutes, once per plugin version (measured:
+113 s on a Windows machine using the bundled interpreter; a warm pip cache and
+a faster disk cut it). **From the second session on**, your memory context is
+injected automatically at session start and the `memory_*` tools are live.
+Nothing blocks the session while it installs.
 
 Because the `memory` MCP server points at a shim the bootstrap creates, that
 server is not available during the very first session (and briefly into the
@@ -133,10 +135,24 @@ clara init            # create the store + print ready-to-paste agent wiring
 
 ## Verify it works
 
+In Claude Code, run `/clara:doctor` — it works for a plugin install and needs
+nothing on your `PATH`.
+
+From a terminal, the same checks:
+
 ```bash
 clara doctor                 # store health
 echo '{}' | clara statusline # e.g. "CLARA - 0 memories - global"
 clara-mcp recall --top-k 3   # prints your memory context block (empty at first)
+```
+
+**A plugin-only install does not put `clara` on your `PATH`.** The bootstrap
+keeps the CLI inside the plugin's private venv and shims it next to the MCP
+server, so use that path (or install Option B alongside):
+
+```bash
+~/.clara/plugin/shim/clara doctor          # macOS / Linux / WSL / Git Bash
+%USERPROFILE%\.clara\plugin\shim\clara.exe doctor   # Windows
 ```
 
 ---
@@ -173,6 +189,8 @@ is needed).
 | `/clara:docs-review [scope]` | interactive doc-rot review → one reviewable commit |
 | `/clara:done [plan]` | close out a completed plan, distilling it into memory |
 | `/clara:sync [export\|import\|status]` | bridge to Claude Code native memory |
+| `/clara:statusline [on\|off]` | show the live memory counter in the status bar |
+| `/clara:doctor` | health check that works without `clara` on your `PATH` |
 
 ## How memory flows
 

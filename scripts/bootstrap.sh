@@ -44,12 +44,30 @@ DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-${HOME:-/tmp}/.clara}/plugin}"
 ensure_shim() {
   _venv=$1
   _data=$2
-  _bin=$(find_bin "$_venv" clara-mcp) || return 1
   mkdir -p "$_data/shim" 2>/dev/null || return 1
-  case "$_bin" in
-    *.exe) cp -f "$_bin" "$_data/shim/clara-mcp.exe" 2>/dev/null || return 1 ;;
-    *) ln -sfn "$_bin" "$_data/shim/clara-mcp" 2>/dev/null \
-         || cp -f "$_bin" "$_data/shim/clara-mcp" 2>/dev/null || return 1 ;;
+  # clara-mcp is required: the plugin's mcpServers entry spawns this exact
+  # path. clara is best-effort but matters just as much in practice -- a
+  # plugin-only install never puts the CLI on PATH, so `clara doctor`,
+  # `clara sync` and the /clara:sync and /clara:docs slash commands (which
+  # shell out to it) all failed with "command not found" for exactly the
+  # users who installed the recommended way.
+  _shim_one "$_venv" "$_data" clara-mcp || return 1
+  _shim_one "$_venv" "$_data" clara || true
+  return 0
+}
+
+# Copy (Windows) or link (POSIX) one console script into the shim dir.
+# pip console-script .exes embed the venv python's absolute path, so a copy
+# still runs.
+_shim_one() {
+  _sv=$1
+  _sd=$2
+  _name=$3
+  _b=$(find_bin "$_sv" "$_name") || return 1
+  case "$_b" in
+    *.exe) cp -f "$_b" "$_sd/shim/$_name.exe" 2>/dev/null || return 1 ;;
+    *) ln -sfn "$_b" "$_sd/shim/$_name" 2>/dev/null \
+         || cp -f "$_b" "$_sd/shim/$_name" 2>/dev/null || return 1 ;;
   esac
   return 0
 }

@@ -15,3 +15,9 @@ If no path is given, run `clara docs report` via Bash (or summarize from
 stale documents, dead-reference documents, duplicate clusters, and archive
 candidates. These are proposals only — never move or edit files without the
 user's explicit approval. If the ledger is empty, suggest `clara docs scan`.
+
+**Finding the CLI.** A plugin-only install does not put `clara` on `PATH` —
+the bootstrap keeps it in the plugin's own venv and shims it to
+`$CLAUDE_PLUGIN_DATA/shim/clara` (default `~/.clara/plugin/shim/clara`, plus
+`clara.exe` on Windows). If a bare `clara ...` call reports "command not
+found", re-run it with that path instead of telling the user it is broken.

@@ -400,3 +400,52 @@ class TestStopHookGating:
             env=env, capture_output=True, text=True, timeout=60,
         )
         assert proc.returncode == 0
+
+
+class TestSlashCommandsAreDiscoverable:
+    """Every shipped slash command must be documented, and vice versa.
+
+    `/clara:statusline` shipped for a while without appearing in the README
+    table, so the only way to find it was to list the plugin directory. A
+    command nobody knows about is a command nobody runs.
+    """
+
+    def _shipped(self) -> set[str]:
+        return {p.stem for p in (_ROOT / "commands").glob("*.md")}
+
+    def _documented(self) -> set[str]:
+        import re
+
+        readme = (_ROOT / "README.md").read_text("utf-8")
+        return set(re.findall(r"`/clara:([a-z-]+)", readme))
+
+    def test_every_shipped_command_is_documented(self):
+        missing = self._shipped() - self._documented()
+        assert not missing, f"shipped but undocumented: {sorted(missing)}"
+
+    def test_every_documented_command_exists(self):
+        phantom = self._documented() - self._shipped()
+        assert not phantom, (
+            f"documented but not shipped: {sorted(phantom)} — the README "
+            "promises a command the plugin does not provide"
+        )
+
+    def test_commands_that_shell_out_explain_where_the_cli_lives(self):
+        """A plugin-only install never puts `clara` on PATH.
+
+        The bootstrap keeps the CLI in the plugin's private venv. Commands that
+        tell Claude to run `clara ...` with Bash must also say where to find it,
+        or they fail with "command not found" for exactly the users who
+        installed the recommended way.
+        """
+        offenders = []
+        for path in (_ROOT / "commands").glob("*.md"):
+            text = path.read_text("utf-8")
+            shells_out = "`clara " in text
+            explains = "shim/clara" in text
+            if shells_out and not explains:
+                offenders.append(path.name)
+        assert not offenders, (
+            "these slash commands invoke the clara CLI without saying where it "
+            f"lives for a plugin install: {sorted(offenders)}"
+        )
