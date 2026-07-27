@@ -170,6 +170,31 @@ def sanitize(value: object, *, max_len: int = _SANITIZE_MAX_LEN) -> str:
 # ---------------------------------------------------------------------------
 
 
+# A belief's triple says *what* was decided; the rationale saved alongside it
+# says *why*. That reasoning was stored and then never shown, which is the one
+# thing a decision is worth remembering for. Kept short so a long explanation
+# cannot crowd out other memories.
+RATIONALE_MAX_LEN = 120
+
+
+def _rationale(memory: dict[str, object]) -> str:
+    """The saved reasoning for a belief, or "" when there is none.
+
+    Lives in ``metadata.evidence[0].text`` (BeliefMemory stores the caller's
+    description as evidence), not in ``content``.
+    """
+    meta = memory.get("metadata")
+    if not isinstance(meta, dict):
+        return ""
+    evidence = meta.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return ""
+    first = evidence[0]
+    if not isinstance(first, dict):
+        return ""
+    return sanitize(first.get("text", ""), max_len=RATIONALE_MAX_LEN)
+
+
 def _format_belief(memory: dict[str, object]) -> str:
     c = memory["content"]
     assert isinstance(c, dict)
@@ -185,6 +210,11 @@ def _format_belief(memory: dict[str, object]) -> str:
     if domain:
         line += f", domain: {sanitize(domain)}"
     line += ")"
+    rationale = _rationale(memory)
+    # Skip a rationale that merely restates the triple — it costs tokens and
+    # tells the model nothing it cannot already see on the line.
+    if rationale and rationale.lower() not in core.lower():
+        line += f" — {rationale}"
     return line
 
 
@@ -331,7 +361,30 @@ def build_context(memories: list[dict[str, object]], now_epoch: float) -> str | 
 # ---------------------------------------------------------------------------
 
 
+def _make_stdout_lossy() -> None:
+    """Never let an un-encodable character take the session down.
+
+    This block is rendered with a few non-ASCII characters (the truncation
+    ellipsis, the rationale separator) and printed to whatever stdout the host
+    handed us. Under an ASCII locale — ``LC_ALL=C``, or PYTHONIOENCODING=ascii —
+    that raises UnicodeEncodeError and the hook exits non-zero, which breaks
+    the "always exits 0, memory never blocks a session" contract. Verified: the
+    ellipsis alone was already enough to crash it before this existed.
+
+    Replacing the offending characters degrades one glyph; raising loses the
+    entire memory block.
+    """
+    # noqa: SIM105 — contextlib.suppress would read better, but contextlib is
+    # not on this package's allowed-import list and widening that list for a
+    # style rule is the wrong trade on the session-start path.
+    try:  # noqa: SIM105
+        sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _make_stdout_lossy()
     args = sys.argv[1:] if argv is None else argv
     cwd = os.getcwd()
     for i, arg in enumerate(args):

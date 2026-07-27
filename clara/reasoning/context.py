@@ -5,6 +5,26 @@ from __future__ import annotations
 from clara.core.text import sanitize_memory_text as _s
 from clara.retrieval.engine import RetrievalEngine, RetrievalResult, ScoredMemory
 
+# Mirrors clara.fastpath.context.RATIONALE_MAX_LEN — a parity test keeps the
+# two renderers in lockstep.
+RATIONALE_MAX_LEN = 120
+
+
+def _rationale(sm: ScoredMemory) -> str:
+    """The saved reasoning for a belief, or "" when there is none.
+
+    BeliefMemory stores the caller's description as ``metadata.evidence[0]``,
+    so the *why* behind a decision never appears in ``content``.
+    """
+    meta = sm.memory.metadata_ or {}
+    evidence = meta.get("evidence") if isinstance(meta, dict) else None
+    if not isinstance(evidence, list) or not evidence:
+        return ""
+    first = evidence[0]
+    if not isinstance(first, dict):
+        return ""
+    return _s(first.get("text", ""), max_len=RATIONALE_MAX_LEN)
+
 
 def _format_belief(sm: ScoredMemory) -> str:
     c = sm.memory.content
@@ -17,6 +37,10 @@ def _format_belief(sm: ScoredMemory) -> str:
     if domain:
         line += f", domain: {_s(domain)}"
     line += ")"
+    rationale = _rationale(sm)
+    # Skip a rationale that merely restates the triple.
+    if rationale and rationale.lower() not in core.lower():
+        line += f" — {rationale}"
     return line
 
 

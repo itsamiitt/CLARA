@@ -296,3 +296,73 @@ class TestProjectBlock:
         from clara.fastpath.context import main
 
         assert main(["--cwd", str(tmp_path)]) == 0
+
+
+async def _seed_beliefs(store, beliefs):
+    """Write the given beliefs into a fresh store at *store*."""
+    store.parent.mkdir(parents=True, exist_ok=True)
+    memory = await LocalMemory.create(str(store))
+    for spec in beliefs:
+        await memory.save(mem_type="belief", **spec)
+    await memory.close()
+
+
+class TestBeliefRationale:
+    """A belief's triple says what was decided; the saved reasoning says why.
+
+    BeliefMemory stores the caller's description as metadata.evidence[0], and
+    both renderers only ever read `content` — so the *why* behind a decision
+    was stored and then never shown, which is the one thing a decision is
+    worth remembering for.
+    """
+
+    async def test_rationale_reaches_the_injected_block(self, tmp_path):
+        await _seed_beliefs(tmp_path / ".clara" / "clara.db", [
+            dict(subject="clara", relation="uses", object="WAL journal mode",
+                 description="Decided: WAL so readers never block the writer."),
+        ])
+        proc = _run_context(tmp_path, _clean_env(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        assert "readers never block the writer" in proc.stdout
+
+    async def test_rationale_that_restates_the_triple_is_suppressed(self, tmp_path):
+        await _seed_beliefs(tmp_path / ".clara" / "clara.db", [
+            dict(subject="clara", relation="uses", object="SQLite",
+                 description="clara uses SQLite"),
+        ])
+        proc = _run_context(tmp_path, _clean_env(tmp_path))
+        lines = [ln for ln in proc.stdout.splitlines() if "SQLite" in ln]
+        assert lines
+        assert all("—" not in ln for ln in lines), lines
+
+    async def test_belief_without_a_rationale_still_renders(self, tmp_path):
+        await _seed_beliefs(tmp_path / ".clara" / "clara.db", [
+            dict(subject="clara", relation="uses", object="pytest"),
+        ])
+        proc = _run_context(tmp_path, _clean_env(tmp_path))
+        assert proc.returncode == 0
+        assert "pytest" in proc.stdout
+
+
+class TestOutputEncodingIsNeverFatal:
+    """The hook contract is "always exits 0"; encoding must not break it.
+
+    The block carries non-ASCII characters (the truncation ellipsis, the
+    rationale separator). Under an ASCII locale (LC_ALL=C, or
+    PYTHONIOENCODING=ascii) printing them raised UnicodeEncodeError and the
+    hook exited 1, losing the whole memory block. The ellipsis alone was
+    enough, so this predates the rationale.
+    """
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "ascii"])
+    async def test_survives_a_narrow_stdout(self, tmp_path, encoding):
+        await _seed_beliefs(tmp_path / ".clara" / "clara.db", [
+            dict(subject="clara", relation="uses", object="x" * 600),
+            dict(subject="clara", relation="uses", object="WAL",
+                 description="Decided: WAL so readers never block the writer."),
+        ])
+        env = _clean_env(tmp_path)
+        env["PYTHONIOENCODING"] = encoding
+        proc = _run_context(tmp_path, env)
+        assert proc.returncode == 0, proc.stderr[-300:]
+        assert "MEMORY CONTEXT" in proc.stdout
