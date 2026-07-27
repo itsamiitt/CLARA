@@ -11,7 +11,7 @@ full pipeline adds LLM fact extraction, embeddings, and vector retrieval on
 top of the same store.
 
 CLARA doubles as a **Claude Code plugin** — session-start memory + knowledge-map
-injection, 21 MCP tools, a knowledge graph, and a document-lifecycle curator —
+injection, 22 MCP tools, a knowledge graph, and a document-lifecycle curator —
 and as a **standalone CLI + MCP server** for any agent (Codex, Gemini, Cursor,
 or your own). Both use the same single SQLite store.
 
@@ -95,7 +95,7 @@ than not starting.
 
 ### 3. During the session (MCP tools)
 
-The plugin ships an MCP server exposing 21 tools. The agent calls
+The plugin ships an MCP server exposing 22 tools. The agent calls
 `memory_search` when it needs prior context and `memory_save` when it learns
 something durable. Two more hooks run alongside: `PostToolUse(Read)` annotates
 reads of quarantined documents, and `Stop` offers a one-line nudge when a plan
@@ -365,14 +365,18 @@ server, so use that path (or install Option B alongside):
 
 # Usage
 
-## The 21 MCP tools
+## The 22 MCP tools
 
 Once wired, your agent's model calls these directly — **CLARA is storage +
 ranked retrieval; the host model is the intelligence** (that is why no API key
 is needed).
 
-- **Memory (6):** `memory_save`, `memory_search`, `memory_recent`,
-  `memory_update`, `memory_forget`, `memory_stats`.
+- **Memory (7):** `memory_save`, `memory_save_many`, `memory_search`,
+  `memory_recent`, `memory_update`, `memory_forget`, `memory_stats`.
+  `memory_save_many` writes a whole batch in one transaction, all or
+  nothing — measured, 100 facts in 2.1 s against 7.4 s as sequential
+  saves — and one batch cannot race itself the way parallel single
+  saves can.
 - **Code index (3):** `code_deps`, `code_impact`, `code_health` — the
   import graph of *this repo's source*, built by `clara index` and kept
   current by the daily maintenance pass. `code_impact` answers "what

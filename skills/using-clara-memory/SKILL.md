@@ -5,8 +5,8 @@ description: When and how to use CLARA persistent memory — save durable facts,
 
 # Using CLARA memory
 
-CLARA is a plain SQLite store exposed through 21 MCP tools — 6 memory
-(`memory_save`, `memory_search`, `memory_recent`, `memory_update`,
+CLARA is a plain SQLite store exposed through 22 MCP tools — 7 memory
+(`memory_save`, `memory_save_many`, `memory_search`, `memory_recent`, `memory_update`,
 `memory_forget`, `memory_stats`), 5 docs (`docs_status`, `docs_classify`,
 `docs_supersede`, `docs_fulfill`, `docs_report`), 4 graph (`graph_entity`,
 `graph_neighbors`, `graph_path`, `memory_link`), 2 status bar

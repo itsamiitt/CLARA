@@ -13,8 +13,9 @@ from clara.integrations.mcp_server import _recall, default_db_path
 # "6 memory + 5 docs + 4 graph (15 total)" — this set is the enforcing test
 # for that number: adding or removing a tool must update both.
 EXPECTED_TOOLS = {
-    # memory (6)
+    # memory (7)
     "memory_save",
+    "memory_save_many",
     "memory_search",
     "memory_recent",
     "memory_update",
@@ -63,7 +64,7 @@ def test_build_server_registers_all_tools():
         f"tool surface changed: +{names - EXPECTED_TOOLS} -{EXPECTED_TOOLS - names} "
         "— update EXPECTED_TOOLS, README, and SKILL.md together"
     )
-    assert len(EXPECTED_TOOLS) == 21
+    assert len(EXPECTED_TOOLS) == 22
 
 
 def test_docs_status_respects_kill_switch(monkeypatch):
