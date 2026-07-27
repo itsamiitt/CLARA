@@ -218,6 +218,73 @@ def _index_populated(conn: Any, repo_key: str) -> bool:
     return row is not None
 
 
+def _deps_sync(
+    anchor: str, target: str, direction: str, depth: int
+) -> dict[str, Any]:
+    """Open, query and close the index on a single thread.
+
+    A sqlite3 connection belongs to the thread that created it. Opening inside
+    ``asyncio.to_thread`` and then querying the returned connection back on the
+    event loop raised "SQLite objects created in a thread can only be used in
+    that same thread" on *every* call, so all three code tools failed for any
+    repo. The whole operation has to happen in the worker, not just the open.
+    """
+    from clara.index import queries
+
+    conn, repo_key = _open_index(anchor)
+    try:
+        if not _index_populated(conn, repo_key):
+            return {"indexed": False, "target": target,
+                    "hint": "run `clara index` in this repo first"}
+        found = queries.dependencies(
+            conn, repo_key, target, direction=direction, depth=depth
+        )
+        return {
+            "indexed": True,
+            "target": target,
+            "direction": direction,
+            "depth": depth,
+            "count": len(found),
+            "modules": [
+                {"name": d.qualified_name, "path": d.file_path, "depth": d.depth}
+                for d in found
+            ],
+        }
+    finally:
+        conn.close()
+
+
+def _health_sync(anchor: str) -> dict[str, Any]:
+    """Cycles and unreferenced modules, entirely on one thread."""
+    from pathlib import Path as _Path
+
+    from clara.index import queries
+    from clara.store import git_toplevel as _git_toplevel
+
+    conn, repo_key = _open_index(anchor)
+    try:
+        if not _index_populated(conn, repo_key):
+            return {"indexed": False,
+                    "hint": "run `clara index` in this repo first"}
+        root = _Path(_git_toplevel(anchor) or anchor)
+        cycles = queries.find_cycles(conn, repo_key)
+        unused = queries.unused_modules(conn, repo_key, repo_root=root)
+        return {
+            "indexed": True,
+            "cycles": [" -> ".join(c) for c in cycles],
+            "unused_modules": unused,
+            "note": "unused = nothing imports it, after excluding what the "
+                    "project declares it runs. For Python: console scripts, "
+                    "pytest testpaths, __main__ guards. For JS/TS: package.json "
+                    "entry points and script commands, <script src> in any HTML "
+                    "page, extension manifests, plus test files, *.config.* and "
+                    "framework route files. A module loaded by name at runtime "
+                    "cannot be seen statically, so review before deleting.",
+        }
+    finally:
+        conn.close()
+
+
 def build_server() -> Any:
     """Construct the FastMCP server with all tools registered."""
     try:
@@ -371,30 +438,11 @@ def build_server() -> Any:
         means this repo has not been indexed yet -- say so rather than
         concluding the module has no dependencies.
         """
-        from clara.index import queries
-
         anchor = repo or await _session_anchor()
-        conn, repo_key = await asyncio.to_thread(_open_index, anchor)
-        try:
-            if not _index_populated(conn, repo_key):
-                return {"indexed": False, "target": target,
-                        "hint": "run `clara index` in this repo first"}
-            found = queries.dependencies(
-                conn, repo_key, target, direction=direction, depth=depth
-            )
-            return {
-                "indexed": True,
-                "target": target,
-                "direction": direction,
-                "depth": depth,
-                "count": len(found),
-                "modules": [
-                    {"name": d.qualified_name, "path": d.file_path, "depth": d.depth}
-                    for d in found
-                ],
-            }
-        finally:
-            conn.close()
+        result: dict[str, Any] = await asyncio.to_thread(
+            _deps_sync, anchor, target, direction, depth
+        )
+        return result
 
     @server.tool()
     async def code_impact(target: str, depth: int = 3,
@@ -419,32 +467,9 @@ def build_server() -> Any:
         or loop of modules that import each other, usually survivable only
         because one side defers its import.
         """
-        from pathlib import Path as _Path
-
-        from clara.index import queries
-        from clara.store import git_toplevel as _git_toplevel
-
         anchor = repo or await _session_anchor()
-        conn, repo_key = await asyncio.to_thread(_open_index, anchor)
-        try:
-            if not _index_populated(conn, repo_key):
-                return {"indexed": False,
-                        "hint": "run `clara index` in this repo first"}
-            root = _Path(_git_toplevel(anchor) or anchor)
-            cycles = queries.find_cycles(conn, repo_key)
-            unused = queries.unused_modules(conn, repo_key, repo_root=root)
-            return {
-                "indexed": True,
-                "cycles": [" -> ".join(c) for c in cycles],
-                "unused_modules": unused,
-                "note": "unused = nothing imports it, after excluding what the "
-                        "project declares it runs (console scripts, pytest "
-                        "testpaths, __main__ guards). A module imported only by "
-                        "name cannot be seen statically, so review before "
-                        "deleting.",
-            }
-        finally:
-            conn.close()
+        result: dict[str, Any] = await asyncio.to_thread(_health_sync, anchor)
+        return result
 
     @server.tool()
     async def project_profile(repo: str | None = None) -> dict[str, Any]:

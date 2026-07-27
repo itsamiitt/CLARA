@@ -374,3 +374,86 @@ class TestEntrypointEvidence:
             "src/orphan.ts"
         ]
         conn.close()
+
+
+class TestMcpToolsActuallyRun:
+    """The code tools, exercised through the MCP surface rather than inspected.
+
+    These exist because the suite previously only asserted that code_deps,
+    code_impact and code_health were *registered*. All three raised
+    "SQLite objects created in a thread can only be used in that same thread"
+    on every call, for every repo, and nothing caught it: the connection was
+    opened inside asyncio.to_thread and then used back on the event loop.
+    Registration is not evidence a tool works.
+    """
+
+    @pytest.fixture()
+    def indexed_repo(self, tmp_path, monkeypatch):
+        pytest.importorskip("mcp")
+        from clara.db.migrations import open_db
+        from clara.repoid import repo_id
+        from clara.store import resolve_store
+
+        monkeypatch.setenv("CLARA_HOME", str(tmp_path / "store"))
+        repo = tmp_path / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "app.ts").write_text(
+            'import {u} from "./util";\nimport React from "react";\n', "utf-8"
+        )
+        (repo / "src" / "util.ts").write_text("export const u = 1;\n", "utf-8")
+        (repo / "src" / "orphan.ts").write_text("export const o = 1;\n", "utf-8")
+
+        resolution = resolve_store(str(repo), create=True)
+        conn = open_db(str(resolution.db_path))
+        indexer.index_repo(conn, repo_id(str(repo)), repo)
+        conn.commit()
+        conn.close()
+        return repo
+
+    def call(self, name, args):
+        import asyncio
+
+        from clara.integrations.mcp_server import build_server
+
+        server = build_server()
+        result = asyncio.run(server.call_tool(name, args))
+        payload = result[1] if isinstance(result, tuple) else result
+        assert "same thread" not in str(payload), (
+            f"{name} raised a cross-thread sqlite error: {payload}"
+        )
+        return payload
+
+    def test_code_deps_returns_real_dependencies(self, indexed_repo) -> None:
+        payload = self.call(
+            "code_deps", {"target": "src/app.ts", "depth": 1,
+                          "repo": str(indexed_repo)}
+        )
+        assert payload["indexed"] is True
+        names = {m["name"] for m in payload["modules"]}
+        assert names == {"src/util.ts", "react"}
+
+    def test_code_impact_returns_reverse_dependencies(self, indexed_repo) -> None:
+        payload = self.call(
+            "code_impact", {"target": "src/util.ts", "depth": 2,
+                            "repo": str(indexed_repo)}
+        )
+        assert payload["indexed"] is True
+        assert [m["name"] for m in payload["modules"]] == ["src/app.ts"]
+
+    def test_code_health_runs_and_finds_the_orphan(self, indexed_repo) -> None:
+        payload = self.call("code_health", {"repo": str(indexed_repo)})
+        assert payload["indexed"] is True
+        assert "src/orphan.ts" in payload["unused_modules"]
+        # The note must describe the evidence actually applied, JS included.
+        assert "package.json" in payload["note"]
+
+    def test_unindexed_repo_says_so_rather_than_reporting_none(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        pytest.importorskip("mcp")
+        monkeypatch.setenv("CLARA_HOME", str(tmp_path / "store2"))
+        fresh = tmp_path / "fresh"
+        fresh.mkdir()
+        payload = self.call("code_deps", {"target": "x.ts", "repo": str(fresh)})
+        assert payload["indexed"] is False
+        assert "clara index" in payload["hint"]
