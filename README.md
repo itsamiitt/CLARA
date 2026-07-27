@@ -255,9 +255,14 @@ imports facts from `CLAUDE.md` and the auto-memory directory
 (`~/.claude/projects/<project>/memory/`), then writes a marker-fenced
 section into `MEMORY.md` (≤ 60 lines, so Claude's own notes keep the native
 200-line window) plus a fully CLARA-owned `clara-memory.md` topic file.
-Hand-edits inside the fence are imported, never overwritten; the daily
-maintenance pass refreshes the export automatically. `/clara:sync` runs it
-from inside a session.
+Your own notes are never overwritten. Anything **outside** the fence — in
+`MEMORY.md`, `CLAUDE.md`, or the auto-memory files — is imported on the next
+sync. Lines added **inside** the fence are deliberately not imported (they are
+CLARA's own export, so re-importing them would loop); CLARA leaves them alone
+and stops refreshing that section until they are removed, and says so. Put
+notes outside the fence, or save them with `clara remember` / `/clara:remember`.
+The daily maintenance pass refreshes the export automatically. `/clara:sync`
+runs it from inside a session.
 
 ### Backups & portability
 

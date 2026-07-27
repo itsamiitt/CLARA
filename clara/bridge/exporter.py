@@ -88,8 +88,10 @@ def build_section_body(memories: list[dict[str, object]], now_epoch: float) -> s
     lines = [
         "## CLARA memory (managed)",
         "Managed by the CLARA plugin - edit via memory tools "
-        "(`memory_save`, `/clara:remember`); lines added below the fence "
-        "are imported on the next sync. Full set: `clara-memory.md`.",
+        "(`memory_save`, `/clara:remember`). Notes written OUTSIDE this fence "
+        "are imported on the next sync; edits inside it are not (that would "
+        "re-import CLARA's own export) and they stop this section refreshing "
+        "until removed. Full set: `clara-memory.md`.",
     ]
     for memory in top:
         bullet = _bullet(memory)
@@ -167,7 +169,18 @@ def export_native(db_path: str, anchor: str | None = None) -> str:
     result = markers.replace_section(existing, body, store=scope, ts=ts)
     actions: list[str] = []
     if result.conflict_body is not None:
-        actions.append("fence edited by hand — left in place (run `clara sync` to import it)")
+        # Say what actually resolves it. This used to read "run `clara sync`
+        # to import it", which cannot work: the importer skips fenced lines on
+        # purpose (loop prevention — they are CLARA's own export), so sync can
+        # never import an in-fence edit and can never clear the conflict.
+        # Verified: three further syncs, and a --verbatim one, all left the
+        # fence untouched, while newly saved memories stopped reaching
+        # MEMORY.md entirely and only landed in clara-memory.md.
+        actions.append(
+            "fence edited by hand — left in place, so this section is no longer "
+            "refreshing. Move your line outside the fence (or save it with "
+            "`clara remember`), then re-run `clara sync`"
+        )
     elif result.changed:
         _atomic_write(memory_md, result.text)
         actions.append("MEMORY.md updated")

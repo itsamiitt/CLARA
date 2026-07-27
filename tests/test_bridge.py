@@ -255,3 +255,107 @@ class TestImportNative:
             assert sum(r["imported"] for r in loose.values()) == 1
         finally:
             await memory.close()
+
+
+class TestHandEditedFenceGuidance:
+    """A hand-edit inside the fence stops the section refreshing — for good.
+
+    The importer skips fenced lines on purpose (they are CLARA's own export;
+    re-importing them would loop), so `clara sync` can never import an in-fence
+    edit and can never clear the conflict. Measured on a real repo: three more
+    syncs and a --verbatim one all left the fence untouched, while newly saved
+    memories stopped reaching MEMORY.md and landed only in clara-memory.md.
+
+    That behaviour is correct. The message was not: it said "run `clara sync`
+    to import it", which is the command the user just ran and the one thing
+    that cannot work. These pin the guidance, since a wrong instruction here
+    silently freezes the section Claude actually reads.
+    """
+
+    async def test_conflict_message_does_not_tell_the_user_to_re_run_sync(
+        self, native_home, tmp_path
+    ):
+        home, repo = native_home
+        db = str(tmp_path / "store.db")
+        memory = await LocalMemory.create(db)
+        try:
+            await memory.save(
+                mem_type="belief", subject="user", relation="uses", object="Postgres"
+            )
+        finally:
+            await memory.close()
+
+        export_native(db, str(repo))
+        memory_md = paths.memory_md_path(str(repo))
+        assert memory_md is not None
+        text = memory_md.read_text(encoding="utf-8")
+        memory_md.write_text(
+            text.replace("<!-- clara:end -->", "- a hand written line\n<!-- clara:end -->"),
+            encoding="utf-8",
+        )
+
+        summary = export_native(db, str(repo))
+        assert "edited by hand" in summary
+        assert "no longer refreshing" in summary, (
+            "the user must be told the section has stopped updating"
+        )
+        assert "outside the fence" in summary, (
+            "the message must name the action that actually resolves it"
+        )
+        assert "run `clara sync` to import it" not in summary, (
+            "sync cannot import a fenced line — the importer skips them by design"
+        )
+
+    async def test_moving_the_line_out_lets_the_fence_refresh_again(
+        self, native_home, tmp_path
+    ):
+        """The advice the message gives must actually work."""
+        home, repo = native_home
+        db = str(tmp_path / "store.db")
+        memory = await LocalMemory.create(db)
+        try:
+            await memory.save(
+                mem_type="belief", subject="user", relation="uses", object="Postgres"
+            )
+        finally:
+            await memory.close()
+
+        export_native(db, str(repo))
+        memory_md = paths.memory_md_path(str(repo))
+        assert memory_md is not None
+        text = memory_md.read_text(encoding="utf-8")
+        memory_md.write_text(
+            text.replace("<!-- clara:end -->", "- a hand written line\n<!-- clara:end -->"),
+            encoding="utf-8",
+        )
+        assert "edited by hand" in export_native(db, str(repo))
+
+        # A memory saved while the fence is wedged must not reach MEMORY.md...
+        memory = await LocalMemory.create(db)
+        try:
+            await memory.save(
+                mem_type="belief", subject="api", relation="runs_on", object="fly.io"
+            )
+        finally:
+            await memory.close()
+        export_native(db, str(repo))
+        assert "fly.io" not in memory_md.read_text(encoding="utf-8")
+
+        # ...until the hand-edited line moves out of the fence.
+        wedged = memory_md.read_text(encoding="utf-8")
+        moved = wedged.replace("- a hand written line\n", "") + "\n- a hand written line\n"
+        memory_md.write_text(moved, encoding="utf-8")
+
+        summary = export_native(db, str(repo))
+        assert "MEMORY.md updated" in summary
+        refreshed = memory_md.read_text(encoding="utf-8")
+        assert "fly.io" in refreshed, "the fence did not resume refreshing"
+        assert "- a hand written line" in refreshed, "the user's line was lost"
+
+    def test_the_fence_header_does_not_promise_in_fence_import(self):
+        """The header is the only instruction most users will read."""
+        from clara.bridge.exporter import build_section_body
+
+        body = build_section_body([], time.time())
+        assert "OUTSIDE this fence" in body
+        assert "edits inside it are not" in body
