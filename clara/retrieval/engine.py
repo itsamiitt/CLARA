@@ -37,12 +37,35 @@ from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dime
 # extra — the zero-key tier (LocalMemory, clara-mcp, clara CLI) must import
 # this module without them. Vector operations raise LanceSearchError when
 # they are missing, and RetrievalEngine.search degrades to lexical.
-try:  # pragma: no cover - exercised implicitly by both install profiles
-    import lancedb
-    import pyarrow as pa
-except ImportError:  # pragma: no cover
-    lancedb = None  # type: ignore[assignment]
-    pa = None  # type: ignore[assignment]
+#
+# Loaded on first vector use, not at import. When the extra IS installed,
+# importing lancedb costs 3.9 s (it pulls pyarrow and a generated urllib3
+# client), and this module sits on the import path of clara.cli via
+# local_memory -> agent -> reasoning. The zero-key tier never touches a vector
+# table, so every `clara` command was paying that for nothing: measured 7.75 s
+# to `import clara.cli`, of which lancedb was 3.9 s.
+#
+# The module globals stay in place and keep their None-means-missing meaning,
+# so existing `lancedb is None` checks and any test that patches them are
+# unaffected.
+lancedb: Any = None
+pa: Any = None
+_vector_deps_tried = False
+
+
+def _load_vector_deps() -> None:
+    """Import lancedb/pyarrow once, on demand. Missing stays None."""
+    global lancedb, pa, _vector_deps_tried
+    if _vector_deps_tried:
+        return
+    _vector_deps_tried = True
+    try:
+        import lancedb as _lancedb
+        import pyarrow as _pa
+    except ImportError:  # pragma: no cover - depends on install profile
+        return
+    lancedb = _lancedb
+    pa = _pa
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +90,7 @@ LANCE_TABLE_NAME = "memories"
 
 def _lance_schema() -> Any:
     """Build the Lance table schema (requires the [vector] extra)."""
+    _load_vector_deps()
     if pa is None:
         raise LanceSearchError(
             "lancedb/pyarrow are not installed — vector search needs "
@@ -378,6 +402,7 @@ class LanceRetrievalEngine:
             if self._table is not None:
                 return self._table
 
+            _load_vector_deps()
             if lancedb is None:
                 raise LanceSearchError(
                     "lancedb is not installed — vector search needs "

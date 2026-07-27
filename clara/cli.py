@@ -28,12 +28,16 @@ import logging
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from clara.extraction.heuristic import HeuristicExtractor
-from clara.integrations.local_memory import LocalMemory
-from clara.integrations.mcp_server import default_db_path
-from clara.update.engine import classify_memory_type
+if TYPE_CHECKING:
+    from clara.integrations.local_memory import LocalMemory
+
+# Heavy imports are deferred into the commands that need them. Importing
+# clara.cli used to cost 7.75 s: these four names pull in SQLAlchemy, lancedb
+# and the OpenAI SDK, and `clara statusline` -- which needs none of them, only
+# the stdlib stats sidecar -- runs on the status bar's refreshInterval, every
+# 5 s by default. It could never keep up with itself.
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -72,11 +76,15 @@ def _resolve_db_path(project: bool) -> str:
                 file=sys.stderr,
             )
         return str(path)
+    from clara.integrations.mcp_server import default_db_path
+
     return default_db_path()
 
 
 async def _open(db_path: str | None = None) -> LocalMemory:
     """Open the store every other entry point would resolve for this cwd."""
+    from clara.integrations.local_memory import LocalMemory
+
     if db_path is None:
         from clara.store import resolve_store
 
@@ -189,6 +197,8 @@ _FACT_TO_SAVE_FIELDS = {
 
 async def _cmd_remember(args: argparse.Namespace) -> int:
     text = " ".join(args.text).strip()
+    from clara.extraction.heuristic import HeuristicExtractor
+
     facts = HeuristicExtractor().extract_sync(text)
     if not facts:
         print("Nothing durable recognized. (Rule-based extraction is "
@@ -199,6 +209,8 @@ async def _cmd_remember(args: argparse.Namespace) -> int:
     saved = 0
     try:
         for fact in facts:
+            from clara.update.engine import classify_memory_type
+
             mem_type = classify_memory_type(fact).value
             kwargs: dict[str, Any] = {
                 "domain": fact.domain,
@@ -442,6 +454,7 @@ async def _cmd_docs(args: argparse.Namespace) -> int:
         find_repo_root,
         scan_repo,
     )
+    from clara.integrations.mcp_server import default_db_path
     from clara.policy import load_policy
     from clara.repoid import repo_id as compute_repo_id
 
