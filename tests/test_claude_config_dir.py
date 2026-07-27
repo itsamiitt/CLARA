@@ -101,3 +101,74 @@ class TestStatuslineFollowsIt:
             "installing a statusLine into ~/.claude while Claude Code reads "
             "elsewhere gives the user a status bar that never appears"
         )
+
+
+class TestWorktreesShareAutoMemory:
+    """Claude Code keys auto memory on the repository, not the checkout.
+
+    Its changelog: "Project configs & auto memory now shared across git
+    worktrees of the same repository". CLARA used `git rev-parse
+    --show-toplevel`, which returns the *linked* worktree's own path, so every
+    worktree got its own auto-memory directory. Measured before the fix: main
+    resolved to ...-clara-wt-main and the worktree to ...-clara-wt-wt, so a
+    sync run inside a worktree wrote where Claude Code never reads — the same
+    silent no-op as the hardcoded config dir.
+
+    Note this deliberately differs from CLARA's *store* resolution, where each
+    worktree may carry its own .clara/clara.db. That is CLARA's own data; this
+    is Claude Code's, and has to match Claude Code.
+    """
+
+    @staticmethod
+    def _repo_with_worktree(tmp_path):
+        import subprocess
+
+        main = tmp_path / "main"
+        main.mkdir()
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=str(main), check=True, capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+        subprocess.run(["git", "init", "-q", str(main)], check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        (main / "f.txt").write_text("hi", encoding="utf-8")
+        run("git", "add", "-A")
+        run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+        worktree = tmp_path / "wt"
+        run("git", "worktree", "add", "-q", str(worktree))
+        return main, worktree
+
+    def test_both_checkouts_resolve_to_the_main_root(self, tmp_path):
+        main, worktree = self._repo_with_worktree(tmp_path)
+        assert paths.project_root(str(worktree)) == paths.project_root(str(main))
+        assert Path(paths.project_root(str(worktree))).name == "main"
+
+    def test_auto_memory_directory_is_shared(self, config_dir, tmp_path):
+        main, worktree = self._repo_with_worktree(tmp_path)
+        from_main = paths.auto_memory_dir(str(main))
+        from_worktree = paths.auto_memory_dir(str(worktree))
+        assert from_main is not None and from_worktree is not None
+        assert from_main == from_worktree, (
+            "a worktree writes MEMORY.md where Claude Code never reads it"
+        )
+
+    def test_memory_md_and_topic_file_are_shared(self, config_dir, tmp_path):
+        main, worktree = self._repo_with_worktree(tmp_path)
+        assert paths.memory_md_path(str(main)) == paths.memory_md_path(str(worktree))
+        assert paths.topic_file_path(str(main)) == paths.topic_file_path(str(worktree))
+
+    def test_a_plain_directory_still_resolves(self, tmp_path):
+        """No repo at all must keep working — the anchor is its own root."""
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert paths.project_root(str(plain)) == str(plain)
+
+    def test_an_ordinary_repo_is_unchanged(self, tmp_path):
+        import subprocess
+
+        repo = tmp_path / "solo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        resolved = paths.project_root(str(repo))
+        assert Path(resolved).resolve() == repo.resolve()

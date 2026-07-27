@@ -20,10 +20,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
-from clara.store import git_toplevel
+from clara.store import _GIT_TIMEOUT_S, git_toplevel
 
 _ENCODE_RE = re.compile(r"[^A-Za-z0-9-]")
 
@@ -75,8 +76,44 @@ def auto_memory_enabled() -> bool:
     return _claude_settings().get("autoMemoryEnabled", True) is not False
 
 
+def _main_worktree_root(anchor: str) -> str | None:
+    """Root of the MAIN worktree, from anywhere in the repo.
+
+    Claude Code shares auto memory across worktrees of one repository
+    ("Project configs & auto memory now shared across git worktrees of the
+    same repository"), so the encoded directory name must key on the main
+    worktree. `git rev-parse --show-toplevel` returns the *linked* worktree's
+    own path, which gave every worktree its own auto-memory directory:
+    measured, main and worktree resolved to ...-main and ...-wt, so a sync run
+    inside a worktree wrote where Claude Code never looks.
+
+    --git-common-dir points at the main repo's .git from every worktree; its
+    parent is the main worktree root. stdin is closed and the call is bounded:
+    an inherited stdin once made git block until timeout on every MCP call.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=anchor,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    common = proc.stdout.strip()
+    if not common:
+        return None
+    root = Path(common).parent
+    # A bare repo has no working tree to share memory for.
+    return str(root) if root.is_dir() and (root / ".git").exists() else None
+
+
 def project_root(anchor: str) -> str:
-    return git_toplevel(anchor) or anchor
+    return _main_worktree_root(anchor) or git_toplevel(anchor) or anchor
 
 
 def auto_memory_dir(anchor: str) -> Path | None:
