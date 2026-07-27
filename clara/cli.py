@@ -167,9 +167,11 @@ async def _cmd_context(args: argparse.Namespace) -> int:
     try:
         query = " ".join(args.query).strip()
         if query:
-            result = await memory.search(query, top_k=args.top_k)
+            result = await memory.search(
+                query, top_k=args.top_k, current_repo=_cwd_repo()
+            )
         else:
-            result = await memory.recent(n=args.top_k)
+            result = await memory.recent(n=args.top_k, current_repo=_cwd_repo())
     finally:
         await memory.close()
     if result["total"]:
@@ -234,9 +236,14 @@ async def _cmd_list(args: argparse.Namespace) -> int:
     try:
         types = [args.type] if args.type else None
         if args.query:
-            result = await memory.search(args.query, top_k=args.limit, types=types)
+            result = await memory.search(
+                args.query, top_k=args.limit, types=types,
+                current_repo=_cwd_repo(),
+            )
         else:
-            result = await memory.recent(n=args.limit, types=types)
+            result = await memory.recent(
+                n=args.limit, types=types, current_repo=_cwd_repo()
+            )
     finally:
         await memory.close()
     if not result["total"]:
@@ -1247,6 +1254,16 @@ def _configure_logging() -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(logging.DEBUG if debug else logging.WARNING)
+
+
+def _cwd_repo() -> str | None:
+    """This directory's repo id, for provenance labels — never a blocker."""
+    try:
+        from clara.repoid import repo_id
+
+        return repo_id(str(Path.cwd()))
+    except Exception:  # noqa: BLE001 — labels are a nicety
+        return None
 
 
 def _readability(path: Path) -> str:

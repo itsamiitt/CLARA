@@ -853,10 +853,11 @@ def build_server() -> Any:
 async def _recall(query: str, top_k: int) -> str:
     memory = await LocalMemory.create(default_db_path())
     try:
+        repo = await _current_repo()
         if query.strip():
-            result = await memory.search(query, top_k=top_k)
+            result = await memory.search(query, top_k=top_k, current_repo=repo)
         else:
-            result = await memory.recent(n=top_k)
+            result = await memory.recent(n=top_k, current_repo=repo)
     finally:
         await memory.close()
 

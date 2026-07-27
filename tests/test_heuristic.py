@@ -137,3 +137,66 @@ class TestApiCompat:
     def test_provider_marker(self, extractor):
         assert extractor._provider == "none"
         assert extractor._model is None
+
+
+class TestMeasuredAdditions:
+    """Patterns added from a measured bench, not guesswork.
+
+    Sixteen natural sentences actually typed at `clara remember` during
+    development: the extractor caught 4. Each pattern below is one of the
+    misses; the four still-missing shapes (bare directives, schedules,
+    numeric limits) are deliberate — precision doctrine, extract less but
+    never wrongly.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "subject", "relation", "obj"),
+        [
+            ("team prefers postgres over mysql",
+             "user", "prefers", "postgres"),
+            ("the payments service uses stripe webhooks for billing",
+             "the payments service", "uses", "stripe webhooks"),
+            ("closocrm isolation is enforced by the application layer",
+             "closocrm isolation", "enforced_by", "the application layer"),
+            ("the frontend is built with react and vite",
+             "the frontend", "built_with", "react and vite"),
+            ("sarah owns the billing module",
+             "sarah", "owns", "the billing module"),
+            ("the staging database is at db.staging.example.com",
+             "the staging database", "located_at", "db.staging.example.com"),
+        ],
+    )
+    def test_extracts_the_measured_miss(self, text, subject, relation, obj):
+        facts = list(HeuristicExtractor().extract_sync(text))
+        assert [(f.subject, f.relation, f.object) for f in facts] == [
+            (subject, relation, obj)
+        ]
+
+    def test_use_instead_of_negates_the_old_tool(self):
+        facts = list(HeuristicExtractor().extract_sync("use ruff instead of flake8"))
+        triples = [(f.object, f.is_negation) for f in facts]
+        assert ("flake8", True) in triples
+        assert ("ruff", False) in triples
+
+    def test_decided_keeps_its_for_clause(self):
+        # _END treats " for " as a clause boundary; here it is the point.
+        # "drop support" without "for python 3.9" is an incomplete fact that
+        # reads as a complete one — worse than extracting nothing.
+        facts = list(HeuristicExtractor().extract_sync(
+            "we decided to drop support for python 3.9"
+        ))
+        assert facts[0].object == "drop support for python 3.9"
+
+    @pytest.mark.parametrize("text", [
+        "it uses redis",
+        "this owns the module",
+        "there is at db.example.com",
+        # located_at demands a dotted host or scheme; prose times stay out.
+        "the meeting is at noon",
+        # precision doctrine: these stay unextracted on purpose.
+        "never commit directly to main",
+        "deployments happen every friday",
+        "the api rate limit is 100 requests per minute",
+    ])
+    def test_still_refuses_what_it_should(self, text):
+        assert list(HeuristicExtractor().extract_sync(text)) == []

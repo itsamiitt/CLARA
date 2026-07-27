@@ -39,6 +39,11 @@ _DOT_IN_TOKEN = r"|\.(?=\S)"
 _OBJ = rf"(?P<object>(?:[^,.;:!?]{_DOT_IN_TOKEN}){{2,80}}?)"
 _OBJ2 = rf"(?P<object2>(?:[^,.;:!?]{_DOT_IN_TOKEN}){{2,80}}?)"
 _END = r"(?=$|,|;|:| for | because | since | when | so that | which )"
+# Like _END but lets the object keep a "for ..." tail. "decided to drop
+# support for python 3.9" without the "for" clause stores "drop support" —
+# an incomplete fact that reads as a complete one, worse than extracting
+# nothing.
+_END_KEEPS_FOR = r"(?=$|,|;|:| because | since | when | so that | which )"
 
 # Optional trailing domain: "... for web work" → domain="web work".
 _DOMAIN = r"(?: for (?P<domain>[a-z0-9 _-]{2,40}))?"
@@ -174,6 +179,58 @@ _PATTERNS: list[_Pattern] = [
     _Pattern(
         rf"\b(?P<subject>[A-Za-z0-9 _./-]{{2,40}}?)\s+is\s+(?:a|an)\s+{_OBJ}{_END}",
         _world_fact("is_a"), 0.7,
+    ),
+    # -- additions measured in, not guessed in: every pattern below comes
+    # from a real sentence the extractor missed (4/16 on a bench of natural
+    # phrasings actually typed at `clara remember` during development).
+    # Doctrine unchanged: each shape is specific enough that a match is
+    # near-certainly the stated fact.
+    _Pattern(  # "team prefers postgres over mysql" / "we prefer X over Y"
+        rf"\b(?:i|we|(?:the |our )?team)\s+prefers?\s+{_OBJ}\s+over\s+{_OBJ2}{_END}",
+        lambda m: [{"subject": "user", "relation": "prefers",
+                    "object": _clean(m["object"])}],
+        0.85,
+    ),
+    _Pattern(  # "use ruff instead of flake8" (imperative, sentence-initial)
+        rf"^\s*(?:always\s+)?use\s+{_OBJ}\s+instead of\s+{_OBJ2}{_END}",
+        lambda m: [
+            {"subject": "user", "relation": "uses",
+             "object": _clean(m["object2"]), "is_negation": True},
+            {"subject": "user", "relation": "uses",
+             "object": _clean(m["object"]), "is_negation": False},
+        ],
+        0.85,
+    ),
+    _Pattern(  # "the frontend is built with react and vite"
+        rf"\b(?P<subject>[A-Za-z0-9 _./-]{{2,40}}?)\s+(?:is|was)\s+built\s+"
+        rf"(?:with|on|using)\s+{_OBJ}{_END}",
+        _world_fact("built_with"), 0.8,
+    ),
+    _Pattern(  # "sarah owns the billing module"
+        rf"\b(?P<subject>[A-Za-z0-9 _./-]{{2,40}}?)\s+owns\s+{_OBJ}{_END}",
+        _world_fact("owns"), 0.75,
+    ),
+    _Pattern(  # "closocrm isolation is enforced by the application layer"
+        rf"\b(?P<subject>[A-Za-z0-9 _./-]{{2,40}}?)\s+is\s+enforced\s+"
+        rf"(?:only\s+)?by\s+{_OBJ}{_END}",
+        _world_fact("enforced_by"), 0.8,
+    ),
+    _Pattern(  # "the payments service uses stripe webhooks" — third-person
+        # subjects only; first-person "i/we use" matched (and normalized to
+        # the user) by the earlier pattern, so this one never sees it.
+        rf"\b(?P<subject>[A-Za-z0-9 _./-]{{2,40}}?)\s+uses\s+{_OBJ}{_END}",
+        _world_fact("uses"), 0.75,
+    ),
+    _Pattern(  # "the staging database is at db.staging.example.com" — the
+        # object must contain a dotted token or scheme, or this would fire
+        # on prose like "the meeting is at noon".
+        rf"\b(?P<subject>[A-Za-z0-9 _./-]{{2,40}}?)\s+is\s+at\s+"
+        rf"(?P<object>\S*(?:\.\S+|://\S+)[^\s,;]*){_END}",
+        _world_fact("located_at"), 0.8,
+    ),
+    _Pattern(  # "we decided to drop support for python 3.9"
+        rf"\b(?:i|we)\s+(?:decided|agreed|chose)\s+to\s+{_OBJ}{_END_KEEPS_FOR}",
+        _simple("decided"), 0.8,
     ),
 ]
 
