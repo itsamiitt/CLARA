@@ -220,3 +220,70 @@ class TestHousekeepingClaim:
             "the README must name the MCP server as the trigger, not imply any "
             "store open will do"
         )
+
+
+class TestReadmeMechanismClaims:
+    """The README now explains how CLARA works and compares with/without it.
+
+    Those are factual claims about mechanism, so they get the same treatment as
+    the documented defaults: asserted against the code, not trusted.
+    """
+
+    def _readme(self) -> str:
+        return (_ROOT / "README.md").read_text("utf-8")
+
+    def test_fenced_section_line_cap_matches_the_code(self):
+        from clara.bridge.exporter import SECTION_MAX_LINES
+
+        assert f"{SECTION_MAX_LINES}-line" in self._readme() or \
+               f"≤{SECTION_MAX_LINES}" in self._readme() or \
+               f"≤ {SECTION_MAX_LINES}" in self._readme(), (
+            f"README should quote the real cap ({SECTION_MAX_LINES})"
+        )
+
+    def test_session_start_matcher_is_quoted_correctly(self):
+        import json
+
+        hooks = json.loads((_ROOT / "hooks" / "hooks.json").read_text("utf-8"))
+        matcher = hooks["hooks"]["SessionStart"][0]["matcher"]
+        assert matcher in self._readme(), (
+            "the README quotes which session events re-inject memory; it must "
+            f"match hooks.json ({matcher})"
+        )
+
+    def test_tool_count_claim_matches_the_server(self):
+        import asyncio
+        import re
+
+        from clara.integrations.mcp_server import build_server
+
+        real = len(asyncio.run(build_server().list_tools()))
+        claimed = {int(n) for n in re.findall(r"(\d+) MCP tools", self._readme())}
+        assert claimed, "the README no longer states a tool count"
+        assert claimed == {real}, f"README claims {claimed} tools, server has {real}"
+
+    def test_no_semantic_search_claim_holds(self):
+        """The README states the zero-key tier does keyword search, not vectors.
+
+        If LocalMemory.search ever grows an embedding path, that sentence
+        becomes false and this fails.
+        """
+        import inspect
+
+        from clara.integrations.local_memory import LocalMemory
+
+        source = inspect.getsource(LocalMemory.search)
+        assert "embed" not in source.lower(), (
+            "search now embeds; the README's 'no semantic search in the "
+            "zero-key tier' claim needs updating"
+        )
+
+    def test_comparison_table_disclaims_unmeasured_benefits(self):
+        """Guard against the table drifting into marketing.
+
+        The with/without section exists to describe mechanism. It must keep
+        saying that productivity and token effects were not measured.
+        """
+        readme = self._readme()
+        assert "not been measured" in readme or "has not been benchmarked" in readme
+        assert "does not make the model smarter" in readme

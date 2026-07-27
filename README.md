@@ -17,6 +17,132 @@ or your own). Both use the same single SQLite store.
 
 ---
 
+# What problem this solves
+
+A coding agent starts every session with no memory of the last one. You
+re-explain the same decisions — which package manager, which database, why that
+library was dropped — and the agent re-reads the same files to rediscover facts
+you already told it.
+
+CLARA writes those facts to a SQLite file and injects the relevant ones back at
+the start of the next session.
+
+## With and without CLARA
+
+This compares mechanics, not productivity. Everything below is a factual
+difference in what happens; none of it is a claim about how much time you save,
+because that has not been measured.
+
+| | Without CLARA | With CLARA |
+|---|---|---|
+| **Start of a session** | Agent knows only what is in `CLAUDE.md` and what it reads | A `=== MEMORY CONTEXT ===` block of ranked memories is injected automatically, plus a `[KNOWLEDGE MAP]` of which docs are authoritative |
+| **After `/clear` or `/compact`** | Context is gone; you re-explain | The block is re-injected — the SessionStart hook matches `clear` and `compact` |
+| **A fact you stated last week** | Gone unless you wrote it into `CLAUDE.md` yourself | Stored as a typed memory, retrievable by search, decays if never used again |
+| **Recording a decision** | You hand-edit `CLAUDE.md` and it grows unbounded | `memory_save` / `/clara:remember`; the file the agent reads stays a ≤60-line fenced section |
+| **Contradictions** | Both statements sit in the file; the agent sees both | A negation supersedes the old belief, which is archived rather than deleted |
+| **Stale documents** | Agent reads an outdated design doc as current | Reading a quarantined doc is annotated: "archived — treat as historical record" |
+| **Relationships between things** | Implicit in prose | An explicit graph: `api runs_on fly.io`, queryable by entity, neighbours, or path |
+| **Secrets in notes** | Whatever you paste is stored | The write path refuses credential-shaped content (default `reject`) |
+| **Across two repos** | One `CLAUDE.md` per repo, no sharing | A global store by default, or a per-project store with `clara init --project` |
+| **Losing the file** | Whatever you had is gone | Rotated backups (default 7) plus `clara restore`, and a JSONL export |
+
+### What it does not do
+
+Stated plainly so the table above is not read as more than it is:
+
+- **It does not make the model smarter.** CLARA supplies context; the model
+  still decides what to do with it.
+- **It does not read your mind.** In the zero-key tier, memories are saved when
+  the agent calls `memory_save` or you run `/clara:remember`. There is no
+  background model inferring facts from your conversation.
+- **It does not guarantee the agent uses a memory.** Injection puts it in
+  context; the model chooses.
+- **It has no measured effect on token usage.** The injected block is capped
+  (≤60 lines in the native file, budgeted in the session-start block), but
+  whether that nets out cheaper than re-reading files depends on your session
+  and has not been benchmarked.
+- **The zero-key tier does no semantic search.** Retrieval is SQLite FTS5
+  keyword matching plus recency/confidence ranking. Embeddings and vector
+  search exist only in the optional `[full]` tier.
+
+---
+
+# How it works
+
+Four moving parts, all on one SQLite file.
+
+### 1. The store
+
+One file — `~/.clara/clara.db` by default, or `.clara/clara.db` inside a repo.
+Tables for memories, the knowledge graph, and the document ledger, plus an FTS5
+index. Schema changes are forward-only numbered migrations; a store written by
+a **newer** CLARA than the one you are running is opened **read-only** rather
+than written to, so a downgrade degrades visibly instead of corrupting data.
+
+### 2. Session start (the hook)
+
+The plugin registers a `SessionStart` hook matching
+`startup|resume|clear|compact|fork`. It runs a deliberately stdlib-only Python
+fastpath — no SQLAlchemy, no LLM imports — which:
+
+1. resolves which store this directory maps to,
+2. ranks active memories and renders the `=== MEMORY CONTEXT ===` block,
+3. adds `[KNOWLEDGE MAP]` from the document ledger,
+4. stamps `.git/clara-marker` so later hooks can find the repo cheaply.
+
+It always exits 0. If anything fails, the session starts without memory rather
+than not starting.
+
+### 3. During the session (MCP tools)
+
+The plugin ships an MCP server exposing 18 tools. The agent calls
+`memory_search` when it needs prior context and `memory_save` when it learns
+something durable. Two more hooks run alongside: `PostToolUse(Read)` annotates
+reads of quarantined documents, and `Stop` offers a one-line nudge when a plan
+document looks finished.
+
+**You are the only intelligence in this tier.** There is no backend model doing
+extraction or embeddings — the agent decides what is worth storing, and CLARA
+stores it, indexes it, and gives it back.
+
+### 4. Housekeeping
+
+The first time the **MCP server** opens the store each day, one pass runs:
+a rotated backup, confidence decay, pruning, graph maintenance, and the
+native-memory export. No cron and no daemon. The `clara` CLI deliberately does
+not trigger it, so a one-off command never pays for a decay pass and a VACUUM —
+run `clara maintain` yourself if you drive the store from the CLI alone.
+
+Confidence decays exponentially with age; a belief that falls below the
+archival threshold is **archived, never deleted**, so it leaves search results
+but still exports. Skills are exempt from archival.
+
+---
+
+# Measured performance
+
+Measured on one Windows machine (Windows Server 2025, Python 3.12) with the
+bundled interpreter. Your numbers will differ; these are recorded so the claims
+above are checkable rather than adjectives.
+
+| Operation | Measured |
+|---|---|
+| First plugin install (builds the private venv) | 113 s, once per plugin version |
+| SessionStart hook, end to end | ~1.5 s |
+| `PostToolUse(Read)` hook | ~190 ms |
+| `Stop` hook | ~155 ms |
+| MCP tool call, warm | 60–190 ms |
+| MCP tool call, first of a session (opens the store) | ~2.2 s |
+| `clara --help` | ~350 ms |
+| Status-bar counter render | ~400 ms |
+| Store-opening CLI command (`list`, `stats`, `context`) | ~1.5 s |
+| Graph traversal, 100k-edge store, depth 1 | ~3 ms |
+
+Concurrency: six processes writing thirty memories at once all committed, with
+`PRAGMA integrity_check` clean afterwards.
+
+---
+
 # Installation
 
 > **Requirements:** `git`, and Python **3.10+**.
@@ -48,6 +174,83 @@ From inside Claude Code:
 /plugin marketplace add itsamiitt/clara
 /plugin install clara@clara-marketplace
 ```
+
+### Step by step — your first five minutes
+
+What you will actually see, in order. Nothing here needs a terminal.
+
+**1. Install the plugin.** In Claude Code:
+
+```
+/plugin marketplace add itsamiitt/clara
+/plugin install clara@clara-marketplace
+```
+
+**2. Start a new session.** It prints:
+
+```
+CLARA is installing in the background — memory will be available next session.
+```
+
+This is expected, not an error. CLARA is building its own private Python
+environment so it never touches your system packages. It takes roughly one to
+two minutes and happens once per plugin version. Keep working — nothing is
+blocked.
+
+**3. Start another session.** The install is done. Now the session begins with
+a block like this, which the model can see and you normally cannot:
+
+```
+=== MEMORY CONTEXT ===
+
+[BELIEFS]
+- user uses pnpm (confidence: 0.85)
+- api runs_on fly.io (confidence: 0.90)
+
+[KNOWLEDGE MAP]
+active work (T2): 3
+rule: treat quarantined/archived documents as historical record.
+```
+
+On a brand-new store this is empty. That is correct — there is nothing to
+remember yet.
+
+**4. Save your first memory.** Either tell Claude something durable and let it
+call `memory_save`, or be explicit:
+
+```
+/clara:remember we use pnpm, never npm
+```
+
+**5. Confirm it stuck.**
+
+```
+/clara:memories
+```
+
+…or check the health of the whole install:
+
+```
+/clara:doctor
+```
+
+That command works without anything on your `PATH`, which matters because a
+plugin install deliberately does not put `clara` there (see
+[Verify it works](#verify-it-works)).
+
+**6. Next session, it is already there.** Nothing to do. The block from step 3
+now contains what you saved, and it comes back after `/clear` and `/compact`
+too.
+
+### If something looks wrong
+
+| What you see | What it means | What to do |
+|---|---|---|
+| "installing in the background" on every session | The build is failing partway | `/clara:doctor` — it prints the tail of the install log |
+| `memory` MCP server unavailable | First session, or the build is still running | Start a new session; it resolves itself |
+| `clara: command not found` | Expected — a plugin install does not put the CLI on `PATH` | Use `/clara:doctor`, or the full path `~/.clara/plugin/shim/clara` |
+| Memory block is empty | Nothing saved yet, or you are in a different project | `/clara:memories` to check; stores are per-project when a `.clara/` exists |
+| Nothing at all happens | The plugin's hooks are not firing | `/plugin` to confirm it is enabled, then start a new session |
 
 **What happens on first use.** The plugin ships a bootstrap that builds a
 private virtualenv from the plugin's own checkout (no PyPI needed) into
