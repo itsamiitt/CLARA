@@ -333,3 +333,51 @@ class TestReadHookGating:
         )
         # Fail-open either way; what matters is that it did not error out.
         assert proc.returncode == 0
+
+
+class TestStopHookGating:
+    """Stop fires once per TURN, not once per session.
+
+    Twenty user messages start PowerShell twenty times, ~537 ms each on native
+    Windows (measured 438-1248 ms), almost always to conclude there is nothing
+    to say. The nudge can only come from a proposals sidecar under the CLARA
+    home, so the dispatcher checks for that first -- repo-independent, and free
+    in cmd.exe.
+    """
+
+    def _dispatcher(self) -> str:
+        return (
+            Path(__file__).parents[1] / "scripts" / "session-stop.cmd"
+        ).read_text(encoding="utf-8")
+
+    def test_polyglot_first_line_is_preserved(self):
+        assert self._dispatcher().splitlines()[0].startswith(":;")
+
+    def test_gates_on_the_proposals_directory(self):
+        script = self._dispatcher()
+        assert "proposals" in script
+        assert "CLARA_HOME" in script, "must honour a relocated CLARA home"
+        assert "USERPROFILE" in script, "must fall back to the default home"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe dispatcher")
+    def test_skips_dispatch_without_proposals(self, tmp_path):
+        script = Path(__file__).parents[1] / "scripts" / "session-stop.cmd"
+        env = {**os.environ, "CLARA_HOME": str(tmp_path / "clara-home")}
+        proc = subprocess.run(
+            ["cmd", "/c", str(script)],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0
+        assert proc.stdout.strip() == ""
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe dispatcher")
+    def test_dispatches_when_proposals_exist(self, tmp_path):
+        home = tmp_path / "clara-home"
+        (home / "proposals").mkdir(parents=True)
+        script = Path(__file__).parents[1] / "scripts" / "session-stop.cmd"
+        env = {**os.environ, "CLARA_HOME": str(home)}
+        proc = subprocess.run(
+            ["cmd", "/c", str(script)],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0
