@@ -52,6 +52,7 @@ class SourceImport:
 @dataclass(slots=True)
 class ParsedModule:
     rel_path: str
+    is_package: bool = False
     nodes: list[SourceNode] = field(default_factory=list)
     imports: list[SourceImport] = field(default_factory=list)
     syntax_error: str | None = None
@@ -75,7 +76,11 @@ def module_name_for(rel_path: str) -> str:
 
 def parse_module(rel_path: str, source: str) -> ParsedModule:
     """Parse one Python file. Never raises on bad syntax."""
-    parsed = ParsedModule(rel_path=rel_path)
+    parsed = ParsedModule(
+        rel_path=rel_path,
+        is_package=rel_path.replace("\\", "/").endswith("/__init__.py")
+        or rel_path == "__init__.py",
+    )
     module_name = module_name_for(rel_path)
     parsed.nodes.append(
         SourceNode(kind="module", qualified_name=module_name, start_line=1, end_line=1)
@@ -151,19 +156,27 @@ def _collect_import(
     )
 
 
-def resolve_import(source_module: str, imported: SourceImport) -> str:
+def resolve_import(
+    source_module: str, imported: SourceImport, *, is_package: bool = False
+) -> str:
     """Absolute dotted name for an import as written in *source_module*.
 
-    Relative imports are resolved against the importing module's package:
     ``from .state import x`` inside ``clara.index.journal`` is
     ``clara.index.state``.
+
+    *is_package* matters and is easy to get wrong. Inside a package's
+    ``__init__.py`` the current package is the module itself, so
+    ``from . import openclaw_bridge`` in ``clara/integrations/__init__.py``
+    means ``clara.integrations.openclaw_bridge``. Treating that file like an
+    ordinary module drops a component and resolves it to ``clara`` -- which is
+    how clara.integrations.openclaw_bridge came out looking unimported.
     """
     if imported.level == 0:
         return imported.module
     package_parts = source_module.split(".")
-    # level 1 means "this package", so drop the module's own name first.
-    drop = imported.level
-    base = package_parts[: max(0, len(package_parts) - drop)]
+    # A package's own name is already the package; a module's is not.
+    drop = imported.level - 1 if is_package else imported.level
+    base = package_parts[: len(package_parts) - drop] if drop else package_parts
     if imported.module:
         base = [*base, *imported.module.split(".")]
     return ".".join(p for p in base if p)

@@ -11,7 +11,7 @@ full pipeline adds LLM fact extraction, embeddings, and vector retrieval on
 top of the same store.
 
 CLARA doubles as a **Claude Code plugin** — session-start memory + knowledge-map
-injection, 18 MCP tools, a knowledge graph, and a document-lifecycle curator —
+injection, 21 MCP tools, a knowledge graph, and a document-lifecycle curator —
 and as a **standalone CLI + MCP server** for any agent (Codex, Gemini, Cursor,
 or your own). Both use the same single SQLite store.
 
@@ -362,7 +362,7 @@ server, so use that path (or install Option B alongside):
 
 # Usage
 
-## The 18 MCP tools
+## The 21 MCP tools
 
 Once wired, your agent's model calls these directly — **CLARA is storage +
 ranked retrieval; the host model is the intelligence** (that is why no API key
@@ -370,6 +370,12 @@ is needed).
 
 - **Memory (6):** `memory_save`, `memory_search`, `memory_recent`,
   `memory_update`, `memory_forget`, `memory_stats`.
+- **Code index (3):** `code_deps`, `code_impact`, `code_health` — the
+  import graph of *this repo's source*, built by `clara index` and kept
+  current by the daily maintenance pass. `code_impact` answers "what
+  breaks if I change this module" before you edit it. They report
+  `indexed: false` on a repo that has not been indexed, rather than
+  reporting no dependencies.
 - **Docs curator (5):** `docs_status`, `docs_classify`, `docs_supersede`,
   `docs_fulfill`, `docs_report`.
 - **Knowledge graph (4):** `graph_entity`, `graph_neighbors`, `graph_path`,

@@ -5,13 +5,17 @@ description: When and how to use CLARA persistent memory — save durable facts,
 
 # Using CLARA memory
 
-CLARA is a plain SQLite store exposed through 18 MCP tools — 6 memory
+CLARA is a plain SQLite store exposed through 21 MCP tools — 6 memory
 (`memory_save`, `memory_search`, `memory_recent`, `memory_update`,
 `memory_forget`, `memory_stats`), 5 docs (`docs_status`, `docs_classify`,
 `docs_supersede`, `docs_fulfill`, `docs_report`), 4 graph (`graph_entity`,
 `graph_neighbors`, `graph_path`, `memory_link`), 2 status bar
 (`statusline_install`, `statusline_status` — only for `/clara:statusline`;
-never call them unprompted, they edit the user's settings), 1 project
+never call them unprompted, they edit the user's settings), 3 code-index (`code_deps`, `code_impact`,
+`code_health` — the import graph of *this repo's source*, built by
+`clara index`; they answer "what depends on this" before you edit a shared
+module, and report `indexed: false` when the repo has not been indexed rather
+than pretending there are no dependencies), 1 project
 (`project_profile` — what the repo is, read live from its manifests; prefer it
 over shelling out to read package.json/pyproject). **You** are the only
 intelligence — there is no backend model doing extraction or embeddings.

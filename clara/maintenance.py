@@ -37,6 +37,33 @@ MAINTENANCE_INTERVAL_SECONDS = 24 * 3600
 _MAINTENANCE_LOCK_STALE_S = 6 * 3600
 
 
+def _index_repo_sync(db_path: str, root: Path) -> tuple[int, int]:
+    """Index *root* on this thread, opening and closing its own connection."""
+    import sqlite3
+
+    from clara.index import indexer
+    from clara.repoid import repo_id
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        result = indexer.index_repo(conn, repo_id(str(root)), root)
+    finally:
+        conn.close()
+    return result.processed, result.skipped_unchanged
+
+
+async def _session_anchor_for_index(anchor: str) -> str | None:
+    """Only index somewhere that looks like a repo checkout.
+
+    Indexing the home directory because a session started there would walk an
+    enormous tree for nothing, so a directory with no git toplevel is skipped.
+    """
+    from clara.store import git_toplevel
+
+    return anchor if git_toplevel(anchor) else None
+
+
 async def run_if_due(
     memory: LocalMemory,
     db_path: str,
@@ -123,6 +150,32 @@ async def run_if_due(
                 graph_summary = maintenance_summary(graph_counts)
             except Exception:  # noqa: BLE001 — graph housekeeping is best-effort
                 logger.exception("Graph maintenance failed")
+            index_summary = "index: skipped"
+            try:
+                # Keep the code graph current without asking the user to run
+                # anything. Incremental by content hash, so the steady-state
+                # cost is one hash per file; only a repo that changed pays to
+                # re-parse. Best-effort like every other step here -- an
+                # indexing failure must not cost the user their backup or
+                # decay pass.
+                from clara.store import git_toplevel as _git_toplevel
+
+                index_anchor = await _session_anchor_for_index(anchor)
+                if index_anchor is not None:
+                    root = Path(_git_toplevel(index_anchor) or index_anchor)
+                    # The connection is opened *inside* the worker thread.
+                    # sqlite3 objects are bound to their creating thread, so
+                    # handing one to asyncio.to_thread fails with "SQLite
+                    # objects created in a thread can only be used in that same
+                    # thread" -- which the fail-soft wrapper then swallowed into
+                    # a silent "index: skipped".
+                    counts = await asyncio.to_thread(_index_repo_sync, db_path, root)
+                    index_summary = (
+                        f"index: {counts[0]} parsed, {counts[1]} unchanged"
+                    )
+            except Exception:  # noqa: BLE001 — indexing is best-effort
+                logger.exception("Code indexing failed")
+
             sync_summary = "sync: skipped"
             try:
                 from clara.bridge.exporter import export_native
@@ -136,7 +189,7 @@ async def run_if_due(
             marker.touch()
             summary = (
                 f"decay: {decay_summary}  prune: {prune_summary}  "
-                f"{graph_summary}  {sync_summary}"
+                f"{graph_summary}  {index_summary}  {sync_summary}"
             )
             logger.info("Opportunistic maintenance: %s", summary)
             return summary

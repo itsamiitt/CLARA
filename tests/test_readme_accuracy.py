@@ -159,8 +159,10 @@ class TestSkillMatchesTheToolSurface:
     def _named_tools(self) -> set[str]:
         return set(
             re.findall(
+                # Prefix list, so a new tool family is not silently invisible
+                # to this guard: `code_*` was, until it was added here.
                 r"`(memory_[a-z_]+|docs_[a-z_]+|graph_[a-z_]+|statusline_[a-z_]+"
-                r"|project_[a-z_]+)`",
+                r"|project_[a-z_]+|code_[a-z_]+)`",
                 self._skill_text(),
             )
         )

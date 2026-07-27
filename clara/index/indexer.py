@@ -157,6 +157,26 @@ def _retire_file(conn: sqlite3.Connection, repo_id: str, rel_path: str) -> tuple
     return len(ids), invalidated
 
 
+def _ancestor_packages(repo_root: Path, target: str) -> list[str]:
+    """Packages implicitly imported alongside *target*.
+
+    ``import a.b.c`` executes ``a/__init__.py`` and ``a/b/__init__.py`` -- that
+    is a real dependency, not bookkeeping. Without these edges every package
+    __init__ looks unreferenced: CLARA's own tree reported 83 "unused" modules,
+    most of them packages that are imported constantly.
+
+    Only packages that exist in this repo are emitted; ``os.path`` does not
+    invent an ``os`` node here beyond what the import itself already creates.
+    """
+    parts = target.split(".")
+    ancestors: list[str] = []
+    for i in range(1, len(parts)):
+        prefix = ".".join(parts[:i])
+        if (repo_root / Path(*parts[:i]) / "__init__.py").is_file():
+            ancestors.append(prefix)
+    return ancestors
+
+
 def _submodule_targets(
     repo_root: Path, target: str, names: tuple[str, ...]
 ) -> list[str]:
@@ -244,7 +264,9 @@ def index_file(
     seen: set[str] = set()
     targets: list[tuple[str, pysource.SourceImport]] = []
     for imported in parsed.imports:
-        resolved = pysource.resolve_import(module_name, imported)
+        resolved = pysource.resolve_import(
+            module_name, imported, is_package=parsed.is_package
+        )
         if not resolved:
             continue
         submodules = _submodule_targets(repo_root, resolved, imported.names)
@@ -252,6 +274,9 @@ def index_file(
         # it is a function, the package itself is the dependency.
         for candidate in submodules or [resolved]:
             targets.append((candidate, imported))
+            # ...and every package on the way to it, which Python executes.
+            for ancestor in _ancestor_packages(repo_root, candidate):
+                targets.append((ancestor, imported))
 
     for target, imported in targets:
         if target in seen:

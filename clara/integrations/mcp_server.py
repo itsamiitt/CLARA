@@ -190,6 +190,34 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _open_index(anchor: str) -> tuple[Any, str]:
+    """Open the store for *anchor* and return it with the repo key."""
+    from clara.db.migrations import open_db
+    from clara.repoid import repo_id
+    from clara.store import git_toplevel, resolve_store
+
+    root = git_toplevel(anchor) or anchor
+    resolution = resolve_store(anchor, create=True)
+    conn = open_db(str(resolution.db_path))
+    return conn, repo_id(root)
+
+
+def _index_populated(conn: Any, repo_key: str) -> bool:
+    """False when nothing has been indexed for this repo yet.
+
+    Distinguishing "no dependencies" from "never indexed" matters: the first
+    is a fact about the code, the second is a fact about CLARA, and answering
+    the second as though it were the first is how a tool misleads.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM code_nodes WHERE repo_id = ? LIMIT 1", (repo_key,)
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — pre-migration store: simply not indexed
+        return False
+    return row is not None
+
+
 def build_server() -> Any:
     """Construct the FastMCP server with all tools registered."""
     try:
@@ -323,6 +351,93 @@ def build_server() -> Any:
         plus knowledge-graph node/edge counts."""
         memory = await _get_memory()
         return await memory.stats()
+
+    @server.tool()
+    async def code_deps(
+        target: str,
+        direction: str = "forward",
+        depth: int = 2,
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """What a module imports, or what imports it.
+
+        `target` is a dotted module name (`clara.db.migrations`) or a
+        repo-relative path (`clara/db/migrations.py`). `direction="reverse"`
+        answers "what depends on this" -- the set a change here can break.
+        Depth is bounded; 1 is direct neighbours.
+
+        Reads the code index, which `clara index` builds and the daily
+        maintenance pass keeps current. Empty result with `indexed: false`
+        means this repo has not been indexed yet -- say so rather than
+        concluding the module has no dependencies.
+        """
+        from clara.index import queries
+
+        anchor = repo or await _session_anchor()
+        conn, repo_key = await asyncio.to_thread(_open_index, anchor)
+        try:
+            if not _index_populated(conn, repo_key):
+                return {"indexed": False, "target": target,
+                        "hint": "run `clara index` in this repo first"}
+            found = queries.dependencies(
+                conn, repo_key, target, direction=direction, depth=depth
+            )
+            return {
+                "indexed": True,
+                "target": target,
+                "direction": direction,
+                "depth": depth,
+                "count": len(found),
+                "modules": [
+                    {"name": d.qualified_name, "path": d.file_path, "depth": d.depth}
+                    for d in found
+                ],
+            }
+        finally:
+            conn.close()
+
+    @server.tool()
+    async def code_impact(target: str, depth: int = 3,
+                          repo: str | None = None) -> dict[str, Any]:
+        """What breaks if this module changes — reverse dependencies, transitive.
+
+        Use before editing a shared module, and to size a refactor. Same
+        indexing caveat as `code_deps`.
+        """
+        result: dict[str, Any] = await code_deps(
+            target, direction="reverse", depth=depth, repo=repo
+        )
+        return result
+
+    @server.tool()
+    async def code_health(repo: str | None = None) -> dict[str, Any]:
+        """Import cycles and modules nothing imports.
+
+        `unused` is literally "no inbound import edge" -- entry points, CLI
+        mains and test modules legitimately appear there, so treat it as a list
+        to look at, not a list to delete. Cycles are real: each one is a pair
+        or loop of modules that import each other, usually survivable only
+        because one side defers its import.
+        """
+        from clara.index import queries
+
+        anchor = repo or await _session_anchor()
+        conn, repo_key = await asyncio.to_thread(_open_index, anchor)
+        try:
+            if not _index_populated(conn, repo_key):
+                return {"indexed": False,
+                        "hint": "run `clara index` in this repo first"}
+            cycles = queries.find_cycles(conn, repo_key)
+            unused = queries.unused_modules(conn, repo_key)
+            return {
+                "indexed": True,
+                "cycles": [" -> ".join(c) for c in cycles],
+                "unused_modules": unused,
+                "note": "unused = no inbound import; entry points and tests "
+                        "appear here legitimately",
+            }
+        finally:
+            conn.close()
 
     @server.tool()
     async def project_profile(repo: str | None = None) -> dict[str, Any]:
