@@ -514,3 +514,160 @@ class TestRender:
         block = render_graph_section([("api", [dead, rebuilt])], nodes)
         assert "✗ api uses mysql (2025-01-01 → 2026-02-11)" in block
         assert "since ~2026-06-01" in block
+
+
+class TestTraversalScalesWithNeighbourhood:
+    """Traversal cost must follow the seed's neighbourhood, not the graph size.
+
+    Audit finding P3: the `ranked` CTE had no seed restriction, so every
+    traversal window-ranked the entire edge table twice. A seed with five
+    neighbours cost 1.4 s once the store reached 100k edges, and since
+    `memory_search` traverses at graph_depth=1 by default, every search paid
+    it. Two things make the current query bounded, and both are invisible
+    enough to be "cleaned up" by a later edit:
+
+      * the validity predicate is substituted as a static `invalid_at IS NULL`
+        so the PARTIAL indexes ix_graph_edges_src_valid / _dst_valid apply;
+      * `CROSS JOIN` pins the outer loop to `candidates` -- a materialized CTE
+        has no row estimate, and with a plain JOIN the planner drove from
+        graph_edges instead and scanned all 100k rows.
+
+    Asserting on the plan rather than on wall-clock keeps this deterministic.
+    """
+
+    def _fixture(self, tmp_path, edges: int) -> tuple[str, str]:
+        import sqlite3
+        import uuid
+
+        from clara.db.migrations import ensure_schema
+
+        db = str(tmp_path / "graph.db")
+        conn = sqlite3.connect(db)
+        ensure_schema(conn)
+
+        def node(node_id: str, name: str) -> None:
+            conn.execute(
+                "INSERT INTO graph_nodes (node_id, canonical_name, display_name,"
+                " entity_type, properties, mention_count, expandable, status,"
+                " created_at, updated_at) VALUES (?,?,?,'concept','{}',1,1,"
+                "'active','2026-01-01','2026-01-01')",
+                (node_id, name, name),
+            )
+
+        seed = uuid.uuid4().hex
+        node(seed, "seed")
+        for i in range(3):
+            other = uuid.uuid4().hex
+            node(other, f"nb{i}")
+            conn.execute(
+                "INSERT INTO graph_edges (edge_id, src_id, dst_id, relation,"
+                " confidence, weight, valid_from) VALUES (?,?,?,'uses',0.9,1.0,"
+                "'2026-01-01')",
+                (uuid.uuid4().hex, seed, other),
+            )
+        previous = None
+        for i in range(edges):  # a chain the seed cannot reach
+            current = uuid.uuid4().hex
+            node(current, f"x{i}")
+            if previous is not None:
+                conn.execute(
+                    "INSERT INTO graph_edges (edge_id, src_id, dst_id, relation,"
+                    " confidence, weight, valid_from) VALUES (?,?,?,'uses',0.5,"
+                    "1.0,'2026-01-01')",
+                    (uuid.uuid4().hex, previous, current),
+                )
+            previous = current
+        conn.commit()
+        conn.close()
+        return db, seed
+
+    def _plan(self, db: str, sql: str, seed: str, as_of: bool) -> list[str]:
+        import json
+        import sqlite3
+
+        literals = {
+            ":seeds": "'" + json.dumps([seed]) + "'",
+            ":depth": "1",
+            ":fanout": "6",
+            ":hop_decay": "0.6",
+            ":relation": "NULL",
+            ":uid": "NULL",
+            ":lim": "50",
+        }
+        if as_of:
+            literals[":as_of"] = "'2026-06-01'"
+        for name, literal in literals.items():
+            sql = sql.replace(name, literal)
+        conn = sqlite3.connect(db)
+        try:
+            return [row[-1] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
+        finally:
+            conn.close()
+
+    def test_traversal_is_index_driven(self, tmp_path):
+        import re
+
+        from clara.graph.traverse import _TRAVERSE_SQL_NOW
+
+        db, seed = self._fixture(tmp_path, edges=2000)
+        plan = self._plan(db, _TRAVERSE_SQL_NOW, seed, as_of=False)
+
+        assert any("ix_graph_edges_src_valid" in line for line in plan), plan
+        assert any("ix_graph_edges_dst_valid" in line for line in plan), plan
+        # `e` is the graph_edges alias throughout; `relevant` is aliased `rel`.
+        scans = [line for line in plan if re.search(r"\bSCAN e\b", line)]
+        assert not scans, f"traversal falls back to a full edge scan: {plan}"
+
+    def test_bounded_by_neighbourhood_not_graph_size(self, tmp_path):
+        """The rows the query touches must not grow with unrelated edges."""
+        import asyncio
+
+        from clara.graph.traverse import traverse
+        from clara.integrations.local_memory import LocalMemory
+
+        async def reached(edges: int) -> int:
+            db, seed = self._fixture(tmp_path / str(edges), edges)
+            memory = await LocalMemory.create(db)
+            try:
+                async with memory.session() as session:
+                    return len(await traverse(session, [seed], depth=1))
+            finally:
+                await memory.close()
+
+        (tmp_path / "200").mkdir()
+        (tmp_path / "20000").mkdir()
+        small = asyncio.run(reached(200))
+        large = asyncio.run(reached(20000))
+        assert small == large == 3, (small, large)
+
+    def test_as_of_variant_has_no_stray_bind(self, tmp_path):
+        """The as-of-now query must not carry an :as_of bind, and vice versa.
+
+        text() binds names wherever they appear -- including inside comments,
+        where SQLite never sees the substituted "?" and every call dies with
+        "Incorrect number of bindings supplied". Both variants are compiled
+        here so that failure cannot reach a user.
+        """
+        import re
+
+        from clara.graph.traverse import (
+            _TRAVERSE_SQL_AS_OF,
+            _TRAVERSE_SQL_NOW,
+            _TRAVERSE_TEMPLATE,
+        )
+
+        assert ":as_of" not in _TRAVERSE_SQL_NOW
+        assert ":as_of" in _TRAVERSE_SQL_AS_OF
+
+        # A bind name in a comment is the specific way this breaks: SQLAlchemy
+        # substitutes a "?" there, SQLite ignores it as comment text, and the
+        # supplied-vs-used bind counts diverge.
+        commented = [
+            line
+            for line in _TRAVERSE_TEMPLATE.splitlines()
+            if "--" in line and re.search(r":[a-z_]+", line.split("--", 1)[1])
+        ]
+        assert not commented, f"bind name inside a SQL comment: {commented}"
+        db, seed = self._fixture(tmp_path, edges=50)
+        for sql, as_of in ((_TRAVERSE_SQL_NOW, False), (_TRAVERSE_SQL_AS_OF, True)):
+            assert self._plan(db, sql, seed, as_of=as_of)

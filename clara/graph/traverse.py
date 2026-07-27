@@ -23,26 +23,107 @@ DEFAULT_DEPTH = 2
 DEFAULT_FANOUT = 6
 DEFAULT_HOP_DECAY = 0.6
 
-_TRAVERSE_SQL = """
-WITH RECURSIVE ranked AS (
-    SELECT e.edge_id, e.src_id, e.dst_id, e.relation, e.confidence, e.weight,
-           e.valid_from, e.invalid_at, e.temporal_precision, e.belief_id,
-           ROW_NUMBER() OVER (
-               PARTITION BY e.src_id ORDER BY e.weight * e.confidence DESC, e.edge_id
-           ) AS rank_out,
-           ROW_NUMBER() OVER (
-               PARTITION BY e.dst_id ORDER BY e.weight * e.confidence DESC, e.edge_id
-           ) AS rank_in
-    FROM graph_edges e
-    WHERE (
-            (:as_of IS NULL AND e.invalid_at IS NULL)
-         OR (:as_of IS NOT NULL
-             AND strftime('%s', e.valid_from) <= strftime('%s', :as_of)
-             AND (e.invalid_at IS NULL
-                  OR strftime('%s', e.invalid_at) > strftime('%s', :as_of)))
-        )
+# Never write a bind name with its colon inside a comment in the template
+# below: SQLAlchemy's text() does not parse SQL, so it binds the name and
+# substitutes the "?" where SQLite cannot see it, and every call then fails
+# with "Incorrect number of bindings supplied".
+#
+# The validity predicate is substituted at import rather than branched on at
+# runtime. It has to be a *static* `invalid_at IS NULL` for the as-of-now case,
+# because ix_graph_edges_src_valid / _dst_valid are PARTIAL indexes with
+# exactly that WHERE clause: with the check buried inside an OR-ed as-of
+# expression SQLite cannot prove it holds and scans the whole edge table.
+
+_VALIDITY_NOW = "e.invalid_at IS NULL"
+
+_VALIDITY_AS_OF = """(
+            strftime('%s', e.valid_from) <= strftime('%s', :as_of)
+        AND (e.invalid_at IS NULL
+             OR strftime('%s', e.invalid_at) > strftime('%s', :as_of))
+    )"""
+
+_EDGE_COLUMNS = """e.edge_id, e.src_id, e.dst_id, e.relation, e.confidence,
+           e.weight, e.valid_from, e.invalid_at, e.temporal_precision,
+           e.belief_id"""
+
+_TRAVERSE_TEMPLATE = """
+WITH RECURSIVE candidates (node_id, depth) AS (
+    -- Nodes within `depth` hops of the seeds; reachability only, no window
+    -- functions and no fanout. Its sole job is to bound the set that `ranked`
+    -- below has to sort. Without it every traversal window-ranked the WHOLE
+    -- edge table twice, so a five-neighbour seed cost 1.2 s once the graph
+    -- reached 100k edges -- time spent ordering edges the walk can never
+    -- reach.
+    --
+    -- Safe to over-approximate: dropping the fanout cap and the `expandable`
+    -- check here can only make this a superset of what the walk visits, and
+    -- ranking a superset cannot change which edges the walk selects.
+    --
+    -- The two directions are separate recursive terms rather than one
+    -- `ON (src = node OR dst = node)` join: a disjunction across two columns
+    -- is not index-seekable, so the single-term form rescanned every edge at
+    -- every level. SQLite permits multiple recursive terms in the compound.
+    SELECT je.value, 0 FROM json_each(:seeds) AS je
+    UNION  -- not UNION ALL: dedup keeps a hub from re-expanding
+    SELECT e.dst_id, c.depth + 1
+    FROM candidates c
+    CROSS JOIN graph_edges e ON e.src_id = c.node_id
+    WHERE c.depth < :depth AND {validity}
       AND (:relation IS NULL OR e.relation = :relation)
       AND (:uid IS NULL OR coalesce(e.user_id, '') = :uid)
+    UNION
+    SELECT e.src_id, c.depth + 1
+    FROM candidates c
+    CROSS JOIN graph_edges e ON e.dst_id = c.node_id
+    WHERE c.depth < :depth AND {validity}
+      AND (:relation IS NULL OR e.relation = :relation)
+      AND (:uid IS NULL OR coalesce(e.user_id, '') = :uid)
+),
+relevant AS (
+    -- Every edge incident to a candidate node, by the same two index-seekable
+    -- branches. A candidate keeps ALL of its edges, so its rank_out/rank_in
+    -- partition below stays complete and the fanout cut is unchanged; a
+    -- non-candidate endpoint may have a partial partition, but the walk only
+    -- ever ranks partitions belonging to nodes it actually visits, and every
+    -- visited node is a candidate.
+    --
+    -- CROSS JOIN is load-bearing, not style: it is SQLite's documented way to
+    -- pin the outer loop. A materialized CTE carries no row estimate, so with
+    -- a plain JOIN the planner drove from graph_edges and probed `candidates`
+    -- with a bloom filter -- scanning all 100k edges and taking 763 ms, worse
+    -- than the version this replaced. Driving from the handful of candidates
+    -- instead turns it into an index seek.
+    SELECT {edge_columns}
+    FROM candidates c
+    CROSS JOIN graph_edges e ON e.src_id = c.node_id
+    WHERE {validity}
+      AND (:relation IS NULL OR e.relation = :relation)
+      AND (:uid IS NULL OR coalesce(e.user_id, '') = :uid)
+    UNION  -- an edge between two candidates matches both branches
+    SELECT {edge_columns}
+    FROM candidates c
+    CROSS JOIN graph_edges e ON e.dst_id = c.node_id
+    WHERE {validity}
+      AND (:relation IS NULL OR e.relation = :relation)
+      AND (:uid IS NULL OR coalesce(e.user_id, '') = :uid)
+),
+ranked AS (
+    -- Aliased `rel`, not `e`: `e` means the graph_edges table everywhere else
+    -- in this query, and test_traversal_is_index_driven asserts on the plan
+    -- that no line scans `e`. Reusing the alias here would make a real full
+    -- table scan indistinguishable from this (correct, tiny) scan of a CTE.
+    SELECT rel.edge_id, rel.src_id, rel.dst_id, rel.relation, rel.confidence,
+           rel.weight, rel.valid_from, rel.invalid_at, rel.temporal_precision,
+           rel.belief_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY rel.src_id
+               ORDER BY rel.weight * rel.confidence DESC, rel.edge_id
+           ) AS rank_out,
+           ROW_NUMBER() OVER (
+               PARTITION BY rel.dst_id
+               ORDER BY rel.weight * rel.confidence DESC, rel.edge_id
+           ) AS rank_in
+    FROM relevant rel
 ),
 walk (node_id, edge_id, depth, decay_pow, score, path) AS (
     SELECT je.value, NULL, 0, 1.0, 1.0, ''
@@ -77,6 +158,15 @@ ORDER BY score DESC, depth ASC
 LIMIT :lim
 """
 
+# Built once at import; the two differ only in the substituted predicate, so
+# they cannot drift apart the way two hand-maintained queries would.
+_TRAVERSE_SQL_NOW = _TRAVERSE_TEMPLATE.format(
+    validity=_VALIDITY_NOW, edge_columns=_EDGE_COLUMNS
+)
+_TRAVERSE_SQL_AS_OF = _TRAVERSE_TEMPLATE.format(
+    validity=_VALIDITY_AS_OF, edge_columns=_EDGE_COLUMNS
+)
+
 
 async def traverse(
     session: AsyncSession,
@@ -93,21 +183,22 @@ async def traverse(
     """Edges reachable from *seed_ids*, scored ``decay^depth × confidence``."""
     if not seed_ids:
         return []
-    rows = (
-        await session.execute(
-            sa_text(_TRAVERSE_SQL),
-            {
-                "seeds": json.dumps(list(seed_ids)),
-                "depth": max(0, depth),
-                "fanout": max(1, fanout),
-                "hop_decay": hop_decay,
-                "as_of": as_of,
-                "relation": normalize_relation(relation) if relation else None,
-                "uid": user_id if user_id is not None else None,
-                "lim": limit,
-            },
-        )
-    ).mappings().all()
+    params: dict[str, Any] = {
+        "seeds": json.dumps(list(seed_ids)),
+        "depth": max(0, depth),
+        "fanout": max(1, fanout),
+        "hop_decay": hop_decay,
+        "relation": normalize_relation(relation) if relation else None,
+        "uid": user_id if user_id is not None else None,
+        "lim": limit,
+    }
+    # The as-of-now variant has no :as_of bind at all, so it must not be passed.
+    if as_of is None:
+        sql = _TRAVERSE_SQL_NOW
+    else:
+        sql = _TRAVERSE_SQL_AS_OF
+        params["as_of"] = as_of
+    rows = (await session.execute(sa_text(sql), params)).mappings().all()
     return [dict(row) for row in rows]
 
 
