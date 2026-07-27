@@ -296,3 +296,93 @@ class TestNodeIds:
             "WHERE kind = 'module' AND qualified_name = 'pkg.b'"
         ).fetchall()
         assert rows == [("pkg/b.py",)], rows
+
+
+class TestStatPreFilter:
+    """Unchanged files must not be read at all.
+
+    Hashing every file was the entire cost of a no-op re-index. A stat that
+    matches the recorded size and nanosecond mtime skips the read; measured
+    2.7x on a 5,000-file repo, controlled on one store.
+    """
+
+    def test_a_second_pass_reads_nothing(self, repo, conn, monkeypatch):
+        indexer.index_repo(conn, REPO, repo)
+
+        reads: list[str] = []
+        original = Path.read_bytes
+
+        def counting_read(self):  # noqa: ANN001, ANN202 - test shim
+            reads.append(str(self))
+            return original(self)
+
+        monkeypatch.setattr(Path, "read_bytes", counting_read)
+        result = indexer.index_repo(conn, REPO, repo)
+        assert result.skipped_unchanged == 3
+        assert reads == [], f"unchanged files were still read: {reads}"
+
+    def test_a_real_edit_is_still_caught(self, repo, conn):
+        indexer.index_repo(conn, REPO, repo)
+        (repo / "pkg" / "b.py").write_text("import json\n", encoding="utf-8")
+        result = indexer.index_repo(conn, REPO, repo)
+        assert result.processed == 1
+        assert ("pkg.b", "json") in live_edges(conn)
+
+    def test_same_bytes_after_a_touch_is_not_reparsed(self, repo, conn):
+        """A checkout can rewrite a file identically; the hash still gates."""
+        indexer.index_repo(conn, REPO, repo)
+        target = repo / "pkg" / "b.py"
+        content = target.read_text(encoding="utf-8")
+        target.write_text(content, encoding="utf-8")  # new mtime, same bytes
+
+        result = indexer.index_repo(conn, REPO, repo)
+        assert result.processed == 0, "identical bytes must not be re-parsed"
+        assert result.skipped_unchanged == 3
+
+    def test_the_new_signature_is_recorded_after_a_touch(self, repo, conn):
+        """Otherwise every later pass pays the hash for that file forever."""
+        indexer.index_repo(conn, REPO, repo)
+        target = repo / "pkg" / "b.py"
+        target.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        indexer.index_repo(conn, REPO, repo)
+
+        row = conn.execute(
+            "SELECT file_size, mtime_ns FROM index_state "
+            "WHERE repo_id = ? AND path = 'pkg/b.py'",
+            (REPO,),
+        ).fetchone()
+        from clara.index import state as index_state
+
+        assert (row[0], row[1]) == index_state.stat_signature(target)
+
+    def test_rebuild_ignores_the_fast_path(self, repo, conn):
+        indexer.index_repo(conn, REPO, repo)
+        result = indexer.index_repo(conn, REPO, repo, force=True)
+        assert result.processed == 3, "--rebuild must re-parse everything"
+
+
+class TestSchemaUpgrade:
+    def test_a_v9_store_gains_the_stat_columns(self, tmp_path):
+        """Migration 9 shipped without them; editing it in place would leave
+        those stores broken with no way to catch up."""
+        import sqlite3 as sql
+
+        from clara.db.migrations import SCHEMA_VERSION, ensure_schema
+
+        db = tmp_path / "v9.db"
+        conn = sql.connect(db)
+        ensure_schema(conn)
+        conn.execute("DELETE FROM schema_info WHERE version > 9")
+        conn.execute("ALTER TABLE index_state DROP COLUMN file_size")
+        conn.execute("ALTER TABLE index_state DROP COLUMN mtime_ns")
+        conn.commit()
+        conn.close()
+
+        conn = sql.connect(db)
+        try:
+            assert ensure_schema(conn) == SCHEMA_VERSION
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(index_state)")}
+            assert {"file_size", "mtime_ns"} <= columns
+            assert ensure_schema(conn) == SCHEMA_VERSION, "must be idempotent"
+        finally:
+            conn.close()

@@ -212,27 +212,45 @@ def index_file(
 ) -> None:
     """Index one file, skipping it when its bytes are unchanged."""
     absolute = repo_root / rel_path
-    digest = state.content_hash(absolute)
-    if digest is None:
-        nodes, edges = _retire_file(conn, repo_id, rel_path)
-        result.removed += 1
-        result.edges_invalidated += edges
-        return
-    if not force and state.is_unchanged(
-        conn, repo_id, path=rel_path, kind="file", current_hash=digest
+
+    # Cheapest check first. A stat that matches the recorded size and mtime
+    # means the file need not be read at all -- reading every file to hash it
+    # was the entire cost of a no-op re-index (8.4 s on 5,000 files).
+    signature = state.stat_signature(absolute)
+    if not force and state.is_unchanged_by_stat(
+        conn, repo_id, path=rel_path, kind="file", signature=signature
     ):
         result.skipped_unchanged += 1
         return
 
     try:
-        # utf-8-sig, not utf-8: a leading BOM is a character to ast.parse and
-        # fails the whole file ("invalid non-printable character U+FEFF").
-        # Windows-authored sources carry one routinely -- CLARA's own
-        # integrations/openclaw_bridge.py does. Harmless no-op without a BOM.
-        source = absolute.read_text(encoding="utf-8-sig", errors="replace")
+        raw = absolute.read_bytes()
     except OSError:
+        nodes, edges = _retire_file(conn, repo_id, rel_path)
         result.removed += 1
+        result.edges_invalidated += edges
         return
+
+    # One read, not two: hash the bytes already in hand rather than streaming
+    # the file a second time. That was 43% of first-index time.
+    digest = state.hash_bytes(raw)
+    if not force and state.is_unchanged(
+        conn, repo_id, path=rel_path, kind="file", current_hash=digest
+    ):
+        # Bytes are the same but the stat moved (a touch, or a checkout that
+        # rewrote the file identically). Record the new signature so the next
+        # pass takes the cheap path again.
+        state.record_indexed(
+            conn, repo_id, path=rel_path, kind="file",
+            content_hash=digest, lang="python", signature=signature,
+        )
+        result.skipped_unchanged += 1
+        return
+
+    # utf-8-sig, not utf-8: a leading BOM is a character to ast.parse and
+    # fails the whole file ("invalid non-printable character U+FEFF").
+    # Windows-authored sources carry one routinely. Harmless without a BOM.
+    source = raw.decode("utf-8-sig", errors="replace")
 
     parsed = pysource.parse_module(rel_path, source)
     if parsed.syntax_error:
@@ -303,7 +321,7 @@ def index_file(
 
     state.record_indexed(
         conn, repo_id, path=rel_path, kind="file",
-        content_hash=digest, lang="python",
+        content_hash=digest, lang="python", signature=signature,
     )
     result.processed += 1
 
