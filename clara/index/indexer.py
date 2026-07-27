@@ -11,6 +11,13 @@ importing it — are left alone, because they belong to those files and their
 bytes did not change. That is what keeps a one-file edit O(file) instead of
 O(repo).
 
+Languages: Python through the standard library's ``ast``, JavaScript and
+TypeScript through the scanner in ``jssource``. A Python module's qualified
+name is its dotted import path; a JS module has no such thing, so its
+repo-relative path *is* its name. Both converge on the same node ids either
+way, which is what lets an import edge written before the target file is
+indexed join up to it afterwards.
+
 Node ids are content-addressed: ``blake2b(repo_id, kind, qualified_name)``.
 Stable, so the same module gets the same id no matter which file mentions it
 first, and joinable by plain equality — the belief graph's ``replace(CAST(...))``
@@ -24,17 +31,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from clara.index import journal, pysource, state
+from clara.index import journal, jssource, pysource, state
 
-# Only Python for now. The parser is stdlib `ast`; other languages need their
-# own and are not pretended to work.
-INDEXABLE_SUFFIXES = frozenset({".py"})
+# Python via stdlib `ast`; JS/TS via the scanner in jssource. Nothing else is
+# claimed to work -- a .go or .rb file is simply not indexed.
+PYTHON_SUFFIXES = frozenset({".py"})
+SCRIPT_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"})
+INDEXABLE_SUFFIXES = PYTHON_SUFFIXES | SCRIPT_SUFFIXES
+
+# Declaration files describe types for code that already has a module node.
+# Indexing them doubles the node count and adds no edge anyone asks about.
+_SKIP_FILES = (".d.ts",)
 
 _SKIP_DIRS = frozenset(
     {
@@ -204,6 +218,76 @@ def _submodule_targets(
     return resolved
 
 
+def _lang_for(rel_path: str) -> str:
+    """Language label from the extension, for the ``lang`` column."""
+    suffix = Path(rel_path).suffix.lower()
+    if suffix in PYTHON_SUFFIXES:
+        return "python"
+    if suffix in (".ts", ".tsx"):
+        return "typescript"
+    return "javascript"
+
+
+def _emit_script(
+    conn: sqlite3.Connection,
+    repo_id: str,
+    repo_root: Path,
+    rel_path: str,
+    source: str,
+    lang: str,
+    aliases: dict[str, list[str]],
+    result: IndexResult,
+) -> None:
+    """Nodes and edges for one JS/TS file.
+
+    A JS module has no dotted name, so the repo-relative path *is* the
+    qualified name. Resolution decides the other end: a specifier that lands on
+    a file in this repo edges to that file's own node -- the same id the file
+    gets when it is indexed itself, so the graph joins up regardless of order.
+    Anything else (``react``, ``node:fs``, a bundled SDK's dangling relative
+    path) becomes a node with no file_path, which is what "external" means here.
+    """
+    parsed = jssource.parse_script(rel_path, source)
+    module_node = _upsert_node(
+        conn, repo_id, kind="module", qualified_name=rel_path,
+        file_path=rel_path, lang=lang, span=None,
+    )
+    result.nodes_written += 1
+
+    result.edges_invalidated += _invalidate_outbound(
+        conn, repo_id, _node_ids_for_file(conn, repo_id, rel_path)
+    )
+
+    seen: set[str] = set()
+    for specifier in parsed.specifiers:
+        target = jssource.resolve_specifier(repo_root, rel_path, specifier, aliases)
+        qualified = target or specifier
+        # A module importing itself is not an edge worth recording, and would
+        # show up as a one-node cycle in find_cycles.
+        if qualified in seen or qualified == rel_path:
+            continue
+        seen.add(qualified)
+        dst = _upsert_node(
+            conn, repo_id, kind="module", qualified_name=qualified,
+            file_path=None, lang=None, span=None,
+        )
+        conn.execute(
+            "INSERT INTO code_edges "
+            "(edge_id, repo_id, src_id, dst_id, relation, confidence, "
+            " valid_from, metadata) VALUES (?, ?, ?, ?, 'imports', 1.0, ?, ?)",
+            (
+                uuid.uuid4().hex, repo_id, module_node, dst, _now(),
+                json.dumps({
+                    "specifier": specifier,
+                    "resolver": "static",
+                    "external": target is None,
+                    "deferred": specifier in parsed.deferred,
+                }),
+            ),
+        )
+        result.edges_written += 1
+
+
 def index_file(
     conn: sqlite3.Connection,
     repo_id: str,
@@ -212,9 +296,11 @@ def index_file(
     result: IndexResult,
     *,
     force: bool = False,
+    aliases: dict[str, list[str]] | None = None,
 ) -> None:
     """Index one file, skipping it when its bytes are unchanged."""
     absolute = repo_root / rel_path
+    lang = _lang_for(rel_path)
 
     # Cheapest check first. A stat that matches the recorded size and mtime
     # means the file need not be read at all -- reading every file to hash it
@@ -245,7 +331,7 @@ def index_file(
         # pass takes the cheap path again.
         state.record_indexed(
             conn, repo_id, path=rel_path, kind="file",
-            content_hash=digest, lang="python", signature=signature,
+            content_hash=digest, lang=lang, signature=signature,
         )
         result.skipped_unchanged += 1
         return
@@ -254,6 +340,19 @@ def index_file(
     # fails the whole file ("invalid non-printable character U+FEFF").
     # Windows-authored sources carry one routinely. Harmless without a BOM.
     source = raw.decode("utf-8-sig", errors="replace")
+
+    if lang != "python":
+        if aliases is None:
+            aliases = jssource.load_path_aliases(repo_root)
+        _emit_script(
+            conn, repo_id, repo_root, rel_path, source, lang, aliases, result
+        )
+        state.record_indexed(
+            conn, repo_id, path=rel_path, kind="file",
+            content_hash=digest, lang=lang, signature=signature,
+        )
+        result.processed += 1
+        return
 
     parsed = pysource.parse_module(rel_path, source)
     if parsed.syntax_error:
@@ -331,18 +430,27 @@ def index_file(
 
 
 def walk_repo(repo_root: Path) -> list[str]:
-    """Every indexable file, repo-relative, skipping vendored trees."""
+    """Every indexable file, repo-relative, skipping vendored trees.
+
+    Skipped directories are pruned *during* the walk, not filtered after it.
+    The earlier version rglob'd everything and discarded what it did not want,
+    which on a real Node repo meant visiting 184,642 paths to find 2,568 --
+    33 s of the walk spent descending into node_modules only to throw the
+    results away. Pruning is the same answer for a fraction of the syscalls,
+    and it applies equally to .venv and site-packages in Python repos.
+    """
     found: list[str] = []
-    for path in sorted(repo_root.rglob("*")):
-        if not path.is_file() or path.suffix not in INDEXABLE_SUFFIXES:
-            continue
-        try:
-            relative = path.relative_to(repo_root)
-        except ValueError:  # pragma: no cover - rglob guarantees this
-            continue
-        if any(part in _SKIP_DIRS for part in relative.parts):
-            continue
-        found.append(relative.as_posix())
+    root = str(repo_root)
+    for current, dirnames, filenames in os.walk(root):
+        # Mutating dirnames in place is what stops os.walk descending.
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        for name in sorted(filenames):
+            if os.path.splitext(name)[1] not in INDEXABLE_SUFFIXES:
+                continue
+            if name.endswith(_SKIP_FILES):
+                continue
+            absolute = os.path.join(current, name)
+            found.append(Path(absolute).relative_to(repo_root).as_posix())
     return found
 
 
@@ -360,12 +468,19 @@ def index_repo(
     # its own fsync: measured 84.9 s for CLARA's own tree that way versus 0.7 s
     # inside a single transaction. Batching is the difference between a usable
     # command and one nobody runs twice.
+    # tsconfig is read once per pass, not once per file: it does not change
+    # mid-walk, and re-reading it for every one of thousands of files is pure
+    # IO for an unchanging answer.
+    aliases = jssource.load_path_aliases(repo_root)
     managed = not conn.in_transaction
     if managed:
         conn.execute("BEGIN")
     try:
         for rel_path in walk_repo(repo_root):
-            index_file(conn, repo_id, repo_root, rel_path, result, force=force)
+            index_file(
+                conn, repo_id, repo_root, rel_path, result,
+                force=force, aliases=aliases,
+            )
         if managed:
             conn.execute("COMMIT")
         else:
@@ -395,6 +510,7 @@ def drain_journal(
     batch = journal.claim_batch(conn, repo_id, worker=worker, limit=limit)
     if not batch:
         return result
+    aliases = jssource.load_path_aliases(repo_root)
     for entry in batch:
         if entry.change in ("git", "manifest") or not entry.path:
             continue
@@ -409,7 +525,9 @@ def drain_journal(
             continue
         if Path(entry.path).suffix not in INDEXABLE_SUFFIXES:
             continue
-        index_file(conn, repo_id, repo_root, entry.path, result)
+        if entry.path.endswith(_SKIP_FILES):
+            continue
+        index_file(conn, repo_id, repo_root, entry.path, result, aliases=aliases)
     conn.commit()
     # Only after the work is durable: a crash between these two leaves the
     # entries claimed, and the staleness sweep returns them to the queue.

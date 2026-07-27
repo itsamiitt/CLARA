@@ -376,6 +376,17 @@ is needed).
   breaks if I change this module" before you edit it. They report
   `indexed: false` on a repo that has not been indexed, rather than
   reporting no dependencies.
+
+  Python (`.py`) and JavaScript/TypeScript (`.ts .tsx .js .jsx .mjs .cjs`)
+  are indexed. Python uses the standard library's own `ast`; JS/TS uses a
+  scanner checked against the TypeScript compiler over 2,100 files of two
+  production repos — 8,313 module specifiers, zero missed and zero invented.
+  `tsconfig.json` path aliases (`@/lib/db`) are resolved, so imports written
+  that way are internal edges rather than phantom packages. Other languages
+  are not indexed; a Go or Ruby file is skipped, not half-parsed.
+
+  Measured on a 2,568-file TypeScript repo: first index 16 s, re-index with
+  nothing changed 1.15 s, `code_impact` at depth 3 about 150 ms.
 - **Docs curator (5):** `docs_status`, `docs_classify`, `docs_supersede`,
   `docs_fulfill`, `docs_report`.
 - **Knowledge graph (4):** `graph_entity`, `graph_neighbors`, `graph_path`,
