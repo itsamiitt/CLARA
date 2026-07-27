@@ -13,7 +13,9 @@ Discipline, in order of importance:
 * **Silence is the default.** Most prompts match nothing and must emit
   nothing — a recall block on every prompt is noise that trains the model to
   ignore all of them. Matching is conservative on purpose: two distinct
-  content words, or one long one.
+  content words, or one store-rare word from the memory's naming fields.
+  Facts stamped by a different repository clear a higher bar still, so one
+  project's findings do not wander into another's sessions uninvited.
 * **Never blocks, never writes the store.** Same contract as the session
   hook: exit 0 on every path, read-only connection, 3 s busy timeout,
   stdlib only.
@@ -36,7 +38,13 @@ from clara.fastpath.context import _make_stdout_lossy, sanitize
 
 MAX_HITS = 3
 _MIN_PROMPT_LEN = 12
-_LONG_TOKEN = 8  # one match this long is signal on its own
+# A token is "rare" when this few stored memories mention it. Rarity, not
+# length, is what makes a single-token match meaningful: "pnpm" (4 chars,
+# probably one memory) identifies its fact outright, while "database"
+# (8 chars, half the store) identifies nothing -- the original length-only
+# rule had that exactly backwards, and missed a lone-"pnpm" prompt.
+_RARE_DOC_COUNT = 3
+_MIN_SINGLE_TOKEN = 4
 
 # Words that match everything and mean nothing for recall.
 _STOPWORDS = frozenset(
@@ -58,6 +66,14 @@ def _tokens(text: str) -> set[str]:
     }
 
 
+# Fields that NAME what a memory is about. A lone-token match may qualify
+# only against these: "pnpm" in an object identifies its fact, while a verb
+# like "uses" in the relation matches half the store and identifies nothing.
+_IDENTIFIER_FIELDS = (
+    "subject", "object", "name", "entity_type", "domain", "event_type"
+)
+
+
 def _memory_text(memory: dict[str, object]) -> str:
     content = memory.get("content")
     parts: list[str] = []
@@ -75,15 +91,69 @@ def _memory_text(memory: dict[str, object]) -> str:
     return " ".join(parts)
 
 
-def _matches(prompt_tokens: set[str], memory: dict[str, object]) -> int:
-    """Conservative overlap score; 0 means "do not show"."""
-    memory_tokens = _tokens(_memory_text(memory))
+def _identifier_tokens(memory: dict[str, object]) -> set[str]:
+    content = memory.get("content")
+    parts: list[str] = []
+    if isinstance(content, dict):
+        for fieldname in _IDENTIFIER_FIELDS:
+            value = content.get(fieldname)
+            if isinstance(value, str):
+                parts.append(value)
+    metadata = memory.get("metadata")
+    if isinstance(metadata, dict):
+        tags = metadata.get("tags")
+        if isinstance(tags, list):
+            parts.extend(str(tag) for tag in tags)
+    return _tokens(" ".join(parts))
+
+
+def _doc_frequency(memory_token_sets: list[set[str]]) -> dict[str, int]:
+    """How many memories mention each token — the store's own rarity signal."""
+    frequency: dict[str, int] = {}
+    for tokens in memory_token_sets:
+        for token in tokens:
+            frequency[token] = frequency.get(token, 0) + 1
+    return frequency
+
+
+def _matches(
+    prompt_tokens: set[str],
+    memory_tokens: set[str],
+    identifier_tokens: set[str],
+    frequency: dict[str, int],
+    *,
+    foreign: bool,
+) -> int:
+    """Conservative overlap score; 0 means "do not show".
+
+    Qualifying overlap: two distinct content words anywhere in the memory, or
+    a single word that both NAMES the memory (subject/object/name/tags, never
+    the relation — "uses" matches half the store and identifies nothing) and
+    is rare across the store. Rarity, not length: "pnpm" in one memory
+    identifies its fact; "database" in thirty identifies none of them.
+
+    Memories stamped with a *different* repository's id need both: two hits
+    AND a rare identifying one. A generic overlap is enough to recall this
+    project's own facts, not enough to drag another project's findings into
+    the conversation uninvited. In a near-empty store every token is rare and
+    cross-project facts surface on one strong name — the right behaviour at
+    that scale, where there is nothing to drown in.
+    """
     hits = prompt_tokens & memory_tokens
     if not hits:
         return 0
-    if len(hits) >= 2 or any(len(hit) >= _LONG_TOKEN for hit in hits):
-        return len(hits) + max(len(hit) for hit in hits) // _LONG_TOKEN
-    return 0
+    rare_naming_hits = [
+        hit for hit in (prompt_tokens & identifier_tokens)
+        if frequency.get(hit, 0) <= _RARE_DOC_COUNT
+        and len(hit) >= _MIN_SINGLE_TOKEN
+    ]
+    if foreign:
+        qualified = len(hits) >= 2 and bool(rare_naming_hits)
+    else:
+        qualified = len(hits) >= 2 or bool(rare_naming_hits)
+    if not qualified:
+        return 0
+    return len(hits) + len(rare_naming_hits)
 
 
 def _render(memory: dict[str, object]) -> str:
@@ -142,7 +212,7 @@ def recall(prompt: str, cwd: str, session_id: str) -> str | None:
     if not prompt_tokens:
         return None
 
-    db_path, _rid = db.resolve_store(cwd)
+    db_path, current_repo = db.resolve_store(cwd)
     if db_path is None:
         return None
     conn = db.open_store(db_path)
@@ -156,19 +226,40 @@ def recall(prompt: str, cwd: str, session_id: str) -> str | None:
         conn.close()
 
     shown = _already_shown(session_id)
-    scored: list[tuple[int, float, dict[str, object]]] = []
-    for memory in memories:
+    token_sets = [_tokens(_memory_text(memory)) for memory in memories]
+    identifier_sets = [_identifier_tokens(memory) for memory in memories]
+    frequency = _doc_frequency(token_sets)
+
+    scored: list[tuple[int, int, float, dict[str, object]]] = []
+    for memory, memory_tokens, naming in zip(
+        memories, token_sets, identifier_sets, strict=True
+    ):
         if str(memory.get("memory_id")) in shown:
             continue
-        score = _matches(prompt_tokens, memory)
+        # A memory belongs "here" when it is stamped with this repository's
+        # id, carries no stamp at all, or is about the user — preferences
+        # follow the person across every project.
+        metadata = memory.get("metadata")
+        stamped = metadata.get("repo_id") if isinstance(metadata, dict) else None
+        content = memory.get("content")
+        subject = content.get("subject") if isinstance(content, dict) else None
+        local = (
+            not stamped
+            or str(stamped) == current_repo
+            or (isinstance(subject, str) and subject.strip().lower() == "user")
+        )
+        score = _matches(
+            prompt_tokens, memory_tokens, naming, frequency, foreign=not local
+        )
         if score > 0:
             raw = memory.get("confidence", 0.0)
             rank_conf = raw if isinstance(raw, float) else 0.0
-            scored.append((score, rank_conf, memory))
+            scored.append((0 if local else 1, score, rank_conf, memory))
     if not scored:
         return None
-    scored.sort(key=lambda item: (-item[0], -item[1]))
-    picked = [memory for _, _, memory in scored[:MAX_HITS]]
+    # This project's facts outrank another project's, whatever the overlap.
+    scored.sort(key=lambda item: (item[0], -item[1], -item[2]))
+    picked = [memory for _, _, _, memory in scored[:MAX_HITS]]
 
     _record_shown(session_id, [str(m.get("memory_id")) for m in picked])
     lines = [_render(memory) for memory in picked]
