@@ -67,6 +67,46 @@ def global_db_path() -> Path:
     return base / "clara.db"
 
 
+def _project_store_above(anchor: str) -> Path | None:
+    """Nearest ``.clara/clara.db`` at or above *anchor*, without asking git.
+
+    Store selection must not hinge on a git subprocess succeeding. When git is
+    missing, slow, or blocked, ``git_toplevel`` returns None and the caller
+    would fall back to *anchor* itself — so a session opened in a subdirectory
+    would silently miss its project store and write to the global one instead.
+    Walking the parents is stdlib-only, deterministic, and cheap.
+    """
+    try:
+        current = Path(anchor).resolve()
+    except OSError:
+        return None
+    # Never walk far enough to pick up the *global* store and relabel it as a
+    # project store: ~/.clara/clara.db sits above every path under the home
+    # directory, so an unrelated temp dir would otherwise "find" it.
+    try:
+        global_store = global_db_path().resolve()
+    except OSError:
+        global_store = None
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
+
+    for directory in (current, *current.parents):
+        if home is not None and directory == home:
+            break
+        candidate = directory / ".clara" / "clara.db"
+        try:
+            if not candidate.is_file():
+                continue
+            if global_store is not None and candidate.resolve() == global_store:
+                continue
+            return candidate
+        except OSError:
+            continue
+    return None
+
+
 def resolve_store(anchor: str | None = None, *, create: bool = False) -> StoreResolution:
     """Resolve the store for *anchor* (a directory; defaults to cwd).
 
@@ -86,6 +126,11 @@ def resolve_store(anchor: str | None = None, *, create: bool = False) -> StoreRe
         )
     else:
         project = Path(root or anchor) / ".clara" / "clara.db"
+        if not project.is_file() and root is None:
+            # git could not tell us the repo root; look for the store directly.
+            found = _project_store_above(anchor)
+            if found is not None:
+                project = found
         if project.is_file():
             resolution = StoreResolution(
                 db_path=project, scope="project", exists=True, repo_root=root

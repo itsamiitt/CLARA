@@ -190,3 +190,64 @@ class TestResolutionDataclass:
         assert isinstance(res, StoreResolution)
         with pytest.raises(dataclasses.FrozenInstanceError):
             res.scope = "hacked"  # type: ignore[misc]
+
+
+class TestProjectStoreWithoutGit:
+    """Store selection must not depend on a git subprocess succeeding.
+
+    Regression: `git rev-parse` was timing out inside the MCP server (it
+    inherited the transport's stdin), so `git_toplevel` returned None on every
+    call. `resolve_store` then fell back to the anchor itself, which meant a
+    session opened in a subdirectory silently missed its project store and
+    read and wrote the global one instead.
+    """
+
+    def _repo_with_project_store(self, tmp_path):
+        subprocess.run(
+            ["git", "init", "-q", str(tmp_path)],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+        (tmp_path / ".clara").mkdir()
+        (tmp_path / ".clara" / "clara.db").write_bytes(b"")
+        nested = tmp_path / "src" / "deep"
+        nested.mkdir(parents=True)
+        return nested
+
+    def test_subdirectory_finds_project_store_with_git(self, tmp_path, isolated_home):
+        nested = self._repo_with_project_store(tmp_path)
+        assert resolve_store(str(nested)).scope == "project"
+
+    def test_subdirectory_finds_project_store_without_git(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        nested = self._repo_with_project_store(tmp_path)
+        monkeypatch.setattr("clara.store.git_toplevel", lambda _cwd: None)
+        resolution = resolve_store(str(nested))
+        assert resolution.scope == "project"
+        assert resolution.db_path == tmp_path / ".clara" / "clara.db"
+
+    def test_walk_up_never_claims_the_global_store(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        # ~/.clara/clara.db sits above every path under the home directory, so
+        # an unrelated directory must not walk up, find it, and report it as a
+        # *project* store. Path.home() is patched as well as CLARA_HOME: the
+        # walk consults the real home otherwise, and an earlier version of this
+        # test wrote into it.
+        fake_home = tmp_path / "home"
+        (fake_home / ".clara").mkdir(parents=True)
+        (fake_home / ".clara" / "clara.db").write_bytes(b"")
+        monkeypatch.setenv("CLARA_HOME", str(fake_home / ".clara"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: fake_home))
+
+        unrelated = fake_home / "somewhere" / "else"
+        unrelated.mkdir(parents=True)
+        monkeypatch.setattr("clara.store.git_toplevel", lambda _cwd: None)
+        assert resolve_store(str(unrelated)).scope == "global"
+
+    def test_no_project_store_still_resolves_global(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        monkeypatch.setattr("clara.store.git_toplevel", lambda _cwd: None)
+        assert resolve_store(str(tmp_path)).scope == "global"
