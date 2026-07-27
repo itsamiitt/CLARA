@@ -17,7 +17,10 @@ if ($env:CLARA_HOME) { $base = $env:CLARA_HOME }
 else { $base = Join-Path $HOME ".clara" }
 
 # Repo root: walk up from the hook cwd looking for .git.
-$dir = (Get-Location).Path
+# Claude Code hands hooks CLAUDE_PROJECT_DIR, which is authoritative; the
+# process cwd is only a guess and is wrong whenever the hook runs from anywhere
+# but the project root. Mirrors scripts/read-annotate.sh.
+$dir = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { (Get-Location).Path }
 $root = $null
 while ($dir) {
     if (Test-Path (Join-Path $dir ".git")) { $root = $dir; break }

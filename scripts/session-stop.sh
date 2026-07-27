@@ -25,7 +25,13 @@ FLAG="$FLAG_DIR/${CLAUDE_SESSION_ID:-pid$$}.done"
 [ -e "$FLAG" ] && exit 0
 
 # Repo root: walk up from the hook cwd looking for .git (no subprocess).
-dir=$PWD
+# Claude Code hands hooks CLAUDE_PROJECT_DIR ("Hooks: Added CLAUDE_PROJECT_DIR
+# env var for hook commands"), which is authoritative; $PWD is only a guess and
+# is wrong whenever the hook runs from anywhere but the project root. Verified:
+# with cwd elsewhere the walk below found no repo and the annotation was
+# silently dropped. Backslashes are normalised so a native Windows value works
+# under MSYS sh.
+dir=$(printf '%s' "${CLAUDE_PROJECT_DIR:-$PWD}" | tr '\\' '/')
 root=''
 while [ -n "$dir" ] && [ "$dir" != "/" ]; do
   if [ -e "$dir/.git" ]; then

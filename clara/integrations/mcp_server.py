@@ -113,6 +113,16 @@ async def _session_anchor() -> str:
             except OSError:
                 anchor = None
     if anchor is None:
+        # Claude Code passes CLAUDE_PROJECT_DIR to stdio MCP servers ("MCP
+        # stdio servers now receive CLAUDE_PROJECT_DIR in their environment,
+        # matching hooks"). It is fixed at launch, so it ranks below roots and
+        # the session-cwd hint, both of which track a mid-session cd — but it
+        # beats the process cwd, which for a server spawned by the client is
+        # only incidentally related to the project.
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+        if project_dir and os.path.isdir(project_dir):
+            anchor = project_dir
+    if anchor is None:
         anchor = os.getcwd()
     _anchor_cache = (now, anchor)
     return anchor

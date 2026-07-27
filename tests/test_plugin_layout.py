@@ -449,3 +449,65 @@ class TestSlashCommandsAreDiscoverable:
             "these slash commands invoke the clara CLI without saying where it "
             f"lives for a plugin install: {sorted(offenders)}"
         )
+
+
+class TestHooksUseClaudeProjectDir:
+    """Hooks must use the project dir Claude Code hands them, not their cwd.
+
+    Claude Code's changelog: "Hooks: Added CLAUDE_PROJECT_DIR env var for hook
+    commands", and later "MCP stdio servers now receive CLAUDE_PROJECT_DIR in
+    their environment, matching hooks". CLARA walked up from $PWD instead.
+    Verified before the fix: with the hook's cwd outside the repo and
+    CLAUDE_PROJECT_DIR pointing at it, the quarantine annotation was silently
+    dropped.
+
+    Relativisation had the same flaw: it measured the read file against $PWD,
+    so a read while cwd was a *subdirectory* produced the wrong relative path.
+    """
+
+    def _hook_source(self, name: str) -> str:
+        return (_ROOT / "scripts" / name).read_text("utf-8")
+
+    @pytest.mark.parametrize("hook", ["read-annotate.sh", "session-stop.sh"])
+    def test_sh_hooks_prefer_the_project_dir(self, hook):
+        source = self._hook_source(hook)
+        assert "CLAUDE_PROJECT_DIR" in source, f"{hook} still guesses from cwd"
+        # ...and still works when the variable is absent.
+        assert ":-$PWD" in source, f"{hook} must fall back to cwd"
+
+    @pytest.mark.parametrize("hook", ["read-annotate.ps1", "session-stop.ps1"])
+    def test_ps1_hooks_prefer_the_project_dir(self, hook):
+        source = (_ROOT / "scripts" / "win" / hook).read_text("utf-8")
+        assert "CLAUDE_PROJECT_DIR" in source, f"{hook} still guesses from cwd"
+        assert "Get-Location" in source, f"{hook} must fall back to cwd"
+
+    def test_relativisation_uses_the_discovered_root(self):
+        """Not $PWD — a read from a subdirectory would otherwise mis-relativise."""
+        source = self._hook_source("read-annotate.sh")
+        assert 'CLARA_HK_ROOT_B="$root"' in source
+        assert 'CLARA_HK_ROOT_B="$PWD"' not in source
+
+    def test_backslash_normalisation_is_portable(self):
+        """A lone backslash as a tr operand is undefined in POSIX; BSD tr on
+        macOS need not accept it, and GNU tr warns."""
+        backslash = chr(92)
+        portable = "tr " + chr(39) + backslash * 2 + chr(39)   # tr '\'
+        lone = "tr " + chr(39) + backslash + chr(39) + " "     # tr '' followed by a space
+        for hook in ("read-annotate.sh", "session-stop.sh"):
+            source = self._hook_source(hook)
+            assert portable in source, f"{hook} does not escape the tr operand"
+            assert lone not in source, f"{hook} uses a lone backslash operand"
+
+
+class TestMcpServerUsesClaudeProjectDir:
+    def test_anchor_falls_back_to_project_dir_before_cwd(self):
+        import inspect
+
+        from clara.integrations import mcp_server
+
+        source = inspect.getsource(mcp_server._session_anchor)
+        assert "CLAUDE_PROJECT_DIR" in source
+        # It must rank below the signals that track a mid-session cd.
+        assert source.index("list_roots") < source.index("CLAUDE_PROJECT_DIR")
+        assert source.index("session-cwd") < source.index("CLAUDE_PROJECT_DIR")
+        assert source.index("CLAUDE_PROJECT_DIR") < source.index("os.getcwd()")

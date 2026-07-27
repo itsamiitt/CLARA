@@ -23,7 +23,13 @@ esac
 BASE="${CLARA_HOME:-${HOME:-/tmp}/.clara}"
 
 # Repo root: walk up from the hook cwd looking for .git (no subprocess).
-dir=$PWD
+# Claude Code hands hooks CLAUDE_PROJECT_DIR ("Hooks: Added CLAUDE_PROJECT_DIR
+# env var for hook commands"), which is authoritative; $PWD is only a guess and
+# is wrong whenever the hook runs from anywhere but the project root. Verified:
+# with cwd elsewhere the walk below found no repo and the annotation was
+# silently dropped. Backslashes are normalised so a native Windows value works
+# under MSYS sh.
+dir=$(printf '%s' "${CLAUDE_PROJECT_DIR:-$PWD}" | tr '\\' '/')
 root=''
 while [ -n "$dir" ] && [ "$dir" != "/" ]; do
   if [ -e "$dir/.git" ]; then
@@ -78,7 +84,11 @@ mkdir -p "$FLAG_DIR" 2>/dev/null || exit 0
 # debounce (getline probes the flag file), JSON emission. Values travel via
 # ENVIRON, never -v: awk -v escape-processes backslashes and would corrupt
 # Windows paths.
-CLARA_HK_FILE="$FILE" CLARA_HK_ROOT_A="$marker_root" CLARA_HK_ROOT_B="$PWD" \
+# root_b is the project root we actually found, not $PWD: the hook may run
+# from a subdirectory (relativising against it yields the wrong path) or from
+# outside the project entirely (no match at all). root_a stays the marker
+# file's native spelling so both path forms resolve.
+CLARA_HK_FILE="$FILE" CLARA_HK_ROOT_A="$marker_root" CLARA_HK_ROOT_B="$root" \
 CLARA_HK_MANIFEST="$MANIFEST" CLARA_HK_FLAGDIR="$FLAG_DIR" \
 awk '
 BEGIN {
