@@ -819,12 +819,26 @@ async def _cmd_restore(args: argparse.Namespace) -> int:
     if not source.is_file():
         print(f"no such file: {source}", file=sys.stderr)
         return 1
-    conn = _sqlite3.connect(source)
     try:
-        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-        version = get_version(conn)
-    finally:
-        conn.close()
+        conn = _sqlite3.connect(source)
+        try:
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            version = get_version(conn)
+        finally:
+            conn.close()
+    except _sqlite3.DatabaseError as exc:
+        # Pointing restore at a .zip, a .jsonl export, or a half-downloaded file
+        # is a user mistake, not an internal failure. Uncaught, this reached the
+        # top-level handler and exited 70 (EX_SOFTWARE), which this CLI documents
+        # as "unexpected internal failure" — telling the user to report a bug
+        # when the fix is to pass a different path.
+        print(
+            f"refusing to restore: {source} is not a CLARA store ({exc}).\n"
+            f"       Backups live in <store dir>/backups/ and are named "
+            f"clara-<timestamp>-<reason>.db",
+            file=sys.stderr,
+        )
+        return 1
     if integrity != "ok":
         print(f"refusing to restore: source failed integrity_check ({integrity})",
               file=sys.stderr)
