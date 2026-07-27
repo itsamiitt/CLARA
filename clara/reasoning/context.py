@@ -25,7 +25,11 @@ def _rationale(sm: ScoredMemory) -> str:
     first = evidence[0]
     if not isinstance(first, dict):
         return ""
-    return _s(first.get("text", ""), max_len=RATIONALE_MAX_LEN)
+    raw = first.get("text")
+    # Present-but-None must not become the literal rationale "None".
+    if not raw:
+        return ""
+    return _s(raw, max_len=RATIONALE_MAX_LEN)
 
 
 def _format_belief(sm: ScoredMemory) -> str:

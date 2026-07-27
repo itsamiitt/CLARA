@@ -95,3 +95,49 @@ class TestRankLocality:
         ranked = context.rank(memories, NOW)
         assert ranked[0]["content"]["subject"] == "their service"
         assert not any(m.get("_foreign") for m in ranked)
+
+
+class TestExporterLocality:
+    """MEMORY.md is a PROJECT file and gets the project treatment.
+
+    The exporter writes projects/<project>/memory/MEMORY.md — per project,
+    loaded by Claude Code for that project. An earlier commit called these
+    files user-global and pinned score-only ordering for them; that claim
+    was false, this class replaces it with the verified behaviour.
+    """
+
+    def test_fence_labels_another_projects_facts(self) -> None:
+        from clara.bridge import exporter
+
+        memories = [
+            _memory("payments service", "stripe", repo=ELSEWHERE),
+            _memory("user", "pnpm", repo=ELSEWHERE),
+        ]
+        body = exporter.build_section_body(memories, NOW, HERE)
+        lines = body.splitlines()
+        payments = next(line for line in lines if "payments" in line)
+        pnpm = next(line for line in lines if "pnpm" in line)
+        assert "[from another project]" in payments
+        assert "[from another project]" not in pnpm, "user prefs are not foreign"
+        # Local-first ordering: the user's own fact above the foreign one.
+        assert lines.index(pnpm) < lines.index(payments)
+
+    def test_topic_file_labels_but_never_suppresses(self) -> None:
+        from clara.bridge import exporter
+
+        memories = [
+            _memory(f"their thing {i}", f"tool {i}", repo=ELSEWHERE, mem_id=f"t{i}")
+            for i in range(6)
+        ]
+        text = exporter.build_topic_file(memories, NOW, HERE)
+        # FOREIGN_CAP orders the head; the topic file is the FULL set and
+        # every memory must still be present.
+        assert sum("their thing" in line for line in text.splitlines()) == 6
+        assert "[from another project]" in text
+
+    def test_a_belief_without_description_has_no_none_rationale(self) -> None:
+        memories = [_memory("api", "redis", repo=HERE)]
+        memories[0]["metadata"]["evidence"] = [{"text": None}]
+        ranked = context.rank(memories, NOW, HERE)
+        block = context.format_block(ranked)
+        assert "None" not in block

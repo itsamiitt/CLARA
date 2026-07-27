@@ -54,7 +54,12 @@ def _bullet(memory: dict[str, object]) -> str | None:
     if formatter is None:
         return None
     try:
-        return formatter(memory) + _provenance_tag(memory)
+        line = formatter(memory)
+        if memory.get("_foreign"):
+            # Stamped by a different repository than the project this file
+            # belongs to; labeled the same way as every other surface.
+            line += " [from another project]"
+        return line + _provenance_tag(memory)
     except Exception:  # noqa: BLE001 — one bad row must not kill the export
         return None
 
@@ -82,9 +87,19 @@ def _read_if_exists(path: Path) -> str:
     return lp.read_text(encoding="utf-8") if lp.is_file() else ""
 
 
-def build_section_body(memories: list[dict[str, object]], now_epoch: float) -> str:
-    """The fenced MEMORY.md body: header note + top-ranked bullets in budget."""
-    top = fp_context.rank(memories, now_epoch)
+def build_section_body(
+    memories: list[dict[str, object]],
+    now_epoch: float,
+    current_repo: str | None = None,
+) -> str:
+    """The fenced MEMORY.md body: header note + top-ranked bullets in budget.
+
+    MEMORY.md lives under the PROJECT's auto-memory directory and Claude Code
+    loads it for that project, so it gets the same locality treatment as the
+    session-start block: this project's memories first, another project's
+    labeled and capped. (An earlier note here called these files user-global.
+    That was wrong -- the path is projects/<project>/memory/MEMORY.md.)"""
+    top = fp_context.rank(memories, now_epoch, current_repo)
     lines = [
         "## CLARA memory (managed)",
         "Managed by the CLARA plugin - edit via memory tools "
@@ -105,7 +120,11 @@ def build_section_body(memories: list[dict[str, object]], now_epoch: float) -> s
     return "\n".join(lines) + "\n"
 
 
-def build_topic_file(memories: list[dict[str, object]], now_epoch: float) -> str:
+def build_topic_file(
+    memories: list[dict[str, object]],
+    now_epoch: float,
+    current_repo: str | None = None,
+) -> str:
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = [
         "# CLARA memory (full set)",
@@ -114,7 +133,9 @@ def build_topic_file(memories: list[dict[str, object]], now_epoch: float) -> str
         "overwritten on sync; use memory tools instead.",
         "",
     ]
-    ranked = fp_context.rank(memories, now_epoch)
+    # The topic file is the FULL set: locality orders and labels, but must
+    # never suppress -- everything active is exported below regardless.
+    ranked = fp_context.rank(memories, now_epoch, current_repo)
     ranked_ids = {str(m.get("memory_id")) for m in ranked}
     ordered = ranked + [m for m in memories if str(m.get("memory_id")) not in ranked_ids]
     for mem_type, header in _GROUPS:
@@ -160,9 +181,15 @@ def export_native(db_path: str, anchor: str | None = None) -> str:
     from clara.store import resolve_store
 
     scope = resolve_store(anchor).scope
+    try:
+        from clara.repoid import repo_id
+
+        current_repo: str | None = repo_id(anchor)
+    except Exception:  # noqa: BLE001 — locality is a nicety, the export is not
+        current_repo = None
 
     section_memories = [m for m in memories if not _excluded(m, "MEMORY.md")]
-    body = build_section_body(section_memories, now_epoch)
+    body = build_section_body(section_memories, now_epoch, current_repo)
 
     _long(memory_md.parent).mkdir(parents=True, exist_ok=True)
     existing = _read_if_exists(memory_md)
@@ -188,7 +215,7 @@ def export_native(db_path: str, anchor: str | None = None) -> str:
         actions.append("MEMORY.md unchanged")
 
     topic_memories = [m for m in memories if not _excluded(m, paths.CLARA_TOPIC_FILE)]
-    topic_text = build_topic_file(topic_memories, now_epoch)
+    topic_text = build_topic_file(topic_memories, now_epoch, current_repo)
 
     def _without_ts(text: str) -> str:
         return "\n".join(

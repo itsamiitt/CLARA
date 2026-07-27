@@ -106,8 +106,8 @@ def rank(
     project's at any score: verified on a real store, nine findings saved
     from one repository filled eight of ten belief slots in every other
     project's session start. Foreign survivors are marked so the block can
-    say where they came from. Callers that pass no repo (the bridge
-    exporter, which writes user-global files) get the pure score order.
+    say where they came from. Callers that pass no repo get the pure
+    score order.
     """
     max_access = max((_access_count(m) for m in memories), default=0)
     scored: list[tuple[int, float, dict[str, object]]] = []
@@ -226,7 +226,12 @@ def _rationale(memory: dict[str, object]) -> str:
     first = evidence[0]
     if not isinstance(first, dict):
         return ""
-    return sanitize(first.get("text", ""), max_len=RATIONALE_MAX_LEN)
+    raw = first.get("text")
+    # A save without a description stores None here, and str(None) is the
+    # string "None" -- which rendered as an earnest '— None' rationale.
+    if not raw:
+        return ""
+    return sanitize(raw, max_len=RATIONALE_MAX_LEN)
 
 
 def _format_belief(memory: dict[str, object]) -> str:
