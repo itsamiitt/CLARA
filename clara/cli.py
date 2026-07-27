@@ -757,6 +757,35 @@ async def _cmd_project(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_maintain(args: argparse.Namespace) -> int:
+    """Run the daily housekeeping pass by hand.
+
+    The pass normally rides the first store access of the day *by the MCP
+    server*, which covers every Claude Code session. A store driven only by
+    this CLI was never maintained at all -- no decay, no pruning, no rotated
+    backup -- despite the README promising it. This is the explicit way to run
+    it, and the only way for a CLI-only setup.
+    """
+    from clara.maintenance import run_if_due
+    from clara.store import resolve_store
+
+    resolution = resolve_store(create=True)
+    db_path = str(resolution.db_path)
+    memory = await _open(db_path)
+    try:
+        summary = await run_if_due(
+            memory, db_path, anchor=str(Path.cwd()), force=args.force
+        )
+    finally:
+        await memory.close()
+    if summary is None:
+        print("maintenance already ran within the last 24h — use --force to run it now")
+        return 0
+    print(f"store: {db_path}")
+    print(summary)
+    return 0
+
+
 async def _cmd_uninstall(args: argparse.Namespace) -> int:
     """Remove plugin runtime state; keep memories unless --purge-memories."""
     import os as _os
@@ -1210,6 +1239,15 @@ def main(argv: list[str] | None = None) -> None:
     p_project.add_argument("--evidence", action="store_true",
                            help="Show the file each fact came from.")
 
+    p_maintain = sub.add_parser(
+        "maintain",
+        help="Run housekeeping now: backup, decay, pruning, graph, native export.",
+    )
+    p_maintain.add_argument(
+        "--force", action="store_true",
+        help="Run even if a pass already ran in the last 24h.",
+    )
+
     p_uninstall = sub.add_parser(
         "uninstall",
         help="Remove CLARA's private venv, shim, and install log (keeps memories).",
@@ -1248,6 +1286,7 @@ def main(argv: list[str] | None = None) -> None:
         "statusline": _cmd_statusline,
         "sync": _cmd_sync,
         "project": _cmd_project,
+        "maintain": _cmd_maintain,
         "uninstall": _cmd_uninstall,
     }[args.command]
     try:

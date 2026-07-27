@@ -205,8 +205,9 @@ is needed).
   opens the store each day. No cron, no daemon. That covers every Claude Code
   session (the plugin starts the server) and any agent wired to `clara-mcp`.
   The `clara` CLI deliberately does not trigger it, so a one-off command never
-  pays for a decay pass and a VACUUM — if you use the CLI alone, take snapshots
-  with `clara backup` and re-project the graph with `clara graph rebuild`.
+  pays for a decay pass and a VACUUM. If you drive the store from the CLI alone,
+  run it yourself with `clara maintain` (`--force` to override the once-a-day
+  gate) — same pass, same single-winner lock.
 
 ## Storing your first memory (CLI, zero keys)
 
@@ -235,6 +236,8 @@ clara stats                             store location + counts (JSON)
 clara doctor [--quiet] [--deep]         health check: exit 0 ok / 1 degraded / 2 unusable
 clara export [--out F] [--type T]...    dump memories as JSONL (portable)
 clara import FILE [--on-conflict ...]   load a clara-export file (dedup-aware)
+clara maintain [--force]                run housekeeping now: backup, decay,
+                                        pruning, graph, native export
 clara backup [--reason R]               rotated store snapshot (VACUUM INTO)
 clara restore FILE [--force]            replace the store with a snapshot
 clara sync [export|import|status]       bridge to Claude Code native memory
