@@ -27,7 +27,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _BUSY_TIMEOUT_MS = 30_000  # matches SQLITE_BUSY_TIMEOUT_MS in clara/agent.py
 
@@ -375,6 +375,98 @@ def _migration_8(conn: sqlite3.Connection) -> None:
     )
 
 
+# Code-index tables (see docs/plans/memory-systems-plan.md §3.1, §3.2, §3.4).
+# Separate from the belief graph on purpose: that one is projected from what the
+# user told CLARA, this one is derived from source and is rebuildable at any
+# time by re-reading the repo.
+_INDEX_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS index_state (
+        repo_id       TEXT NOT NULL,
+        path          TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        content_hash  TEXT,
+        lang          TEXT,
+        last_indexed  TIMESTAMP NOT NULL,
+        generation    INTEGER NOT NULL,
+        PRIMARY KEY (repo_id, path, kind)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_index_state_repo_gen ON index_state (repo_id, generation)",
+    """
+    CREATE TABLE IF NOT EXISTS change_journal (
+        seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id     TEXT NOT NULL,
+        path        TEXT,
+        change      TEXT NOT NULL,
+        old_path    TEXT,
+        detected_at TIMESTAMP NOT NULL,
+        claimed_by  TEXT,
+        claimed_at  TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_journal_unclaimed ON change_journal (repo_id, seq) "
+    "WHERE claimed_by IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_journal_claimed ON change_journal (claimed_at) "
+    "WHERE claimed_by IS NOT NULL",
+    """
+    CREATE TABLE IF NOT EXISTS code_nodes (
+        node_id        TEXT PRIMARY KEY,
+        repo_id        TEXT NOT NULL,
+        kind           TEXT NOT NULL,
+        qualified_name TEXT NOT NULL,
+        file_path      TEXT,
+        lang           TEXT,
+        span           TEXT,
+        attributes     TEXT DEFAULT '{}',
+        status         TEXT NOT NULL DEFAULT 'active',
+        updated_at     TIMESTAMP NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_code_node ON code_nodes (repo_id, kind, qualified_name)",
+    "CREATE INDEX IF NOT EXISTS ix_code_nodes_file ON code_nodes (repo_id, file_path)",
+    """
+    CREATE TABLE IF NOT EXISTS code_edges (
+        edge_id    TEXT PRIMARY KEY,
+        repo_id    TEXT NOT NULL,
+        src_id     TEXT NOT NULL,
+        dst_id     TEXT NOT NULL,
+        relation   TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.9,
+        valid_from TIMESTAMP NOT NULL,
+        invalid_at TIMESTAMP,
+        metadata   TEXT DEFAULT '{}'
+    )
+    """,
+    # src/dst are indexed separately so reverse-dependency lookup is O(fan-in).
+    # Partial on invalid_at IS NULL, matching ix_graph_edges_src_valid: the
+    # traversal filters on it, and a partial index keeps it seekable.
+    "CREATE INDEX IF NOT EXISTS ix_code_edges_src ON code_edges (repo_id, src_id) "
+    "WHERE invalid_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_code_edges_dst ON code_edges (repo_id, dst_id) "
+    "WHERE invalid_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_code_edges_rel ON code_edges (repo_id, relation) "
+    "WHERE invalid_at IS NULL",
+]
+
+
+def _migration_9(conn: sqlite3.Connection) -> None:
+    """Code-index bookkeeping, change journal, and the code graph.
+
+    Every statement is IF NOT EXISTS, matching migration 4's frozen memories
+    DDL. Forward-only migrations are never replayed in normal operation, but a
+    store whose schema_info was truncated -- by corruption or by hand -- would
+    otherwise fail to open at all rather than converging.
+
+    Empty tables only: indexing is opt-in and populates them later. Node ids
+    are content-addressed at write time (hash of repo/kind/qualified_name), so
+    joins are plain equality -- the belief graph's replace(CAST(...)) join cost
+    a full scan per maintenance run and is not repeated here (see migration 8).
+    """
+    for statement in _INDEX_DDL:
+        conn.execute(statement)
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_1),
     (2, _migration_2),
@@ -384,6 +476,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (6, _migration_6),
     (7, _migration_7),
     (8, _migration_8),
+    (9, _migration_9),
 ]
 
 
