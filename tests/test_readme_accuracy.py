@@ -144,3 +144,79 @@ class TestDocumentedCommandsExist:
         phantom = documented - real
         assert not phantom, f"README documents non-existent commands: {sorted(phantom)}"
         assert isinstance(argparse.ArgumentParser, type)  # import used
+
+
+class TestSkillMatchesTheToolSurface:
+    """The skill is instructions the model acts on, so a stale tool name there
+    is worse than a stale README line: it tells Claude to call something that
+    does not exist, or hides one that does."""
+
+    def _skill_text(self) -> str:
+        return (
+            _ROOT / "skills" / "using-clara-memory" / "SKILL.md"
+        ).read_text("utf-8")
+
+    def _named_tools(self) -> set[str]:
+        return set(
+            re.findall(
+                r"`(memory_[a-z_]+|docs_[a-z_]+|graph_[a-z_]+|statusline_[a-z_]+"
+                r"|project_[a-z_]+)`",
+                self._skill_text(),
+            )
+        )
+
+    def _real_tools(self) -> set[str]:
+        import asyncio
+
+        from clara.integrations.mcp_server import build_server
+
+        return {tool.name for tool in asyncio.run(build_server().list_tools())}
+
+    def test_skill_names_no_tool_that_does_not_exist(self):
+        phantom = self._named_tools() - self._real_tools()
+        assert not phantom, f"skill tells Claude to call missing tools: {sorted(phantom)}"
+
+    def test_skill_names_every_real_tool(self):
+        missing = self._real_tools() - self._named_tools()
+        assert not missing, (
+            f"these tools exist but the skill never mentions them: {sorted(missing)}"
+        )
+
+    def test_skill_tool_count_matches(self):
+        """The skill opens with a count; it must not drift from the surface."""
+        text = self._skill_text()
+        match = re.search(r"(\d+)\s+MCP tools", text)
+        assert match, "the skill no longer states a tool count"
+        assert int(match.group(1)) == len(self._real_tools())
+
+
+class TestHousekeepingClaim:
+    """Housekeeping runs from the MCP server only.
+
+    _run_maintenance_if_due lives in clara/integrations/mcp_server.py and has
+    exactly one production call site, there. Verified against a CLI-only store:
+    `clara remember` plus four `clara stats` produced no .maintenance marker and
+    no daily backup. The README used to say it ran "the first time the store is
+    opened each day", which reads as any open and left a CLI-only user
+    expecting decay that never happens.
+    """
+
+    def test_only_the_mcp_server_triggers_maintenance(self):
+        call_sites = []
+        for path in (_ROOT / "clara").rglob("*.py"):
+            for lineno, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+                if "_run_maintenance_if_due(" in line and "def " not in line:
+                    call_sites.append(f"{path.relative_to(_ROOT)}:{lineno}")
+        assert call_sites, "maintenance is never triggered at all"
+        assert all("mcp_server.py" in site for site in call_sites), (
+            f"maintenance now runs from somewhere else too: {call_sites} — the "
+            "README says the MCP server is the only trigger, so update it"
+        )
+
+    def test_readme_says_where_housekeeping_runs(self):
+        readme = (_ROOT / "README.md").read_text("utf-8")
+        section = readme[readme.index("- **Housekeeping**"):][:600]
+        assert "MCP server" in section, (
+            "the README must name the MCP server as the trigger, not imply any "
+            "store open will do"
+        )

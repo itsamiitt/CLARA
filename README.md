@@ -201,8 +201,12 @@ is needed).
   something durable and `memory_search` when it needs prior context. You can
   also drive it explicitly with the slash commands above.
 - **Housekeeping** — confidence decay, pruning, a rotated backup, and the
-  native-memory export run opportunistically the first time the store is opened
-  each day. No cron, no daemon.
+  native-memory export run opportunistically the first time the **MCP server**
+  opens the store each day. No cron, no daemon. That covers every Claude Code
+  session (the plugin starts the server) and any agent wired to `clara-mcp`.
+  The `clara` CLI deliberately does not trigger it, so a one-off command never
+  pays for a decay pass and a VACUUM — if you use the CLI alone, take snapshots
+  with `clara backup` and re-project the graph with `clara graph rebuild`.
 
 ## Storing your first memory (CLI, zero keys)
 
