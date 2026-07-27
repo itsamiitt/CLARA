@@ -14,6 +14,7 @@ from typing import TypeAlias
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clara.core import llm as _llm
 from clara.core.ollama import ensure_model as _ensure_ollama_model
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import (
@@ -350,16 +351,15 @@ class ReflectionEngine:
         if not api_key:
             return self._degraded(pattern, f"{ENV_OPENAI_KEY} not set")
 
-        client = _openai.AsyncOpenAI(api_key=api_key)
-        response = await client.chat.completions.create(
+        text = await _llm.openai_chat(
+            _openai,
+            system=DEFAULT_REFLECTION_SYSTEM_PROMPT,
+            user=prompt,
             model=self._model_name(),
-            messages=[
-                {"role": "system", "content": DEFAULT_REFLECTION_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
+            api_key=api_key,
             temperature=0.2,
         )
-        return (response.choices[0].message.content or "").strip()
+        return text.strip()
 
     async def _call_anthropic(self, prompt: str, pattern: PatternCandidate) -> str:
         if _anthropic is None:
@@ -368,39 +368,37 @@ class ReflectionEngine:
         if not api_key:
             return self._degraded(pattern, f"{ENV_ANTHROPIC_KEY} not set")
 
-        client = _anthropic.AsyncAnthropic(api_key=api_key)
-        response = await client.messages.create(
-            model=self._model_name(),
-            max_tokens=512,
+        text = await _llm.anthropic_chat(
+            _anthropic,
             system=DEFAULT_REFLECTION_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+            user=prompt,
+            model=self._model_name(),
+            api_key=api_key,
             temperature=0.2,
+            max_tokens=512,
         )
-        return (response.content[0].text or "").strip()
+        return text.strip()
 
     def _call_ollama(self, prompt: str, pattern: PatternCandidate) -> str:
-        if _ollama_lib is None:
-            raise ImportError(
-                "The 'ollama' package is required for the Ollama reflection provider. "
-                "Install it with: pip install 'clara-memory[ollama]'"
-            )
-
+        _llm.require_sdk(
+            _ollama_lib, "ollama", "Ollama reflection provider",
+            install="'clara-memory[ollama]'",
+        )
         model = self._model_name()
         _ensure_ollama_model(self._ollama_base_url, model)
 
-        client = _ollama_lib.Client(host=self._ollama_base_url)
-        response = client.chat(
+        # send_system=False: reflection sends the prompt as a lone user turn.
+        response = _llm.ollama_chat(
+            _ollama_lib,
+            system=DEFAULT_REFLECTION_SYSTEM_PROMPT,
+            user=prompt,
             model=model,
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.3, "num_predict": 1024},
+            base_url=self._ollama_base_url,
+            temperature=0.3,
+            num_predict=1024,
+            send_system=False,
         )
-        message = getattr(response, "message", None)
-        if message is not None:
-            content = getattr(message, "content", "") or ""
-            return str(content).strip() or self._degraded(pattern, "empty ollama response")
-        if isinstance(response, dict):
-            payload = response.get("message", {})
-            if isinstance(payload, dict):
-                content = str(payload.get("content", "") or "").strip()
-                return content or self._degraded(pattern, "empty ollama response")
-        return self._degraded(pattern, "unexpected ollama response shape")
+        content = _llm.ollama_text(response)
+        if content is None:
+            return self._degraded(pattern, "unexpected ollama response shape")
+        return content.strip() or self._degraded(pattern, "empty ollama response")

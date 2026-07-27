@@ -37,6 +37,10 @@ def ensure_model(base_url: str, model: str) -> None:
             "Install it with: pip install 'clara-memory[ollama]'"
         )
 
+    # NOTE: the client below deliberately gets no timeout, unlike every chat
+    # client in clara.core.llm. client.pull() downloads a multi-gigabyte model
+    # and routinely runs for minutes; applying the 30 s chat timeout here would
+    # abort first-run setup partway through. Do not "fix" this for consistency.
     key = (base_url, model)
     if key in _models_ready:
         return

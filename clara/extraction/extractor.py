@@ -23,6 +23,7 @@ import logging
 import os
 from dataclasses import dataclass
 
+from clara.core import llm as _llm
 from clara.core.ollama import ensure_model as _ensure_ollama_model_shared
 
 logger = logging.getLogger(__name__)
@@ -51,8 +52,10 @@ CONFIDENCE_FLOOR = 0.4
 # Network resilience for hosted LLM providers. The OpenAI/Anthropic SDKs apply
 # their own exponential backoff up to max_retries and abort after timeout, so a
 # transient blip doesn't silently lose the extraction.
-LLM_TIMEOUT_SECONDS = 30.0
-LLM_MAX_RETRIES = 2
+# Re-exported from clara.core.llm, which owns them now: reasoning imports these
+# names from here, and the shared client builders apply them.
+LLM_TIMEOUT_SECONDS = _llm.LLM_TIMEOUT_SECONDS
+LLM_MAX_RETRIES = _llm.LLM_MAX_RETRIES
 
 # ---------------------------------------------------------------------------
 # Optional dependency imports (guarded)
@@ -190,66 +193,38 @@ If no facts can be extracted, return: {"facts": []}
 
 async def _call_openai(text: str, model: str) -> str:
     """Call OpenAI chat completion asynchronously and return the raw response content."""
-    if _openai is None:
-        raise ImportError(
-            "The 'openai' package is required for the OpenAI LLM provider. "
-            "Install it with:  pip install openai"
-        )
-    api_key = os.environ.get(ENV_OPENAI_KEY)
-    if not api_key:
-        raise OSError(
-            f"Environment variable {ENV_OPENAI_KEY!r} is not set."
-        )
-
-    client = _openai.AsyncOpenAI(
-        api_key=api_key,
-        timeout=LLM_TIMEOUT_SECONDS,
-        max_retries=LLM_MAX_RETRIES,
-    )
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ],
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    # Return the raw content (even if empty). Coercing an empty completion to
+    _llm.require_sdk(_openai, "openai", "OpenAI LLM provider")
+    api_key = _llm.require_api_key(ENV_OPENAI_KEY, os.environ.get)
+    # Returns the raw content (even if empty). Coercing an empty completion to
     # "[]" used to report status="ok" with zero facts, hiding a failed call as
     # a successful no-fact extraction — let the parser flag it malformed.
-    return response.choices[0].message.content or ""
+    return await _llm.openai_chat(
+        _openai,
+        system=SYSTEM_PROMPT,
+        user=text,
+        model=model,
+        api_key=api_key,
+        temperature=0.0,
+        json_mode=True,
+    )
 
 
 async def _call_anthropic(text: str, model: str) -> str:
     """Call Anthropic messages API asynchronously and return the raw response content."""
-    if _anthropic is None:
-        raise ImportError(
-            "The 'anthropic' package is required for the Anthropic LLM provider. "
-            "Install it with:  pip install anthropic"
-        )
-    api_key = os.environ.get(ENV_ANTHROPIC_KEY)
-    if not api_key:
-        raise OSError(
-            f"Environment variable {ENV_ANTHROPIC_KEY!r} is not set."
-        )
-
-    client = _anthropic.AsyncAnthropic(
-        api_key=api_key,
-        timeout=LLM_TIMEOUT_SECONDS,
-        max_retries=LLM_MAX_RETRIES,
-    )
-    response = await client.messages.create(
-        model=model,
-        max_tokens=2048,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": text}],
-        temperature=0.0,
-    )
-    # Anthropic returns content as a list of content blocks. Return raw (even
+    _llm.require_sdk(_anthropic, "anthropic", "Anthropic LLM provider")
+    api_key = _llm.require_api_key(ENV_ANTHROPIC_KEY, os.environ.get)
+    # Anthropic returns content as a list of content blocks. Returned raw (even
     # if empty) so an empty completion is flagged malformed rather than masked
     # as a successful zero-fact extraction.
-    return response.content[0].text or ""
+    return await _llm.anthropic_chat(
+        _anthropic,
+        system=SYSTEM_PROMPT,
+        user=text,
+        model=model,
+        api_key=api_key,
+        temperature=0.0,
+        max_tokens=2048,
+    )
 
 
 def _ensure_ollama_model(base_url: str, model: str) -> None:
@@ -258,38 +233,29 @@ def _ensure_ollama_model(base_url: str, model: str) -> None:
 
 
 def _call_ollama(text: str, model: str, base_url: str) -> str:
-    if _ollama_lib is None:
-        raise ImportError(
-            "The 'ollama' package is required for the Ollama extraction provider. "
-            "Install it with: pip install 'clara-memory[ollama]'"
-        )
-
+    _llm.require_sdk(
+        _ollama_lib, "ollama", "Ollama extraction provider",
+        install="'clara-memory[ollama]'",
+    )
     _ensure_ollama_model(base_url, model)
-    client = _ollama_lib.Client(host=base_url)
-    response = client.chat(
+    response = _llm.ollama_chat(
+        _ollama_lib,
+        system=SYSTEM_PROMPT,
+        user=f"Input:\n{text}\n\nRespond with valid JSON only.",
         model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"Input:\n{text}\n\nRespond with valid JSON only.",
-            },
-        ],
-        options={"temperature": 0.1, "num_predict": 2048},
-        format="json",
+        base_url=base_url,
+        temperature=0.1,
+        num_predict=2048,
+        json_format=True,
     )
-    message = getattr(response, "message", None)
-    if message is not None:
-        return getattr(message, "content", "") or ""
-    if isinstance(response, dict):
-        payload = response.get("message", {})
-        if isinstance(payload, dict):
-            return str(payload.get("content", "") or "")
-    logger.warning(
-        "Unexpected Ollama chat response shape (%s); extracting no facts.",
-        type(response).__name__,
-    )
-    return ""
+    content = _llm.ollama_text(response)
+    if content is None:
+        logger.warning(
+            "Unexpected Ollama chat response shape (%s); extracting no facts.",
+            type(response).__name__,
+        )
+        return ""
+    return content
 
 
 # ---------------------------------------------------------------------------

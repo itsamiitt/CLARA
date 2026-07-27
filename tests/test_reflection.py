@@ -10,6 +10,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from clara.core import llm
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import ENV_ANTHROPIC_KEY
 from clara.reflection import ReflectionEngine
@@ -317,7 +318,16 @@ class TestReflectionEngine:
             insight = await engine._call_anthropic("prompt", pattern)
 
         assert insight == "Async reflection"
-        mock_anthropic_module.AsyncAnthropic.assert_called_once_with(api_key="test-key")
+        # Reflection used to build this client with no timeout and no retries
+        # while extraction and reasoning both passed 30 s / 2. It runs from the
+        # daily scheduler and nothing wraps the call in asyncio.wait_for, so a
+        # stalled endpoint hung the job indefinitely. This assertion previously
+        # pinned the omission as expected; it now pins the timeout instead.
+        mock_anthropic_module.AsyncAnthropic.assert_called_once_with(
+            api_key="test-key",
+            timeout=llm.LLM_TIMEOUT_SECONDS,
+            max_retries=llm.LLM_MAX_RETRIES,
+        )
         mock_client.messages.create.assert_awaited_once()
 
 

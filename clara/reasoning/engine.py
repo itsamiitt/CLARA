@@ -16,6 +16,7 @@ from typing import TypeAlias
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clara.core import llm as _llm
 from clara.core.ollama import ensure_model as _ensure_ollama_model
 from clara.extraction.extractor import (
     DEFAULT_ANTHROPIC_MODEL,
@@ -26,8 +27,6 @@ from clara.extraction.extractor import (
     ENV_OLLAMA_BASE_URL,
     ENV_OLLAMA_MODEL,
     ENV_OPENAI_KEY,
-    LLM_MAX_RETRIES,
-    LLM_TIMEOUT_SECONDS,
     FactExtractor,
     _anthropic,
     _openai,
@@ -213,80 +212,45 @@ class ReasoningEngine:
         return DEFAULT_OPENAI_MODEL
 
     async def _call_openai(self, system_prompt: str, query: str) -> str:
-        if _openai is None:
-            raise ImportError(
-                "The 'openai' package is required for the OpenAI reasoning provider."
-            )
-        api_key = os.environ.get(ENV_OPENAI_KEY)
-        if not api_key:
-            raise OSError(
-                f"Environment variable {ENV_OPENAI_KEY!r} is not set."
-            )
-
-        client = _openai.AsyncOpenAI(
-            api_key=api_key,
-            timeout=LLM_TIMEOUT_SECONDS,
-            max_retries=LLM_MAX_RETRIES,
-        )
-        response = await client.chat.completions.create(
+        _llm.require_sdk(_openai, "openai", "OpenAI reasoning provider")
+        api_key = _llm.require_api_key(ENV_OPENAI_KEY, os.environ.get)
+        return await _llm.openai_chat(
+            _openai,
+            system=system_prompt,
+            user=query,
             model=self._model_name(),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query},
-            ],
+            api_key=api_key,
             temperature=0.2,
         )
-        return response.choices[0].message.content or ""
 
     async def _call_anthropic(self, system_prompt: str, query: str) -> str:
-        if _anthropic is None:
-            raise ImportError(
-                "The 'anthropic' package is required for the Anthropic reasoning provider."
-            )
-        api_key = os.environ.get(ENV_ANTHROPIC_KEY)
-        if not api_key:
-            raise OSError(
-                f"Environment variable {ENV_ANTHROPIC_KEY!r} is not set."
-            )
-
-        client = _anthropic.AsyncAnthropic(
-            api_key=api_key,
-            timeout=LLM_TIMEOUT_SECONDS,
-            max_retries=LLM_MAX_RETRIES,
-        )
-        response = await client.messages.create(
-            model=self._model_name(),
-            max_tokens=2048,
+        _llm.require_sdk(_anthropic, "anthropic", "Anthropic reasoning provider")
+        api_key = _llm.require_api_key(ENV_ANTHROPIC_KEY, os.environ.get)
+        return await _llm.anthropic_chat(
+            _anthropic,
             system=system_prompt,
-            messages=[{"role": "user", "content": query}],
+            user=query,
+            model=self._model_name(),
+            api_key=api_key,
             temperature=0.2,
+            max_tokens=2048,
         )
-        return response.content[0].text or ""
 
     def _call_ollama(self, system_prompt: str, query: str) -> str:
-        if _ollama_lib is None:
-            raise ImportError(
-                "The 'ollama' package is required for the Ollama reasoning provider. "
-                "Install it with: pip install 'clara-memory[ollama]'"
-            )
-
+        _llm.require_sdk(
+            _ollama_lib, "ollama", "Ollama reasoning provider",
+            install="'clara-memory[ollama]'",
+        )
         model = self._model_name()
         _ensure_ollama_model(self._ollama_base_url, model)
 
-        client = _ollama_lib.Client(host=self._ollama_base_url)
-        response = client.chat(
+        response = _llm.ollama_chat(
+            _ollama_lib,
+            system=system_prompt,
+            user=query,
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query},
-            ],
-            options={"temperature": 0.2, "num_predict": 2048},
+            base_url=self._ollama_base_url,
+            temperature=0.2,
+            num_predict=2048,
         )
-        message = getattr(response, "message", None)
-        if message is not None:
-            return getattr(message, "content", "") or ""
-        if isinstance(response, dict):
-            payload = response.get("message", {})
-            if isinstance(payload, dict):
-                return str(payload.get("content", "") or "")
-        return ""
+        return _llm.ollama_text(response) or ""
