@@ -21,6 +21,7 @@ from typing import Any, TypeVar
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clara.core.ids import canonical_id
 from clara.db.models import Memory
 from clara.flags import GRAPH_DISABLED_HINT, graph_enabled
 from clara.graph.normalize import normalize_relation
@@ -96,7 +97,7 @@ async def _insert_edge(
             "src": src_id,
             "dst": dst_id,
             "rel": relation,
-            "bid": belief_id,
+            "bid": canonical_id(belief_id) if belief_id else None,
             "conf": confidence,
             "weight": weight,
             "vfrom": valid_from,
@@ -144,7 +145,7 @@ async def _invalidate_by_belief(
             "metadata = json_set(coalesce(metadata, '{}'), '$.invalidated_by', :by) "
             "WHERE belief_id = :bid AND invalid_at IS NULL"
         ),
-        {"now": _now(), "by": reason, "bid": belief_id},
+        {"now": _now(), "by": reason, "bid": canonical_id(belief_id)},
     )
     return _rowcount(result)
 
@@ -182,7 +183,7 @@ async def project_belief_created(session: AsyncSession, record: Memory) -> None:
                 src_id=src["node_id"],
                 dst_id=dst["node_id"],
                 relation=relation,
-                invalidated_by=str(record.memory_id),
+                invalidated_by=canonical_id(record.memory_id),
                 user_id=record.user_id,
             )
         return
@@ -195,7 +196,7 @@ async def project_belief_created(session: AsyncSession, record: Memory) -> None:
         src_id=src["node_id"],
         dst_id=dst["node_id"],
         relation=relation,
-        belief_id=str(record.memory_id),
+        belief_id=canonical_id(record.memory_id),
         confidence=float(record.confidence),
         valid_from=_stamp(record.created_at),
     )
@@ -224,7 +225,7 @@ async def project_confidence_changed(
             "UPDATE graph_edges SET confidence = :conf "
             "WHERE belief_id = :bid AND invalid_at IS NULL"
         ),
-        {"conf": float(confidence), "bid": str(memory_id)},
+        {"conf": float(confidence), "bid": canonical_id(memory_id)},
     )
 
 
@@ -311,8 +312,11 @@ async def rebuild(session: AsyncSession, *, from_scratch: bool = False) -> dict[
         )
     ).all()
 
+    # Normalised on read as well: a store written before belief ids were
+    # canonicalised can hold either spelling, and comparing a canonical id
+    # against a dashed one would re-project every edge on every rebuild.
     existing_belief_ids = {
-        row[0]
+        canonical_id(row[0])
         for row in (
             await session.execute(sa_text("SELECT DISTINCT belief_id FROM graph_edges"))
         ).all()
@@ -327,7 +331,7 @@ async def rebuild(session: AsyncSession, *, from_scratch: bool = False) -> dict[
             fake = _RowShim(memory_id, user_id, content, confidence, created_at)
             await project_world_model_upserted.__wrapped__(session, fake)  # type: ignore[attr-defined]
             continue
-        belief_id = str(memory_id)
+        belief_id = canonical_id(memory_id)
         if content.get("is_negation"):
             relation = normalize_relation(content.get("relation", ""))
             src = await resolve_node(

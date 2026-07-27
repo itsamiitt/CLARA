@@ -24,11 +24,15 @@ HUB_DEGREE = 50
 def _rowcount(result: Any) -> int:
     return int(getattr(result, "rowcount", 0) or 0)
 
-# The belief_id ⇄ memories.memory_id join normalizes dashes on both sides so
-# it holds regardless of how the Uuid column serializes on this build.
-_BELIEF_JOIN = (
-    "replace(CAST(m.memory_id AS TEXT), '-', '') = replace(graph_edges.belief_id, '-', '')"
-)
+# Plain equality, deliberately. Both sides are canonical dashless hex: SQLite
+# stores memories.memory_id that way, and every belief_id writer now routes
+# through clara.core.ids.canonical_id (migration 8 repaired existing rows).
+# This previously wrapped both sides in replace(CAST(...)), which no index could
+# serve -- it defeated the memories primary key and ix_graph_edges_belief on
+# every maintenance run. Do not reintroduce the normalization to "be safe":
+# it would silently mask a writer that has started emitting the dashed form
+# again, which is exactly how the two spellings diverged in the first place.
+_BELIEF_JOIN = "m.memory_id = graph_edges.belief_id"
 
 
 async def run_graph_maintenance(

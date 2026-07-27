@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clara.core.ids import canonical_id
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -146,7 +148,8 @@ async def _graph_edge(
         ),
         {
             "eid": edge_id, "src": src_id, "dst": dst_id, "rel": relation,
-            "bid": belief_id, "now": _now(), "meta": json.dumps(metadata or {}),
+            "bid": canonical_id(belief_id) if belief_id else None,
+            "now": _now(), "meta": json.dumps(metadata or {}),
         },
     )
     return edge_id
@@ -367,7 +370,7 @@ async def fulfill(
                 if subject_node is not None:
                     edge_ids.append(await _graph_edge(
                         session, src_id=subject_node["node_id"], dst_id=doc_node,
-                        relation="derived_from", belief_id=memory_id,
+                        relation="derived_from", belief_id=canonical_id(memory_id),
                         metadata={"doc_id": doc["doc_id"]},
                     ))
 

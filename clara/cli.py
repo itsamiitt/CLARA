@@ -607,11 +607,14 @@ async def _cmd_graph(args: argparse.Namespace) -> int:
             dangling = (
                 await session.execute(
                     sa_text(
+                        # Plain equality: belief ids are canonical dashless hex
+                        # on both sides (clara.core.ids.canonical_id, migration
+                        # 8). Normalising here would defeat the index and, worse,
+                        # hide a non-canonical writer from this very check.
                         "SELECT edge_id, belief_id FROM graph_edges "
                         "WHERE invalid_at IS NULL AND belief_id IS NOT NULL "
                         "AND NOT EXISTS (SELECT 1 FROM memories m WHERE "
-                        "replace(CAST(m.memory_id AS TEXT), '-', '') = "
-                        "replace(graph_edges.belief_id, '-', '') "
+                        "m.memory_id = graph_edges.belief_id "
                         "AND m.status = 'active')"
                     )
                 )

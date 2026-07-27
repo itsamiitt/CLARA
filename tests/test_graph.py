@@ -10,6 +10,7 @@ import uuid
 import pytest
 from sqlalchemy import text as sa_text
 
+from clara.core.ids import canonical_id
 from clara.graph import project as graph_project
 from clara.graph.normalize import (
     jaro_winkler,
@@ -180,7 +181,9 @@ class TestProjection:
         await memory.close()
         assert len(edges) == 1
         edge = edges[0]
-        assert edge["belief_id"] == saved["memory_id"]
+        # The graph stores ids canonically (dashless, as SQLite stores
+        # memory_id); the public API keeps returning the readable dashed form.
+        assert edge["belief_id"] == canonical_id(saved["memory_id"])
         assert edge["relation"] == "prefers"
         assert edge["invalid_at"] is None
         assert edge["temporal_precision"] == "exact"
@@ -195,7 +198,10 @@ class TestProjection:
         await memory.close()
         assert len(edges) == 1  # negation creates no edge of its own
         assert edges[0]["invalid_at"] is not None
-        assert json.loads(edges[0]["metadata"])["invalidated_by"] == neg["memory_id"]
+        assert (
+            json.loads(edges[0]["metadata"])["invalidated_by"]
+            == canonical_id(neg["memory_id"])
+        )
 
     async def test_forget_invalidates_edge(self, tmp_path):
         memory = await _store(tmp_path)
@@ -237,7 +243,9 @@ class TestProjection:
                 uuid.UUID(saved["memory_id"]),
                 subject="user", relation="uses", object_="vite",
             )
-        old_edges = await _edges(memory, f"belief_id = '{saved['memory_id']}'")
+        old_edges = await _edges(
+            memory, f"belief_id = '{canonical_id(saved['memory_id'])}'"
+        )
         valid = await _edges(memory, "invalid_at IS NULL")
         await memory.close()
         assert old_edges[0]["invalid_at"] is not None

@@ -27,7 +27,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _BUSY_TIMEOUT_MS = 30_000  # matches SQLITE_BUSY_TIMEOUT_MS in clara/agent.py
 
@@ -354,6 +354,27 @@ def _migration_7(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_8(conn: sqlite3.Connection) -> None:
+    """Canonicalise graph_edges.belief_id to dashless hex.
+
+    Two writers disagreed. The live projection reads an ORM record, where
+    memory_id is a uuid.UUID and str() yields the dashed form; the rebuild path
+    reads raw SQL rows, where the same id comes back as dashless text. Both
+    wrote str(...) into belief_id, so one store could hold both spellings while
+    memories.memory_id is always dashless.
+
+    Every belief join therefore had to wrap both sides in replace(CAST(...)),
+    which no index can serve, and which is silently lossy to remove: measured on
+    a store with 4 edges, the raw equality join matched 2 rows where the
+    normalised one matched 4. Writers now canonicalise; this repairs the rows
+    already on disk so the join can be plain equality.
+    """
+    conn.execute(
+        "UPDATE graph_edges SET belief_id = replace(belief_id, '-', '') "
+        "WHERE belief_id IS NOT NULL AND belief_id LIKE '%-%'"
+    )
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_1),
     (2, _migration_2),
@@ -362,6 +383,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (5, _migration_5),
     (6, _migration_6),
     (7, _migration_7),
+    (8, _migration_8),
 ]
 
 

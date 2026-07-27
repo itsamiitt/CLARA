@@ -46,6 +46,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from clara.core.ids import canonical_id
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.reflection import ReflectionEngine
 from clara.retrieval.embeddings import EmbeddingEngine
@@ -83,8 +84,7 @@ def _id_cursor(memory_id: object) -> str:
     dashless form for the ``>`` comparison to advance correctly. Accepts a
     ``uuid.UUID`` (``.hex``) or a string the driver already returned.
     """
-    hex_attr = getattr(memory_id, "hex", None)
-    return hex_attr if isinstance(hex_attr, str) else str(memory_id).replace("-", "")
+    return canonical_id(memory_id)
 
 
 def _decay_anchor(record: Memory) -> datetime:

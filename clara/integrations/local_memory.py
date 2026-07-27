@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from clara import security, stats_cache
 from clara.agent import _make_engine, format_context
+from clara.core.ids import canonical_id
 from clara.db.fts import ensure_fts
 from clara.db.migrations import ensure_schema
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
@@ -1047,7 +1048,7 @@ class LocalMemory:
                 meta = dict(record.metadata_) if record.metadata_ else {}
                 meta.setdefault("repo_id", _cached_repo_id())
                 record.metadata_ = meta
-                belief_id = str(record.memory_id)
+                belief_id = canonical_id(record.memory_id)
                 # Deterministic: the projection stamps belief_id = memory_id on
                 # the edge it just created for this belief, in this transaction.
                 edge_row = (
