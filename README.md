@@ -155,6 +155,8 @@ is needed).
   `docs_fulfill`, `docs_report`.
 - **Knowledge graph (4):** `graph_entity`, `graph_neighbors`, `graph_path`,
   `memory_link`.
+- **Status bar (2):** `statusline_install`, `statusline_status` — used by
+  `/clara:statusline` to put the live memory counter in your status bar.
 
 ## Slash commands (plugin)
 
@@ -214,6 +216,7 @@ clara restore FILE [--force]            replace the store with a snapshot
 clara sync [export|import|status]       bridge to Claude Code native memory
 clara statusline                        one-line summary for a statusLine command
 clara statusline --install              add the live memory counter to your status bar
+                                        (in Claude Code, use /clara:statusline instead)
 clara mcp                               run the MCP stdio server (same as clara-mcp)
 clara uninstall [--purge-memories]      remove the private venv/shim/logs (keeps memories)
 
@@ -330,21 +333,28 @@ for the full shape. `archive_dir` must be a repo-relative path (absolute or
 
 ## Live memory counter (status bar)
 
-See at a glance that CLARA is actually storing things:
+See at a glance that CLARA is actually storing things. In Claude Code, run:
 
-```bash
-clara statusline --install     # then start a new Claude Code session
 ```
+/clara:statusline
+```
+
+Then start a new session, and the bar shows:
 
 ```
 CLARA - 1,248 memories - global
 ```
 
 The count updates as soon as a memory is saved or forgotten, and covers every
-memory type in the store. One command is all that is needed — it writes the
-`statusLine` block into `~/.claude/settings.json` for you, keeping every other
-setting intact and backing the file up first. It will not replace a status line
-you already use without `--force`.
+memory type in the store. Turn it off again with `/clara:statusline off`.
+
+Nothing else to configure: the slash command writes the `statusLine` block into
+`~/.claude/settings.json` for you, keeping every other setting intact and
+backing the file up first. If you already use a different status line, it asks
+before replacing it.
+
+From a terminal (only if you have the `clara` executable on your PATH — the
+plugin's copy deliberately is not) the same thing is:
 
 ```bash
 clara statusline --install --refresh-interval 10   # re-run the counter every 10s

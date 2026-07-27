@@ -31,6 +31,10 @@ EXPECTED_TOOLS = {
     "graph_neighbors",
     "graph_path",
     "memory_link",
+    # status bar (2) — a plugin cannot ship a statusLine, so these let Claude
+    # configure it for users who never open a terminal
+    "statusline_install",
+    "statusline_status",
 }
 
 
@@ -53,7 +57,7 @@ def test_build_server_registers_all_tools():
         f"tool surface changed: +{names - EXPECTED_TOOLS} -{EXPECTED_TOOLS - names} "
         "— update EXPECTED_TOOLS, README, and SKILL.md together"
     )
-    assert len(EXPECTED_TOOLS) == 15
+    assert len(EXPECTED_TOOLS) == 17
 
 
 def test_docs_status_respects_kill_switch(monkeypatch):

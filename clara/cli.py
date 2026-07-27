@@ -24,7 +24,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -711,7 +710,6 @@ async def _cmd_import(args: argparse.Namespace) -> int:
 async def _cmd_uninstall(args: argparse.Namespace) -> int:
     """Remove plugin runtime state; keep memories unless --purge-memories."""
     import os as _os
-    import shutil
 
     base = Path(_os.environ.get("CLARA_HOME") or (Path.home() / ".clara"))
     data_dir = Path(_os.environ.get("CLAUDE_PLUGIN_DATA") or (base / "plugin"))
@@ -774,7 +772,6 @@ async def _cmd_backup(args: argparse.Namespace) -> int:
 
 
 async def _cmd_restore(args: argparse.Namespace) -> int:
-    import shutil
     import sqlite3 as _sqlite3
 
     from clara.db.backup import backup_db
@@ -820,126 +817,44 @@ async def _cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
-def _statusline_command() -> str:
-    """Shell command Claude Code should run for the status line.
-
-    An absolute path to this interpreter's ``clara`` entry point: Claude Code
-    does not expand ``${CLAUDE_PLUGIN_ROOT}`` inside settings.json, and the
-    plugin's venv is deliberately not on the user's PATH.
-    """
-    exe = Path(sys.executable)
-    candidates = [
-        exe.with_name("clara.exe"),
-        exe.with_name("clara"),
-        exe.parent / "Scripts" / "clara.exe",
-        exe.parent / "bin" / "clara",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            target = str(candidate)
-            # Prefer the version-independent `current` pointer when this
-            # interpreter lives in the plugin's own venv: venv directories are
-            # named by a pyproject hash and are garbage-collected on upgrade,
-            # so a versioned path here would blank the status bar the next
-            # time the plugin updates.
-            data_dir = Path(
-                os.environ.get("CLAUDE_PLUGIN_DATA")
-                or (Path(os.environ.get("CLARA_HOME") or (Path.home() / ".clara")) / "plugin")
-            )
-            try:
-                venv_root = candidate.parents[1]
-                if venv_root.parent == data_dir and venv_root.name.startswith("venv-"):
-                    stable = data_dir / "current" / candidate.parent.name / candidate.name
-                    if stable.is_file():
-                        target = str(stable)
-            except (IndexError, OSError):
-                pass
-            break
-    else:
-        # No console script (e.g. running from a source checkout): drive the
-        # module through the interpreter itself, which always exists.
-        return f'"{exe}" -m clara.cli statusline'
-    return f'"{target}" statusline'
-
-
 def _cmd_statusline_install(args: argparse.Namespace) -> int:
-    """Write the statusLine block into the user's Claude Code settings.
+    """Register or remove CLARA's status line (see clara.statusline_setup).
 
-    A plugin cannot ship a `statusLine` (Claude Code only accepts
-    `subagentStatusLine` from plugin settings), so the counter has to be
-    registered in the user's own settings.json. This edits a file the user
-    owns, so it merges rather than overwrites, backs the file up first, and
-    refuses to replace someone else's statusLine without --force.
+    Users who never open a terminal reach the same code through the
+    `statusline_install` MCP tool — the plugin's `clara` executable is
+    deliberately not on their PATH.
     """
-    import json as _json
-
-    settings_path = Path.home() / ".claude" / "settings.json"
-    settings: dict[str, Any] = {}
-    if settings_path.is_file():
-        try:
-            raw = settings_path.read_text(encoding="utf-8").strip()
-            settings = _json.loads(raw) if raw else {}
-        except ValueError as exc:
-            print(f"error: {settings_path} is not valid JSON ({exc}).", file=sys.stderr)
-            print("fix or remove that file, then re-run.", file=sys.stderr)
-            return 2
-        except OSError as exc:
-            print(f"error: cannot read {settings_path}: {exc}", file=sys.stderr)
-            return 2
-    if not isinstance(settings, dict):
-        print(f"error: {settings_path} must contain a JSON object.", file=sys.stderr)
-        return 2
-
-    existing = settings.get("statusLine")
-    command = _statusline_command()
+    from clara import statusline_setup
 
     if args.uninstall:
-        if not isinstance(existing, dict) or "clara" not in str(existing.get("command", "")):
+        result = statusline_setup.uninstall()
+        if not result["ok"]:
+            print(f"error: {result.get('error')}", file=sys.stderr)
+            return 2
+        if result["action"] == "absent":
             print("no CLARA status line is configured — nothing to remove.")
-            return 0
-        settings.pop("statusLine", None)
-    else:
-        foreign_command: str | None = None
-        if isinstance(existing, dict):
-            current_command = str(existing.get("command", ""))
-            if "clara" not in current_command:
-                foreign_command = current_command
-        if foreign_command is not None and not args.force:
-            print(
-                "a different statusLine is already configured:\n"
-                f"  {foreign_command}\n"
-                "re-run with --force to replace it.",
-                file=sys.stderr,
-            )
-            return 2
-        interval = max(1, int(args.refresh_interval))
-        settings["statusLine"] = {
-            "type": "command",
-            "command": command,
-            "refreshInterval": interval,
-        }
+        else:
+            print(f"removed CLARA from the status bar ({result['path']})")
+        return 0
 
-    try:
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        if settings_path.is_file():
-            backup = settings_path.with_suffix(".json.clara-bak")
-            shutil.copyfile(settings_path, backup)
-        tmp = settings_path.with_suffix(".json.clara-tmp")
-        tmp.write_text(
-            _json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    result = statusline_setup.install(
+        refresh_interval=args.refresh_interval, force=args.force
+    )
+    if result["action"] == "blocked":
+        print(
+            "a different statusLine is already configured:\n"
+            f"  {result['existing_command']}\n"
+            "re-run with --force to replace it.",
+            file=sys.stderr,
         )
-        os.replace(tmp, settings_path)
-    except OSError as exc:
-        print(f"error: cannot write {settings_path}: {exc}", file=sys.stderr)
         return 2
-
-    if args.uninstall:
-        print(f"removed CLARA from the status bar ({settings_path})")
-    else:
-        print(f"status bar configured ({settings_path})")
-        print(f"  command: {command}")
-        print(f"  refresh: every {max(1, int(args.refresh_interval))}s")
-        print("start a new Claude Code session to see it.")
+    if not result["ok"]:
+        print(f"error: {result.get('error')}", file=sys.stderr)
+        return 2
+    print(f"status bar configured ({result['path']})")
+    print(f"  command: {result['command']}")
+    print(f"  refresh: every {result['refresh_interval']}s")
+    print("start a new Claude Code session to see it.")
     return 0
 
 

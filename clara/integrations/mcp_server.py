@@ -404,6 +404,41 @@ def build_server() -> Any:
         memory = await _get_memory()
         return await memory.stats()
 
+    @server.tool()
+    async def statusline_install(
+        enable: bool = True,
+        refresh_interval: int = 5,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Show (or hide) CLARA's live memory counter in the status bar.
+
+        Writes the ``statusLine`` block into the user's own
+        ``~/.claude/settings.json`` — a plugin cannot ship one itself. This is
+        how users who never open a terminal enable it, since the plugin's
+        ``clara`` executable is not on their PATH.
+
+        Existing settings are preserved and backed up first. If a status line
+        from another tool is already configured, this reports ``blocked``
+        rather than replacing it; pass ``force=True`` to override. Set
+        ``enable=False`` to remove CLARA's entry again.
+        """
+        from clara import statusline_setup
+
+        if not enable:
+            return await asyncio.to_thread(statusline_setup.uninstall)
+        return await asyncio.to_thread(
+            statusline_setup.install,
+            refresh_interval=refresh_interval,
+            force=force,
+        )
+
+    @server.tool()
+    async def statusline_status() -> dict[str, Any]:
+        """Report whether CLARA's memory counter is in the status bar."""
+        from clara import statusline_setup
+
+        return await asyncio.to_thread(statusline_setup.status)
+
     async def _repo_root(repo: str | None) -> str:
         """Resolve the repo root: explicit arg → session anchor (MCP roots →
         session-cwd hint → server cwd)."""

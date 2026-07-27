@@ -15,7 +15,9 @@ import json
 
 import pytest
 
-from clara.cli import _cmd_statusline_install, _statusline_command
+from clara import statusline_setup
+from clara.cli import _cmd_statusline_install
+from clara.statusline_setup import statusline_command
 
 
 @pytest.fixture
@@ -143,6 +145,56 @@ class TestUninstall:
 
 class TestCommandResolution:
     def test_command_is_quoted_and_absolute(self):
-        command = _statusline_command()
+        command = statusline_command()
         assert command.startswith('"')
         assert command.endswith("statusline")
+
+
+class TestSharedModule:
+    """The module the MCP tool calls — the path for users who never open a
+    terminal, since the plugin's `clara` executable is not on their PATH."""
+
+    def test_install_reports_installed(self, fake_home):
+        result = statusline_setup.install()
+        assert result["ok"] is True
+        assert result["action"] == "installed"
+        assert result["refresh_interval"] == 5
+
+    def test_install_blocks_on_foreign_statusline(self, fake_home):
+        path = fake_home / ".claude" / "settings.json"
+        path.write_text(
+            json.dumps({"statusLine": {"type": "command", "command": "/usr/bin/mybar"}}),
+            encoding="utf-8",
+        )
+        result = statusline_setup.install()
+        assert result["ok"] is False
+        assert result["action"] == "blocked"
+        assert result["existing_command"] == "/usr/bin/mybar"
+        # Nothing written.
+        assert _settings(fake_home)["statusLine"]["command"] == "/usr/bin/mybar"
+
+    def test_force_overrides_block(self, fake_home):
+        path = fake_home / ".claude" / "settings.json"
+        path.write_text(
+            json.dumps({"statusLine": {"type": "command", "command": "/usr/bin/mybar"}}),
+            encoding="utf-8",
+        )
+        assert statusline_setup.install(force=True)["action"] == "installed"
+
+    def test_status_roundtrip(self, fake_home):
+        assert statusline_setup.status()["configured"] is False
+        statusline_setup.install()
+        assert statusline_setup.status()["configured"] is True
+        statusline_setup.uninstall()
+        assert statusline_setup.status()["configured"] is False
+
+    def test_uninstall_when_absent_is_not_an_error(self, fake_home):
+        result = statusline_setup.uninstall()
+        assert result["ok"] is True
+        assert result["action"] == "absent"
+
+    def test_malformed_settings_reported_by_status(self, fake_home):
+        (fake_home / ".claude" / "settings.json").write_text("{oops", encoding="utf-8")
+        result = statusline_setup.status()
+        assert result["configured"] is False
+        assert "not valid JSON" in str(result.get("error"))
