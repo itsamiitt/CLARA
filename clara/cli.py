@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -359,6 +360,24 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
         for name, ok, detail in checks:
             print(f"  [{'ok' if ok else '!!'}] {name}: {detail}")
         _print_plugin_health(db_path)
+        # A corrupt store is the one moment the user most needs to be told what
+        # to do, and doctor used to stop at the diagnosis: it printed the
+        # integrity failure and, separately, that a backup existed, and left
+        # the reader to connect them. Name the command.
+        if hard_failures:
+            print("\nwhat to do:")
+            if newest is not None:
+                print(f"  clara restore {newest}")
+                print("  (a pre-restore backup of the current file is taken first)")
+            else:
+                print(
+                    f"  no backup found in {Path(db_path).parent / 'backups'} — "
+                    "export what still reads with `clara export --out rescue.jsonl`,"
+                )
+                print(
+                    "  then start fresh with `clara init` and "
+                    "`clara import rescue.jsonl`"
+                )
     if hard_failures:
         return 2
     return 1 if degraded else 0
@@ -1072,6 +1091,38 @@ async def _cmd_sync(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+class _QuietFormatter(logging.Formatter):
+    """Log the message; keep the traceback for CLARA_DEBUG=1.
+
+    Nothing configured logging for the CLI, so Python's last-resort handler
+    printed WARNING records to stderr *with* their exc_info. A corrupt store
+    therefore greeted the user with a SQLite traceback from
+    _ensure_versioned_schema before any of doctor's readable output — a stack
+    trace at the exact moment they are least equipped to read one. The
+    exception is still attached to the record and still shown under
+    CLARA_DEBUG=1; only the default rendering drops it.
+    """
+
+    def formatException(self, ei: Any) -> str:  # noqa: N802 — logging's name
+        return ""
+
+    def format(self, record: logging.LogRecord) -> str:
+        record.exc_text = ""
+        return super().format(record)
+
+
+def _configure_logging() -> None:
+    debug = os.environ.get("CLARA_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+    handler = logging.StreamHandler(sys.stderr)
+    if debug:
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    else:
+        handler.setFormatter(_QuietFormatter("clara: %(message)s"))
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(logging.DEBUG if debug else logging.WARNING)
+
+
 def _make_output_lossy() -> None:
     """Never let an un-encodable character fail a command.
 
@@ -1100,6 +1151,7 @@ def _make_output_lossy() -> None:
 
 def main(argv: list[str] | None = None) -> None:
     _make_output_lossy()
+    _configure_logging()
     parser = argparse.ArgumentParser(
         prog="clara",
         description="CLARA memory: zero-key persistent memory for coding agents.",
