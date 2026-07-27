@@ -245,6 +245,65 @@ def format_block(memories: list[dict[str, object]]) -> str:
     return "\n".join(sections)
 
 
+# The project header is a handful of lines; it must never crowd out actual
+# memories, which are the point of the block.
+PROJECT_TOKEN_BUDGET = 120
+
+# Rendered in this order, so the most identifying facts come first. Categories
+# absent from the profile are skipped entirely rather than printed empty.
+_PROJECT_ROWS: tuple[tuple[str, str], ...] = (
+    ("language", "language"),
+    ("package_manager", "package manager"),
+    ("framework", "frameworks"),
+    ("build_tool", "build"),
+    ("test_framework", "tests"),
+    ("database", "database"),
+    ("infrastructure", "infra"),
+)
+_PROJECT_MAX_PER_ROW = 4
+
+
+def build_project_block(cwd: str) -> str | None:
+    """Render a compact ``[PROJECT]`` header for the repo at *cwd*.
+
+    Every value is sanitised before it is emitted: names and dependencies come
+    from manifests inside a repository that may have been cloned from anywhere,
+    and this text lands in the block the model reads as trusted background.
+    Returns ``None`` when nothing was detected.
+    """
+    from clara.project.detect import detect_project
+
+    profile = detect_project(cwd)
+    if not profile.facts:
+        return None
+
+    lines = ["[PROJECT]"]
+    headline = sanitize(profile.name, max_len=60) if profile.name else ""
+    if profile.is_monorepo:
+        workspaces = ", ".join(
+            sanitize(w, max_len=30) for w in profile.workspaces[:_PROJECT_MAX_PER_ROW]
+        )
+        headline = f"{headline} (monorepo: {workspaces})" if headline else (
+            f"monorepo: {workspaces}"
+        )
+    if headline:
+        lines.append(headline)
+
+    for category, label in _PROJECT_ROWS:
+        values = profile.by_category(category)[:_PROJECT_MAX_PER_ROW]
+        if values:
+            rendered = ", ".join(sanitize(v, max_len=40) for v in values)
+            lines.append(f"{label}: {rendered}")
+
+    if len(lines) == 1:
+        return None
+    block = "\n".join(lines)
+    while _approx_tokens(block) > PROJECT_TOKEN_BUDGET and len(lines) > 2:
+        lines.pop()
+        block = "\n".join(lines)
+    return block
+
+
 def _approx_tokens(text: str) -> int:
     return (len(text) + 3) // 4
 
@@ -293,7 +352,20 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"clara fastpath: {db_path}: read failed ({exc})", file=sys.stderr)
             finally:
                 conn.close()
+    # The project header goes first: it frames everything below it, and it is
+    # the one part that is useful even when the store is empty (a repo CLARA
+    # has never seen still has manifests).
+    try:
+        project_block = build_project_block(cwd)
+    except Exception as exc:  # noqa: BLE001 — must never block a session
+        print(f"clara fastpath: project detection failed ({exc})", file=sys.stderr)
+        project_block = None
+    if project_block:
+        print(project_block)
+
     if block:
+        if project_block:
+            print()
         print(block)
 
     try:
@@ -304,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"clara fastpath: knowledge map failed ({exc})", file=sys.stderr)
         map_block = None
     if map_block:
-        if block:
+        if block or project_block:
             print()
         print(map_block)
     return 0
