@@ -71,3 +71,72 @@ def test_vector_deps_are_loaded_on_demand_not_at_import():
     them until a vector operation actually runs."""
     loaded = _probe("clara.retrieval.engine", ("lancedb", "pyarrow"))
     assert loaded == {"lancedb": False, "pyarrow": False}
+
+
+# Modules on the zero-key store path. None of them uses a hosted LLM or a
+# vector index, and each reached the OpenAI SDK through a different route:
+# a package __init__ that eagerly imported the LLM tier, a dataclass living in
+# the same module as the provider clients, an engine factory parked in
+# clara.agent.
+ZERO_KEY_MODULES = [
+    "clara.integrations.local_memory",
+    "clara.reasoning.context",
+    "clara.extraction.types",
+    "clara.retrieval.engine",
+    "clara.db.engine",
+]
+
+
+@pytest.mark.parametrize("module", ZERO_KEY_MODULES)
+def test_zero_key_module_does_not_pull_the_llm_stack(module):
+    loaded = _probe(module, HEAVY)
+    offenders = [name for name, was in loaded.items() if was]
+    assert not offenders, (
+        f"{module} now imports {offenders}. The zero-key tier uses no hosted "
+        "model and no vector index; importing one costs ~2s on every `clara` "
+        "command that opens the store."
+    )
+
+
+class TestLazyReExportsStillWork:
+    """The laziness must be invisible to callers.
+
+    clara.reasoning and clara.integrations resolve their heavy names through
+    module __getattr__ instead of importing them up front. That is only
+    acceptable while the established import paths keep working.
+    """
+
+    def test_reasoning_engine_is_still_importable(self):
+        from clara.reasoning import ContextAssembler, ReasoningEngine
+
+        assert ReasoningEngine.__name__ == "ReasoningEngine"
+        assert ContextAssembler.__name__ == "ContextAssembler"
+
+    def test_openclaw_bridge_is_still_importable(self):
+        from clara.integrations import LocalMemory, OpenClawMemoryBridge
+
+        assert OpenClawMemoryBridge.__name__ == "OpenClawMemoryBridge"
+        assert LocalMemory.__name__ == "LocalMemory"
+
+    def test_extractor_still_re_exports_the_types(self):
+        """`from clara.extraction.extractor import ExtractedFact` is established
+        API even though the definition moved to clara.extraction.types."""
+        from clara.extraction.extractor import ExtractedFact as FromExtractor
+        from clara.extraction.types import ExtractedFact as FromTypes
+
+        assert FromExtractor is FromTypes
+
+    def test_agent_still_re_exports_the_engine_factory(self):
+        from clara.agent import _make_engine as from_agent
+        from clara.db.engine import _make_engine as from_db
+
+        assert from_agent is from_db
+
+    def test_unknown_attributes_still_raise(self):
+        """__getattr__ must not turn typos into silent None."""
+        import clara.integrations
+        import clara.reasoning
+
+        for module in (clara.reasoning, clara.integrations):
+            with pytest.raises(AttributeError):
+                getattr(module, "NoSuchName")  # noqa: B009 — the lookup is the test

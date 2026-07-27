@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterator
 
-from clara.extraction.extractor import ExtractedFact, ExtractionResult
+from clara.extraction.types import ExtractedFact, ExtractionResult
 
 # Mirrors rule 2 of the LLM extraction prompt: hedged statements are skipped.
 _HEDGES = re.compile(

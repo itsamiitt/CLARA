@@ -27,7 +27,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.db.models import VECTOR_DIMENSIONS, Memory, MemoryStatus, MemoryType
-from clara.extraction.extractor import ExtractedFact
+from clara.extraction.types import ExtractedFact
 from clara.memory.belief import BeliefMemory, SourceType
 from clara.memory.event import EventStore
 from clara.memory.skill import SkillStore

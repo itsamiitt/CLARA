@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from clara.extraction.extractor import ExtractedFact
+from clara.extraction.types import ExtractedFact
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine
 from clara.retrieval.engine import LanceRetrievalEngine, RetrievalEngine

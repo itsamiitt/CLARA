@@ -34,8 +34,8 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from clara import security, stats_cache
-from clara.agent import _make_engine, format_context
 from clara.core.ids import canonical_id
+from clara.db.engine import _make_engine
 from clara.db.fts import ensure_fts
 from clara.db.migrations import SchemaTooNew, ensure_schema
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
@@ -55,6 +55,7 @@ from clara.memory.belief import BeliefMemory, SourceType
 from clara.memory.event import EventStore
 from clara.memory.skill import SkillStore
 from clara.memory.world_model import WorldModelStore
+from clara.reasoning.context import format_context
 from clara.repoid import repo_id
 from clara.retrieval.engine import ScoredMemory
 from clara.retrieval.lexical import LexicalRetriever

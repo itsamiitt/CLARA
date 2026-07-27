@@ -20,6 +20,7 @@ import logging
 import os
 import threading
 from abc import ABC, abstractmethod
+from typing import Any
 
 from clara.core.llm import LLM_TIMEOUT_SECONDS
 from clara.db.models import VECTOR_DIMENSIONS
@@ -32,10 +33,30 @@ _TRUNCATION_WARNED: set[int] = set()
 
 # Optional dependency imports — guarded so the module can load even if
 # only one backend's dependencies are installed.
-try:
-    import openai as openai  # type: ignore[import-untyped]
-except ImportError:
-    openai = None  # type: ignore[assignment]
+# openai is imported on first use of the OpenAI backend, not at module import.
+# It costs 2.2 s, and this module sits on the store path of every `clara`
+# command through retrieval.engine -- none of which uses a hosted embedding
+# backend, because the zero-key tier embeds nothing.
+#
+# The sentinel matters: `openai` must keep meaning "not installed" when it is
+# None, and tests patch this exact attribute both to None (to assert the
+# missing-package error) and to a mock. Loading only while the value is still
+# _UNLOADED means any patch, of either kind, wins over the lazy import.
+_UNLOADED: Any = object()
+openai: Any = _UNLOADED
+
+
+def _ensure_openai() -> None:
+    """Resolve the module global once; leave an explicit patch alone."""
+    global openai
+    if openai is not _UNLOADED:
+        return
+    try:
+        import openai as _openai_mod
+    except ImportError:
+        openai = None
+    else:
+        openai = _openai_mod
 
 try:
     from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
@@ -122,6 +143,7 @@ class _OpenAIBackend(_EmbeddingBackend):
     """Wraps the OpenAI embeddings API (``text-embedding-3-small``)."""
 
     def __init__(self) -> None:
+        _ensure_openai()
         if openai is None:
             raise ImportError(
                 "The 'openai' package is required for the OpenAI embedding "
