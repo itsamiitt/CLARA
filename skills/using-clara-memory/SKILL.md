@@ -30,6 +30,10 @@ vault path) instead.
 - **Search before asking** the user something they may already have told you —
   preferences, stack choices, past decisions.
 - Use `memory_recent` to see what is top-of-mind without a query.
+- Hits labeled `[from another project]` (structured hits: `"foreign": true)
+  were saved while working in a different repository. They are real facts —
+  use them — but say where they came from when they drive a decision, and
+  never present another project's finding as a fact about this codebase.
 
 ## When to save (`memory_save`)
 

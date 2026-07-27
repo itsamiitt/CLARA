@@ -321,7 +321,26 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
             ))
         stats = await memory.stats()
         active = sum(stats.get("active_by_type", {}).values())
-        checks.append(("store readable", True, f"{active} active"))
+        # A shared store holds several projects' memories; since every read
+        # surface now labels foreign facts, show the same split here — "11
+        # active" alone hid that 9 of them belonged to another repository.
+        breakdown = ""
+        local_repo = _cwd_repo()
+        if local_repo and active:
+            try:
+                found = await memory.recent(n=active, current_repo=local_repo)
+                hits = found["hits"]
+                foreign = sum(1 for h in hits if h.get("foreign"))
+                # Only when the sample is the whole store: a partial sample
+                # would print an exact-looking split that is wrong.
+                if foreign and len(hits) == active:
+                    breakdown = (
+                        f" ({active - foreign} this project, "
+                        f"{foreign} from other projects)"
+                    )
+            except Exception:  # noqa: BLE001 — the split is informational
+                pass
+        checks.append(("store readable", True, f"{active} active{breakdown}"))
     except Exception as exc:  # noqa: BLE001
         checks.append(("store readable", False, str(exc)))
     finally:

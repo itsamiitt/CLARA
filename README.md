@@ -543,6 +543,23 @@ gets injected is exactly what gets read and written. Order (first match wins):
 
 `clara stats` and `clara doctor` print the resolved store and its scope.
 
+**How one shared store keeps projects straight.** Every memory is stamped at
+save time with the repository it was saved from, and every read surface uses
+one locality rule (local = this repo's stamp, no stamp, or a fact about the
+user — preferences follow the person):
+
+| surface | behaviour with another project's facts |
+|---|---|
+| session-start block | ranked after local facts, labeled `[from another project]`, at most 3 shown |
+| per-prompt recall | need a stronger match (two overlapping words *and* a store-rare naming word) and rank last |
+| `memory_search` / `memory_recent` / `clara context` | relevance order kept — you asked — but labeled in the block and flagged `foreign` in structured hits |
+| `MEMORY.md` export (`clara sync`) | project file, so: local first, labeled, capped; the `clara-memory.md` topic file labels but always contains the full set |
+
+This was built against a real store where one project's nine audit findings
+filled eight of ten context slots in every other project's sessions. If you
+want hard isolation instead of labels, use a project store (`clara init
+--project`).
+
 ### Kill switches
 
 Disable the add-ons independently; the memory core keeps working with both off.

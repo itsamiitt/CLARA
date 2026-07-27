@@ -95,3 +95,90 @@ class TestFailedInstallIsSurfaced:
         (installed / "shim" / "clara-mcp.exe").write_bytes(b"stub")
         (installed / "shim" / "clara.exe").write_bytes(b"stub")
         assert "install FAILED" not in doctor(tmp_path, installed)
+
+
+class TestStoreBreakdown:
+    """doctor's store line says whose memories they are.
+
+    "11 active" alone hid that 9 belonged to another repository — the same
+    blindness every read surface had before locality. The split only prints
+    when the sample covers the whole store; an exact-looking number from a
+    partial sample would be a lie with extra steps.
+    """
+
+    def test_mixed_store_shows_the_split(self, tmp_path) -> None:
+        import asyncio
+        import subprocess as sp
+
+        from clara.integrations.local_memory import LocalMemory
+
+        for name in ("repoA", "repoB"):
+            (tmp_path / name).mkdir()
+            sp.run(["git", "init", "-q", str(tmp_path / name)], capture_output=True)
+        home = tmp_path / "clarahome"
+        home.mkdir()
+
+        async def seed():
+            import os as _os
+
+            _os.chdir(tmp_path / "repoA")
+            memory = await LocalMemory.create(str(home / "clara.db"))
+            await memory.save(mem_type="belief", subject="payments",
+                              relation="uses", object="stripe")
+            await memory.close()
+
+        cwd = os.getcwd()
+        try:
+            asyncio.run(seed())
+        finally:
+            os.chdir(cwd)
+
+        env = {
+            **os.environ,
+            "CLARA_HOME": str(home),
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        }
+        done = subprocess.run(
+            [sys.executable, "-m", "clara.cli", "doctor"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=env, cwd=tmp_path / "repoB",
+        )
+        assert "1 active (0 this project, 1 from other projects)" in done.stdout
+
+    def test_single_project_store_stays_plain(self, tmp_path) -> None:
+        import asyncio
+        import subprocess as sp
+
+        from clara.integrations.local_memory import LocalMemory
+
+        (tmp_path / "repoA").mkdir()
+        sp.run(["git", "init", "-q", str(tmp_path / "repoA")], capture_output=True)
+        home = tmp_path / "clarahome"
+        home.mkdir()
+
+        async def seed():
+            import os as _os
+
+            _os.chdir(tmp_path / "repoA")
+            memory = await LocalMemory.create(str(home / "clara.db"))
+            await memory.save(mem_type="belief", subject="payments",
+                              relation="uses", object="stripe")
+            await memory.close()
+
+        cwd = os.getcwd()
+        try:
+            asyncio.run(seed())
+        finally:
+            os.chdir(cwd)
+
+        env = {
+            **os.environ,
+            "CLARA_HOME": str(home),
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        }
+        done = subprocess.run(
+            [sys.executable, "-m", "clara.cli", "doctor"],
+            capture_output=True, text=True, encoding="utf-8",
+            env=env, cwd=tmp_path / "repoA",
+        )
+        assert "1 active\n" in done.stdout or "1 active\r\n" in done.stdout
