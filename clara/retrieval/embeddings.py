@@ -21,6 +21,7 @@ import os
 import threading
 from abc import ABC, abstractmethod
 
+from clara.core.llm import LLM_TIMEOUT_SECONDS
 from clara.db.models import VECTOR_DIMENSIONS
 
 logger = logging.getLogger(__name__)
@@ -221,13 +222,19 @@ class _OllamaBackend(_EmbeddingBackend):
             )
 
         self._model = model or os.environ.get(ENV_OLLAMA_EMBED_MODEL, OLLAMA_MODEL)
-        self._client = _ollama_lib.Client(
-            host=base_url or os.environ.get(ENV_OLLAMA_BASE_URL, OLLAMA_BASE_URL)
-        )
+        host = base_url or os.environ.get(ENV_OLLAMA_BASE_URL, OLLAMA_BASE_URL)
+
+        # Two clients on purpose. Verified against ollama 0.6.2: Client(host=...)
+        # leaves httpx at Timeout(timeout=None), so an unresponsive server hangs
+        # the caller forever. Embedding calls are short and get the standard
+        # timeout; the setup client does not, because pull() downloads a
+        # multi-gigabyte model and a 30 s cap would abort first-run setup.
+        self._client = _ollama_lib.Client(host=host, timeout=LLM_TIMEOUT_SECONDS)
+        self._setup_client = _ollama_lib.Client(host=host)
         self._ensure_model()
 
     def _ensure_model(self) -> None:
-        listing = self._client.list()
+        listing = self._setup_client.list()
         models = listing.get("models", []) if isinstance(listing, dict) else getattr(
             listing, "models", []
         )
@@ -237,7 +244,7 @@ class _OllamaBackend(_EmbeddingBackend):
             if isinstance(item, dict)
         }
         if self._model not in names:
-            self._client.pull(self._model)
+            self._setup_client.pull(self._model)
 
     @property
     def dimensions(self) -> int:

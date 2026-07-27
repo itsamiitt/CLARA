@@ -63,6 +63,33 @@ class TestOllamaEmbeddingBackend:
 
         mock_client.pull.assert_called_once_with("nomic-embed-text")
 
+    def test_embedding_client_has_a_timeout_but_setup_client_does_not(self):
+        """Embedding calls must be bounded; model pulls must not be.
+
+        Verified against ollama 0.6.2: Client(host=...) leaves httpx at
+        Timeout(timeout=None), so an unresponsive server blocks forever. But
+        pull() downloads a multi-gigabyte model and routinely runs for minutes,
+        so the same 30 s cap would abort first-run setup partway through. Hence
+        two clients -- and hence this test, because collapsing them back into
+        one looks like a harmless cleanup either way it is done.
+        """
+        from clara.core.llm import LLM_TIMEOUT_SECONDS
+
+        mock_client = MagicMock()
+        mock_client.list.return_value = {"models": [{"model": "nomic-embed-text"}]}
+
+        with patch("clara.retrieval.embeddings._ollama_lib") as mock_lib:
+            mock_lib.Client.return_value = mock_client
+            _OllamaBackend(model="nomic-embed-text")
+
+        kwargs = [call.kwargs for call in mock_lib.Client.call_args_list]
+        assert len(kwargs) == 2, kwargs
+        timeouts = [kw.get("timeout") for kw in kwargs]
+        assert LLM_TIMEOUT_SECONDS in timeouts, kwargs
+        assert None in timeouts or any(
+            "timeout" not in kw for kw in kwargs
+        ), f"the pull client must not inherit the chat timeout: {kwargs}"
+
 
 class TestOllamaExtractor:
     def test_extractor_raises_without_package(self):
