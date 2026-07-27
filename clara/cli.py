@@ -1349,17 +1349,46 @@ def main(argv: list[str] | None = None) -> None:
         print("interrupted", file=sys.stderr)
         raise SystemExit(130) from None
     except Exception as exc:  # noqa: BLE001 — top-level: no raw traceback to users
-        # A store opened read-only because its schema is newer than this build
-        # surfaces as SQLite's "attempt to write a readonly database", which
-        # arrives wrapped in a full SQLAlchemy dump of the INSERT and every
-        # bound parameter. That is a true statement about the cause and a
-        # useless one about the fix, so translate it.
+        # SQLite's "attempt to write a readonly database" arrives wrapped in a
+        # SQLAlchemy dump of the INSERT and every bound parameter — true about
+        # the cause, useless about the fix. But it has two very different
+        # causes, and an earlier version of this handler blamed the wrong one:
+        # it reported every occurrence as "written by a newer version of CLARA"
+        # and told the user to upgrade, which for a chmod 444 store is advice
+        # that cannot work.
+        #
+        # LocalMemory._require_writable() now intercepts the schema-too-new case
+        # before any SQL runs, with its own message. So reaching SQLite's error
+        # means the *file* is unwritable: permissions, a read-only mount, or a
+        # store on read-only media.
+        from clara.integrations.local_memory import StoreReadOnly
+
+        if isinstance(exc, StoreReadOnly):
+            # A refusal, not a crash: exit 1 like any other failed operation.
+            # It reached the generic handler and exited 70 (EX_SOFTWARE, which
+            # this CLI documents as an internal failure) until this branch
+            # existed, telling the user to report a bug about a deliberate
+            # safety check.
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
         if "readonly database" in str(exc):
+            from clara.store import resolve_store
+
+            hint = ""
+            with contextlib.suppress(Exception):
+                path = resolve_store().db_path
+                writable = os.access(path, os.W_OK)
+                hint = (
+                    f"\n       store: {path}"
+                    f"\n       the file is {'writable' if writable else 'READ-ONLY'}"
+                    " to this user"
+                )
             print(
-                "error: this store was written by a newer version of CLARA, so it "
-                "is open read-only and nothing was written.\n"
-                "       Upgrade to write to it again:  pip install -U clara-memory\n"
-                "       Reading (clara list, clara context) keeps working meanwhile.",
+                "error: the store file cannot be written, so nothing was saved."
+                f"{hint}\n"
+                "       Check its permissions (chmod u+w on macOS/Linux, clear the\n"
+                "       read-only attribute on Windows) and that the disk is not full\n"
+                "       or mounted read-only. Reading keeps working meanwhile.",
                 file=sys.stderr,
             )
             logging.getLogger(__name__).debug("read-only store write", exc_info=True)

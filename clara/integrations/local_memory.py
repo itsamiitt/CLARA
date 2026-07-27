@@ -78,6 +78,17 @@ def _cached_repo_id() -> str:
     return cached
 
 
+class StoreReadOnly(RuntimeError):
+    """A write was refused because the store is open read-only.
+
+    Distinct from SQLite's own "attempt to write a readonly database", which
+    means the *file* is unwritable (permissions, read-only mount). This one
+    means the schema is newer than this build understands, so writing could
+    corrupt it. The two need opposite advice -- upgrade CLARA versus fix the
+    file -- and the CLI used to give the first for both.
+    """
+
+
 def _ensure_versioned_schema(db_path: str) -> None:
     """Apply versioned migrations (memories, graph, docs, FTS) to a file store.
 
@@ -368,7 +379,7 @@ class LocalMemory:
         and the fix instead, and touches no SQL.
         """
         if self._read_only:
-            raise RuntimeError(
+            raise StoreReadOnly(
                 "this store was written by a newer version of CLARA, so it is "
                 "open read-only and nothing was written. Upgrade with "
                 "'pip install -U clara-memory' to write to it again; reading "

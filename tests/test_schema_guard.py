@@ -161,3 +161,82 @@ class TestLocalMemoryHonoursIt:
             assert "[GRAPH]" in found["context"]
         finally:
             await memory.close()
+
+
+class TestReadOnlyCauseIsDiagnosedCorrectly:
+    """"Cannot write" has two causes that need opposite advice.
+
+    SQLite reports both as "attempt to write a readonly database":
+
+      * the schema is newer than this build, so CLARA opened the store
+        read-only on purpose -> upgrade clara-memory;
+      * the file itself is unwritable (chmod 444, read-only mount, full disk)
+        -> fix the file.
+
+    An earlier version of the CLI matched that SQLite string and blamed the
+    first for both, so a permissions problem told the user to run
+    `pip install -U clara-memory` -- advice that cannot possibly help. Verified
+    against a chmod 444 store: that is exactly what it printed.
+    """
+
+    def _run(self, argv):
+        import pytest as _pytest
+
+        from clara import cli
+
+        with _pytest.raises(SystemExit) as excinfo:
+            cli.main(argv)
+        return int(excinfo.value.code or 0)
+
+    def test_unwritable_file_blames_the_file(self, tmp_path, monkeypatch, capsys):
+        import os
+        import stat
+
+        db = tmp_path / "clara.db"
+        monkeypatch.setenv("CLARA_DB_PATH", str(db))
+        monkeypatch.setenv("CLARA_HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        assert self._run(["remember", "I use Postgres for storage"]) == 0
+        os.chmod(db, stat.S_IREAD)
+        capsys.readouterr()
+
+        try:
+            assert self._run(["remember", "I use Redis for caching"]) == 1
+            err = capsys.readouterr().err
+            assert "cannot be written" in err
+            assert "pip install" not in err, (
+                "a permissions problem must not tell the user to upgrade CLARA"
+            )
+        finally:
+            os.chmod(db, stat.S_IWRITE | stat.S_IREAD)
+
+    def test_newer_schema_blames_the_version(self, tmp_path, monkeypatch, capsys):
+        db = tmp_path / "clara.db"
+        monkeypatch.setenv("CLARA_DB_PATH", str(db))
+        monkeypatch.setenv("CLARA_HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        assert self._run(["remember", "I use Postgres for storage"]) == 0
+
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "INSERT INTO schema_info (version, migrated_at) VALUES (?, '2030-01-01')",
+            (SCHEMA_VERSION + 91,),
+        )
+        conn.commit()
+        conn.close()
+        capsys.readouterr()
+
+        assert self._run(["remember", "I use Kafka for events"]) == 1, (
+            "a deliberate refusal is a failed operation (1), not an internal "
+            "error (70)"
+        )
+        err = capsys.readouterr().err
+        assert "newer version of CLARA" in err
+        assert "chmod" not in err, "this is not a permissions problem"
+
+    def test_the_refusal_has_its_own_exception_type(self):
+        """Matched by type, not by message text — the text is user-facing copy
+        and will be reworded."""
+        from clara.integrations.local_memory import StoreReadOnly
+
+        assert issubclass(StoreReadOnly, RuntimeError)
