@@ -149,6 +149,25 @@ class TestScripts:
         ps1 = (_ROOT / "scripts" / "win" / "bootstrap.ps1").read_text("utf-8")
         assert "sys.version_info >= (3, 10)" in ps1
 
+    def test_sh_bootstrap_finds_the_private_interpreter(self):
+        """bootstrap.sh must try $DATA_DIR/pytools before telling the user to
+        go install Python.
+
+        bootstrap.ps1 provisions a private CPython there, and this script still
+        runs on those same machines: the .cmd dispatchers exec sh, and Git Bash
+        users land here directly. Verified before the fix -- with a portable
+        interpreter present in the plugin's own data directory and nothing on
+        PATH, bootstrap.sh exited 1 with "install Python 3.10+ from
+        python.org". The fallback must stay ahead of that message.
+        """
+        sh = (_ROOT / "scripts" / "bootstrap.sh").read_text("utf-8")
+        assert "pytools/python-" in sh, "no private-interpreter fallback"
+        fallback_at = sh.index("pytools/python-")
+        give_up_at = sh.index("no Python >= 3.10 on PATH (tried")
+        assert fallback_at < give_up_at, (
+            "the pytools fallback must be attempted before the give-up message"
+        )
+
 
 class TestWindowsDispatch:
     @pytest.mark.parametrize("dispatcher", _CMD_DISPATCHERS)

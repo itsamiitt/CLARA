@@ -251,6 +251,25 @@ if [ -z "${PY:-}" ]; then
       break
     fi
   done
+  # Nothing on PATH: fall back to the private interpreter that bootstrap.ps1
+  # provisions under $DATA_DIR/pytools. Windows installs commonly have one
+  # there and nothing on PATH, and this script still runs on those machines
+  # (the .cmd dispatchers exec sh, and Git Bash users land here directly).
+  # Without this the user is told to go install Python while a perfectly good
+  # one sits inside CLARA's own data directory.
+  if [ -z "$PY" ]; then
+    for _cand in "$DATA_DIR"/pytools/python-*/tools/python.exe \
+                 "$DATA_DIR"/pytools/python-*/tools/python \
+                 "$DATA_DIR"/pytools/python-*/bin/python3; do
+      [ -x "$_cand" ] || continue
+      if "$_cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
+          >/dev/null 2>&1; then
+        PY="$_cand"
+        log "using CLARA's private Python at $_cand"
+        break
+      fi
+    done
+  fi
   if [ -z "$PY" ]; then
     if [ -n "$INSTALLED_PY" ]; then
       # Installed but stale (pyproject changed) and no system Python to rebuild
