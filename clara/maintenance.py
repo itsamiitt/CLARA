@@ -64,6 +64,52 @@ async def _session_anchor_for_index(anchor: str) -> str | None:
     return anchor if git_toplevel(anchor) else None
 
 
+# Session sidecar files older than this are dead: they key on a session id,
+# and no session lives a week. 7 days also comfortably exceeds the maintenance
+# cadence, so a live session's files are never mid-sweep casualties.
+SESSION_FILE_MAX_AGE_S = 7 * 24 * 3600
+
+
+def sweep_session_files(base: Path | None = None) -> int:
+    """Delete per-session sidecar files nothing will read again.
+
+    Every session leaves small files behind — the cwd hint the hooks write,
+    the Stop-hook debounce flag, the per-prompt recall ledger, the per-file
+    read-annotation directory — and, verified by reading every reference,
+    nothing deletes any of them. One machine accumulates a few files per
+    session forever. Preventive rather than reactive: no store has been
+    observed to suffer, but unbounded growth with no owner is a defect on
+    its own.
+
+    Age comes from mtime; anything younger than SESSION_FILE_MAX_AGE_S is a
+    potentially live session and is left alone.
+    """
+    if base is None:
+        base = Path(os.environ.get("CLARA_HOME") or Path.home() / ".clara")
+    cutoff = time.time() - SESSION_FILE_MAX_AGE_S
+    removed = 0
+    for directory in (base / "session-flags", base / "session-cwd"):
+        if not directory.is_dir():
+            continue
+        for entry in directory.iterdir():
+            try:
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+                if entry.is_dir():
+                    # The read-annotate flag dirs hold one empty file per
+                    # annotated document.
+                    for child in entry.iterdir():
+                        child.unlink(missing_ok=True)
+                        removed += 1
+                    entry.rmdir()
+                else:
+                    entry.unlink()
+                removed += 1
+            except OSError:
+                continue  # locked or already gone; the next pass retries
+    return removed
+
+
 async def run_if_due(
     memory: LocalMemory,
     db_path: str,
@@ -180,6 +226,13 @@ async def run_if_due(
                 # (a cross-thread sqlite connection) invisible for days. Name
                 # the failure; the log has the traceback.
                 index_summary = f"index: FAILED ({type(exc).__name__}: {exc})"
+
+            try:
+                swept = sweep_session_files()
+                if swept:
+                    logger.info("Swept %d stale session files", swept)
+            except Exception:  # noqa: BLE001 — the sweep is best-effort
+                logger.exception("Session-file sweep failed")
 
             sync_summary = "sync: skipped"
             try:
