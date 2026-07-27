@@ -88,6 +88,7 @@ def _git(root: str, args: list[str]) -> str | None:
             ["git", *args],
             cwd=root,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",

@@ -429,7 +429,11 @@ def _git_mv(root: str, src: str, dst: str) -> bool:
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.run(
-            ["git", "mv", src, dst], cwd=root, capture_output=True, text=True,
+            ["git", "mv", src, dst],
+            cwd=root,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError):

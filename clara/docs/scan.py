@@ -44,7 +44,7 @@ def find_repo_root(cwd: str) -> str:
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            cwd=cwd, capture_output=True, text=True, timeout=10,
+            cwd=cwd, capture_output=True, stdin=subprocess.DEVNULL, text=True, timeout=10,
         )
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip()
@@ -62,7 +62,7 @@ def clara_yml_ignored(root: str) -> bool:
     try:
         proc = subprocess.run(
             ["git", "check-ignore", "-q", "clara.yml"],
-            cwd=root, capture_output=True, timeout=10,
+            cwd=root, capture_output=True, stdin=subprocess.DEVNULL, timeout=10,
         )
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):

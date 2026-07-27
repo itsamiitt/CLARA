@@ -84,6 +84,7 @@ def _git_dirty_md(root: str) -> list[str]:
             ["git", "status", "--porcelain", "--", "*.md"],
             cwd=root,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",

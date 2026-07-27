@@ -46,6 +46,7 @@ def git_toplevel(cwd: str) -> str | None:
             ["git", "rev-parse", "--show-toplevel"],
             cwd=cwd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=_GIT_TIMEOUT_S,
         )
@@ -141,6 +142,7 @@ def secure_store_file(path: Path) -> None:
                 ["icacls", str(path), "/inheritance:r", "/grant:r",
                  f"{os.environ.get('USERNAME', 'SYSTEM')}:F"],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 timeout=10,
             )
     except OSError as exc:  # permissions are best-effort, never fatal

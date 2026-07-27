@@ -7,6 +7,7 @@ status line itself (a status line that exits non-zero blanks the bar).
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 
@@ -39,9 +40,15 @@ class TestSidecarFile:
     def test_read_stale_returns_none(self, tmp_path):
         db = _make_store(tmp_path)
         stats_cache.write(db, 7)
-        # Anything older than max_age must be treated as absent, so the caller
-        # recounts instead of showing a number from a previous CLARA version.
-        assert stats_cache.read(db, max_age_s=0.0) is None
+        # Age the sidecar explicitly rather than passing max_age_s=0: on
+        # Windows the file's mtime can land a hair in the future relative to
+        # time.time(), making "now - mtime >= 0" briefly false and the test
+        # flaky. Anything older than max_age must read as absent so the caller
+        # recounts instead of trusting a number from a previous CLARA version.
+        cache = stats_cache.path_for(db)
+        old = time.time() - 3600
+        os.utime(cache, (old, old))
+        assert stats_cache.read(db, max_age_s=60.0) is None
 
     def test_read_corrupt_returns_none(self, tmp_path):
         db = _make_store(tmp_path)
