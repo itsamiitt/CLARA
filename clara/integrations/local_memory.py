@@ -292,6 +292,11 @@ class LocalMemory:
         """The session factory, for subsystems that manage their own txn."""
         return self._session_factory
 
+    @property
+    def engine(self) -> AsyncEngine:
+        """The underlying engine, for callers needing a raw connection."""
+        return self._engine
+
     @contextlib.asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
         """Yield a session in an open transaction, committed on clean exit.

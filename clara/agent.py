@@ -604,6 +604,15 @@ class ClaraMemory:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """The session factory, for callers managing their own transaction.
+
+        Mirrors :attr:`LocalMemory.session_factory`; the API layer needs a
+        session per request and should not have to reach through a private.
+        """
+        return self._session_factory
+
     async def close(self) -> None:
         """Shut down the scheduler and dispose of the database engine."""
         if self._decay_scheduler is not None:

@@ -31,7 +31,7 @@ def get_agent(request: Request) -> ClaraMemory:
 async def get_session(
     agent: ClaraMemory = Depends(get_agent),
 ) -> AsyncIterator[AsyncSession]:
-    async with agent._session_factory() as session:
+    async with agent.session_factory() as session:
         yield session
 
 

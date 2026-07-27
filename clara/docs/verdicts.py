@@ -204,7 +204,7 @@ async def classify(
         raise ValueError(f"unknown tier {tier!r}; expected one of {sorted(_TIERS)}")
     doc_type = _validate_doc_type(doc_type)
     verdict = f"classify:{doc_type}" + (f":{tier}" if tier else "")
-    async with memory._session_factory() as session, session.begin():
+    async with memory.session() as session:
         doc = await _doc_by_path(session, repo, path)
         if doc is None:
             return {"found": False, "path": path,
@@ -236,7 +236,7 @@ async def classify(
             evidence={"content_hash": doc["content_hash"], "doc_type": doc_type,
                       "tier": tier},
         )
-    await asyncio.to_thread(_refresh_side_files, memory._db_path, repo)
+    await asyncio.to_thread(_refresh_side_files, memory.db_path, repo)
     return {"found": True, "doc_id": doc["doc_id"], "action": "classified",
             "doc_type": doc_type, "tier": tier or doc["tier"]}
 
@@ -250,7 +250,7 @@ async def supersede(
     rationale: str,
 ) -> dict[str, Any]:
     """Mark ``old_path`` superseded by ``new_path`` (+ graph ``supersedes`` edge)."""
-    async with memory._session_factory() as session, session.begin():
+    async with memory.session() as session:
         old_doc = await _doc_by_path(session, repo, old_path)
         new_doc = await _doc_by_path(session, repo, new_path)
         if old_doc is None or new_doc is None:
@@ -280,7 +280,7 @@ async def supersede(
                 )
         old_doc_id = old_doc["doc_id"]
         new_doc_id = new_doc["doc_id"]
-    await asyncio.to_thread(_refresh_side_files, memory._db_path, repo)
+    await asyncio.to_thread(_refresh_side_files, memory.db_path, repo)
     return {"found": True, "old_doc_id": old_doc_id,
             "new_doc_id": new_doc_id, "edge_id": edge_id,
             "action": "superseded"}
@@ -315,7 +315,7 @@ async def fulfill(
 
     memory_ids: list[str] = []
     edge_ids: list[str] = []
-    async with memory._session_factory() as session, session.begin():
+    async with memory.session() as session:
         doc = await _doc_by_path(session, repo, path)
         if doc is None:
             return {"found": False, "path": path,
@@ -396,9 +396,9 @@ async def fulfill(
                     relation="fulfilled_by", metadata={"doc_id": doc["doc_id"]},
                 ))
 
-    await asyncio.to_thread(_refresh_side_files, memory._db_path, repo)
+    await asyncio.to_thread(_refresh_side_files, memory.db_path, repo)
     await asyncio.to_thread(
-        _drop_from_proposals, memory._db_path, repo, doc["rel_path"]
+        _drop_from_proposals, memory.db_path, repo, doc["rel_path"]
     )
     return {"found": True, "doc_id": doc["doc_id"], "memory_ids": memory_ids,
             "edge_ids": edge_ids, "action": "fulfilled"}
@@ -453,7 +453,7 @@ async def archive(
     from clara.policy import load_policy
 
     policy = load_policy(repo_root)
-    async with memory._session_factory() as session, session.begin():
+    async with memory.session() as session:
         doc = await _doc_by_path(session, repo, path)
         if doc is None:
             return {"found": False, "path": path}
@@ -482,7 +482,7 @@ async def archive(
             evidence={"from": doc["rel_path"], "to": new_rel, "moved": moved,
                       "prior_lifecycle": doc["lifecycle"]},
         )
-    await asyncio.to_thread(_refresh_side_files, memory._db_path, repo)
+    await asyncio.to_thread(_refresh_side_files, memory.db_path, repo)
     return {"found": True, "action": "archived", "from": doc["rel_path"],
             "to": new_rel, "moved": moved}
 
@@ -496,7 +496,7 @@ async def restore(
     rationale: str = "restored by user",
 ) -> dict[str, Any]:
     """Reverse an archive: move the file back and reactivate the ledger row."""
-    async with memory._session_factory() as session, session.begin():
+    async with memory.session() as session:
         doc = await _doc_by_path(session, repo, path)
         if doc is None or doc["lifecycle"] != "archived":
             return {"found": False, "path": path,
@@ -539,5 +539,5 @@ async def restore(
             rationale=rationale,
             evidence={"from": doc["rel_path"], "to": new_rel, "moved": moved},
         )
-    await asyncio.to_thread(_refresh_side_files, memory._db_path, repo)
+    await asyncio.to_thread(_refresh_side_files, memory.db_path, repo)
     return {"found": True, "action": "restored", "to": new_rel, "moved": moved}

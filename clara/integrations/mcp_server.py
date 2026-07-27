@@ -201,7 +201,7 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
 
             from clara.scheduler.decay import DecayScheduler
 
-            scheduler = DecayScheduler(memory._session_factory)
+            scheduler = DecayScheduler(memory.session_factory)
             decay_summary = await scheduler.run_daily_decay()
             prune_summary = await scheduler.run_weekly_pruning()
 
@@ -233,7 +233,7 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
                 from clara.graph.maintain import maintenance_summary, run_graph_maintenance
 
                 config = ClaraConfig.from_env()
-                async with memory._session_factory() as session, session.begin():
+                async with memory.session() as session:
                     graph_counts = await run_graph_maintenance(
                         session,
                         archival_threshold=config.archival_threshold,

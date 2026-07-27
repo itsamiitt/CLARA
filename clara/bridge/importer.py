@@ -58,7 +58,7 @@ def candidate_lines(text: str) -> list[str]:
 async def _already_imported(memory: LocalMemory, origin_hash: str) -> bool:
     from sqlalchemy import text as sa_text
 
-    async with memory._session_factory() as session:
+    async with memory.session_factory() as session:
         row = (
             await session.execute(
                 sa_text(
@@ -74,7 +74,7 @@ async def _already_imported(memory: LocalMemory, origin_hash: str) -> bool:
 async def _belief_exists(memory: LocalMemory, subject: str, relation: str, obj: str) -> bool:
     from sqlalchemy import text as sa_text
 
-    async with memory._session_factory() as session:
+    async with memory.session_factory() as session:
         row = (
             await session.execute(
                 sa_text(
@@ -156,7 +156,7 @@ async def _stamp_provenance(
 ) -> None:
     from sqlalchemy import text as sa_text
 
-    async with memory._session_factory() as session, session.begin():
+    async with memory.session() as session:
         for key, value in provenance.items():
             await session.execute(
                 sa_text(

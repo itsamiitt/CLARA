@@ -251,3 +251,44 @@ class TestProjectStoreWithoutGit:
     ):
         monkeypatch.setattr("clara.store.git_toplevel", lambda _cwd: None)
         assert resolve_store(str(tmp_path)).scope == "global"
+
+
+class TestNoPrivateReachIns:
+    """Subsystems must use LocalMemory's public accessors, not its privates.
+
+    Audit finding A2: the CLI, docs, bridge and MCP layers all programmed
+    against ``_session_factory`` / ``_db_path`` / ``_engine`` because no public
+    accessor existed, which made every internal refactor a breaking change for
+    four modules. The accessors were added first and the callers migrated
+    afterwards; without this guard the coupling quietly grows back.
+    """
+
+    def test_no_module_reaches_into_the_privates(self):
+        import re
+
+        root = Path(__file__).parents[1] / "clara"
+        owners = {"local_memory.py", "agent.py"}  # may touch their own state
+        # Only flag access through *another* object. `self._session_factory` is
+        # a class holding its own state (DecayScheduler, BackgroundWriter) and
+        # is not the coupling this guards against.
+        pattern = re.compile(
+            r"\b(?!self\b)\w+\.(_session_factory|_db_path|_engine)\b"
+        )
+        offenders = []
+        for path in root.rglob("*.py"):
+            if path.name in owners:
+                continue
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                match = pattern.search(line)
+                if match:
+                    offenders.append(
+                        f"{path.relative_to(root)}:{lineno} {match.group(0)}"
+                    )
+        assert not offenders, (
+            "use the public accessors (session(), session_factory, db_path, "
+            "engine) instead of reaching through privates:\n  "
+            + "\n  ".join(offenders)
+        )
+

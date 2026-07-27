@@ -281,7 +281,7 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        async with memory._engine.connect() as conn:
+        async with memory.engine.connect() as conn:
             check_sql = (
                 "PRAGMA integrity_check" if getattr(args, "deep", False)
                 else "PRAGMA quick_check(1)"
@@ -594,7 +594,7 @@ async def _cmd_graph(args: argparse.Namespace) -> int:
             return 0
 
         # doctor
-        async with memory._session_factory() as session:
+        async with memory.session_factory() as session:
             dup_rows = (
                 await session.execute(
                     sa_text(

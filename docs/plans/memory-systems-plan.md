@@ -260,6 +260,25 @@ over this table (see §7).
 
 ### 3.5 Decision Memory
 
+> **VERIFIED 2026-07-27 — mostly redundant; do not build as specified.**
+>
+> Before building these tables the overlap was tested rather than assumed. A
+> real decision (why, trade-off, rejected alternatives) was recorded with the
+> existing memory types and was retrievable both by topic and by the file path
+> it was tagged with. Status, supersession, attestation, retrieval, graph
+> linking and context rendering already exist and are tested; a parallel
+> `decisions` table would duplicate all six.
+>
+> The one genuine gap the exercise exposed was that a belief's rationale is
+> stored in `metadata.evidence[0]` and neither renderer showed it — the *why*
+> was captured and then hidden. That is fixed in `fd4f436` with one line of
+> rendering, which is what the parallel store was really for.
+>
+> What remains uniquely useful here is small and belongs as fields on existing
+> memories rather than a new store: a `kind` taxonomy, `priority`, and
+> `expires_at`. The schema below is kept for reference, not as a work item.
+
+
 ```sql
 CREATE TABLE decisions (
     decision_id  TEXT PRIMARY KEY,
