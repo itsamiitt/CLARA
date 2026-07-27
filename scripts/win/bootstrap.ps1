@@ -161,6 +161,59 @@ function Get-PortablePython([string]$DataDir) {
     return $exe
 }
 
+
+# Hash the package sources, and reinstall the package when they have moved on.
+#
+# The venv is keyed on pyproject.toml, which describes *dependencies*. Editing
+# clara/*.py leaves that key unchanged, so the fast path used to conclude "venv
+# is current" and keep serving a stale copy of the package -- users never
+# received code-only updates. Dependencies are expensive to rebuild and change
+# rarely; the package is cheap to reinstall and changes constantly, so the two
+# are tracked separately. Mirrors hash_sources/ensure_current_sources in
+# scripts/bootstrap.sh.
+$SOURCE_HASH_SCRIPT = @'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+for path in sorted(root.rglob("*.py")):
+    digest.update(path.relative_to(root).as_posix().encode())
+    digest.update(path.read_bytes())
+print(digest.hexdigest()[:12])
+'@
+
+function Get-ClaraSourceHash([string]$PythonExe, [string]$Root) {
+    try {
+        $out = $SOURCE_HASH_SCRIPT | & $PythonExe - (Join-Path $Root "clara") 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) { return "$out".Trim() }
+    } catch {}
+    return $null
+}
+
+function Update-ClaraSources([string]$DataDir, [string]$Venv) {
+    $vpy = Find-VenvBin $Venv "python"
+    if (-not $vpy) { return }
+    $want = Get-ClaraSourceHash $vpy $pluginRoot
+    if (-not $want) { return }
+    $marker = Join-Path $DataDir "source.hash"
+    $have = $null
+    if (Test-Path $marker) {
+        try { $have = (Get-Content $marker -Raw -ErrorAction Stop).Trim() } catch {}
+    }
+    if ($want -eq $have) { return }
+    Write-ClaraLog "plugin code changed - refreshing the installed package"
+    Push-Location $pluginRoot
+    try {
+        & $vpy -m pip install --quiet --no-deps . 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            try { Set-Content -Path $marker -Value $want -Encoding Ascii -NoNewline } catch {}
+        } else {
+            Write-ClaraLog "package refresh failed; continuing with the installed code"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ($env:CLAUDE_PLUGIN_ROOT) { $pluginRoot = $env:CLAUDE_PLUGIN_ROOT }
 else { $pluginRoot = Split-Path -Parent $scriptDir }  # scripts\win -> scripts
@@ -220,6 +273,17 @@ if ($InstallWorker) {
         Set-CurrentPointer $data $venv
         if (-not (Update-ClaraShim $data $venv)) {
             Write-Output "shim refresh failed (non-fatal)"
+        }
+        # Record what was just installed so the fast path can detect drift.
+        $vpyDone = Find-VenvBin $venv "python"
+        if ($vpyDone) {
+            $installedHash = Get-ClaraSourceHash $vpyDone $env:CLARA_BS_ROOT
+            if ($installedHash) {
+                try {
+                    Set-Content -Path (Join-Path $data "source.hash") `
+                        -Value $installedHash -Encoding Ascii -NoNewline
+                } catch {}
+            }
         }
         # GC: keep the two newest venvs.
         $venvs = Get-ChildItem -Path $data -Directory -Filter "venv-*" |
@@ -341,6 +405,9 @@ if (Find-VenvBin $venv "clara-mcp") {
         }
     }
     if ($needShim) { $null = Update-ClaraShim $dataDir $venv }
+    # The venv matches pyproject, but the package inside it may predate the
+    # newest clara/*.py — refresh it before declaring the environment ready.
+    Update-ClaraSources $dataDir $venv
     exit 0
 }
 

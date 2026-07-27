@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -211,3 +212,56 @@ class TestSkillAndCommands:
         assert "description:" in text
         assert "argument-hint:" in text
         assert "$ARGUMENTS" in text
+
+
+class TestSourceFreshness:
+    """The installed package must not silently fall behind the checkout.
+
+    Regression: the venv is keyed on a hash of pyproject.toml, which describes
+    dependencies. Editing clara/*.py leaves that key unchanged, so bootstrap's
+    fast path concluded "venv is current" and kept serving a stale copy —
+    users never received code-only updates. Verified in the field: a plugin
+    install was missing three modules and a shipped performance fix.
+    """
+
+    def _bootstrap(self) -> str:
+        return (Path(__file__).parents[1] / "scripts" / "bootstrap.sh").read_text(
+            encoding="utf-8"
+        )
+
+    def test_bootstrap_tracks_source_separately_from_dependencies(self):
+        script = self._bootstrap()
+        assert "hash_sources()" in script
+        assert "ensure_current_sources()" in script
+        # The fast path is the one that used to skip the package entirely.
+        assert "ensure_current_sources \"$VENV\" \"$DATA_DIR\"" in script
+
+    def test_helpers_are_defined_before_the_worker_uses_them(self):
+        # sh resolves functions at call time; the worker block runs and exits
+        # before the foreground section, so a definition below it never loads.
+        script = self._bootstrap()
+        assert script.index("hash_sources()") < script.index("# Detached worker")
+
+    def test_source_hash_changes_when_a_module_changes(self, tmp_path):
+        # Exercise the same hashing rule bootstrap uses, over a fake package.
+        def source_hash(root: Path) -> str:
+            digest = hashlib.sha256()
+            for path in sorted(root.rglob("*.py")):
+                digest.update(path.relative_to(root).as_posix().encode())
+                digest.update(path.read_bytes())
+            return digest.hexdigest()[:12]
+
+        pkg = tmp_path / "clara"
+        (pkg / "sub").mkdir(parents=True)
+        (pkg / "a.py").write_text("x = 1", encoding="utf-8")
+        (pkg / "sub" / "b.py").write_text("y = 2", encoding="utf-8")
+
+        before = source_hash(pkg)
+        assert source_hash(pkg) == before, "hash must be stable for unchanged input"
+
+        (pkg / "sub" / "b.py").write_text("y = 3", encoding="utf-8")
+        assert source_hash(pkg) != before, "a changed module must change the hash"
+
+        # Renames matter too: the path is folded into the digest.
+        (pkg / "sub" / "b.py").rename(pkg / "sub" / "c.py")
+        assert source_hash(pkg) != before

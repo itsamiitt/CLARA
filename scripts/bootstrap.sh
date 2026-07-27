@@ -76,6 +76,44 @@ write_current_path() {
   printf '%s' "$_native" >"$_data/current.path" 2>/dev/null || true
 }
 
+# Hash the package sources with $1; empty output on failure.
+#
+# The venv is keyed on pyproject.toml, which describes *dependencies*. Editing
+# clara/*.py does not change that key, so the fast path below used to conclude
+# "venv is current" and keep serving a stale copy of the package: users never
+# received code-only updates. Dependencies are expensive to rebuild and change
+# rarely; the package itself is cheap to reinstall and changes constantly, so
+# the two are tracked separately. ~30 ms for ~90 files.
+hash_sources() {
+  "$1" - "$PLUGIN_ROOT/clara" <<'PYEOF' 2>/dev/null || true
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+for path in sorted(root.rglob("*.py")):
+    digest.update(path.relative_to(root).as_posix().encode())
+    digest.update(path.read_bytes())
+print(digest.hexdigest()[:12])
+PYEOF
+}
+
+# Reinstall just the package (not its dependencies) into the active venv.
+ensure_current_sources() {
+  _venv=$1
+  _data=$2
+  _vpy=$(find_bin "$_venv" python) || return 0
+  _want=$(hash_sources "$_vpy")
+  [ -n "$_want" ] || return 0
+  _have=''
+  [ -f "$_data/source.hash" ] && _have=$(cat "$_data/source.hash" 2>/dev/null || true)
+  [ "$_want" = "$_have" ] && return 0
+  log 'plugin code changed — refreshing the installed package'
+  if ( cd "$PLUGIN_ROOT" && "$_vpy" -m pip install --quiet --no-deps . ) >/dev/null 2>&1; then
+    printf '%s' "$_want" >"$_data/source.hash" 2>/dev/null || true
+  else
+    log 'package refresh failed; continuing with the previously installed code'
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Detached worker (re-invoked by the spawn below; stdout goes to install.log)
 # ---------------------------------------------------------------------------
@@ -118,6 +156,10 @@ if [ "${1:-}" = "--install-worker" ]; then
     # Before the GC below deletes the previous venv, so the Windows hooks are
     # never left reading a pointer to a directory that no longer exists.
     write_current_path "$VENV" "$DATA"
+    # Record what was just installed so the fast path can tell when the
+    # package has fallen behind the checkout.
+    _vpy_done=$(find_bin "$VENV" python) || _vpy_done=""
+    [ -n "$_vpy_done" ] && hash_sources "$_vpy_done" >"$DATA/source.hash" 2>/dev/null
     ensure_shim "$VENV" "$DATA" || echo "shim refresh failed (non-fatal)"
     # GC: keep the two newest venvs (the one just installed + one fallback).
     # venv-* basenames are fixed-format hex, so parsing ls -dt is safe here.
@@ -244,6 +286,9 @@ if find_bin "$VENV" clara-mcp >/dev/null; then
     ln -sfn "$VENV" "$CURRENT" 2>/dev/null || true
   fi
   write_current_path "$VENV" "$DATA_DIR"
+  # The venv matches pyproject, but the package inside it may predate the
+  # newest clara/*.py — refresh it before declaring the environment ready.
+  ensure_current_sources "$VENV" "$DATA_DIR"
   # Heal the MCP shim too (dangling after venv GC, missing on upgrade).
   if [ ! -e "$DATA_DIR/shim/clara-mcp" ] && [ ! -e "$DATA_DIR/shim/clara-mcp.exe" ]; then
     ensure_shim "$VENV" "$DATA_DIR" || true
