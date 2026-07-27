@@ -14,7 +14,7 @@ import sqlite3
 
 import pytest
 
-from clara.index import indexer, jssource
+from clara.index import indexer, jssource, queries
 
 
 def specifiers(source: str) -> list[str]:
@@ -233,6 +233,27 @@ class TestIndexing:
         ]
         assert live == ["react"]
 
+    def test_import_scripts_is_an_edge(self, conn, repo) -> None:
+        # A service worker loads its code with importScripts, which the
+        # TypeScript compiler does not model. Without it, 24 live files in the
+        # corpus repo looked like dead code.
+        (repo / "src" / "worker.js").write_text(
+            'importScripts("util.js");\n', encoding="utf-8"
+        )
+        (repo / "src" / "util.js").write_text("var a = 1;\n", encoding="utf-8")
+        indexer.index_repo(conn, "r", repo)
+        targets = [
+            r[0]
+            for r in conn.execute(
+                "SELECT n.qualified_name FROM code_edges e "
+                "JOIN code_nodes n ON n.node_id = e.dst_id "
+                "JOIN code_nodes s ON s.node_id = e.src_id "
+                "WHERE e.invalid_at IS NULL AND s.qualified_name = 'src/worker.js'"
+            )
+        ]
+        # Resolved as a sibling file, not mistaken for an npm package.
+        assert targets == ["src/util.js"]
+
     def test_query_walk_finds_transitive_dependency(self, conn, repo) -> None:
         from clara.index import queries
 
@@ -243,3 +264,113 @@ class TestIndexing:
         assert [(d.qualified_name, d.depth) for d in found] == [
             ("react", 1), ("src/util.ts", 1), ("src/deep.ts", 2),
         ]
+
+
+class TestEntrypointEvidence:
+    """What keeps `unused_modules` from calling a third of a repo dead.
+
+    Before this, a real 2,568-file Node repo reported 848 files (33%) as
+    unreferenced -- including vite.config.ts, every *.test.ts, and every app
+    entry. Each rule below is evidence the project states about itself, or a
+    convention a named tool defines, not a guess about what looks unimportant.
+    """
+
+    def test_package_json_main_bin_and_scripts(self, tmp_path) -> None:
+        (tmp_path / "package.json").write_text(
+            '{"main": "./lib/index.js", "bin": {"cli": "bin/run.js"},'
+            ' "scripts": {"start": "tsx server/index.ts --port 3000"}}',
+            encoding="utf-8",
+        )
+        found = queries.script_entrypoints(tmp_path)
+        assert found == {"lib/index.js", "bin/run.js", "server/index.ts"}
+
+    def test_monorepo_paths_resolve_under_their_own_package(self, tmp_path) -> None:
+        pkg = tmp_path / "apps" / "admin"
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text(
+            '{"main": "src/main.tsx"}', encoding="utf-8"
+        )
+        assert queries.script_entrypoints(tmp_path) == {"apps/admin/src/main.tsx"}
+
+    def test_any_html_page_not_only_index(self, tmp_path) -> None:
+        # popup.html/sidepanel.html load extension code; scanning only
+        # index.html left 42 live files looking dead.
+        (tmp_path / "popup.html").write_text(
+            '<script src="agent.js"></script>', encoding="utf-8"
+        )
+        assert "agent.js" in queries.script_entrypoints(tmp_path)
+
+    def test_remote_script_src_is_not_a_repo_file(self, tmp_path) -> None:
+        (tmp_path / "index.html").write_text(
+            '<script src="https://cdn.example.com/x.js"></script>', encoding="utf-8"
+        )
+        assert queries.script_entrypoints(tmp_path) == set()
+
+    def test_chrome_extension_manifest(self, tmp_path) -> None:
+        (tmp_path / "manifest.json").write_text(
+            '{"manifest_version": 3, "background": {"service_worker": "bg.js"},'
+            ' "content_scripts": [{"js": ["content.js"]}]}',
+            encoding="utf-8",
+        )
+        assert queries.script_entrypoints(tmp_path) == {"bg.js", "content.js"}
+
+    def test_a_plain_manifest_json_is_not_an_extension(self, tmp_path) -> None:
+        (tmp_path / "manifest.json").write_text('{"files": ["a.js"]}', encoding="utf-8")
+        assert queries.script_entrypoints(tmp_path) == set()
+
+    def test_vendored_packages_are_not_read(self, tmp_path) -> None:
+        vendored = tmp_path / "node_modules" / "left-pad"
+        vendored.mkdir(parents=True)
+        (vendored / "package.json").write_text(
+            '{"main": "index.js"}', encoding="utf-8"
+        )
+        assert queries.script_entrypoints(tmp_path) == set()
+
+    def test_unreadable_manifest_is_not_an_error(self, tmp_path) -> None:
+        (tmp_path / "package.json").write_text("{ not json", encoding="utf-8")
+        assert queries.script_entrypoints(tmp_path) == set()
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/thing.test.ts",
+            "src/thing.spec.tsx",
+            "__tests__/helper.ts",
+            "vite.config.ts",
+            "eslint.config.js",          # root level: no slash in the name
+            ".dependency-cruiser.cjs",   # a dotfile that is a tool's config
+            "app/dashboard/page.tsx",
+            "app/api/hook/route.ts",
+            "pages/about.tsx",
+        ],
+    )
+    def test_conventional_entrypoints(self, path) -> None:
+        assert queries.is_conventional_entry(path) is True
+
+    @pytest.mark.parametrize(
+        "path", ["src/lib/utils.ts", "client/src/components/ui/slider.tsx"]
+    )
+    def test_ordinary_modules_are_not_exempt(self, path) -> None:
+        # These must stay reportable -- both were verified to have no importer
+        # in the corpus repo, so exempting them would hide a true finding.
+        assert queries.is_conventional_entry(path) is False
+
+    def test_unused_modules_applies_the_evidence(self, tmp_path) -> None:
+        from clara.db.migrations import ensure_schema
+
+        (tmp_path / "src").mkdir()
+        (tmp_path / "package.json").write_text(
+            '{"main": "src/main.ts"}', encoding="utf-8"
+        )
+        (tmp_path / "src" / "main.ts").write_text("export const m = 1;", "utf-8")
+        (tmp_path / "src" / "orphan.ts").write_text("export const o = 1;", "utf-8")
+        (tmp_path / "vite.config.ts").write_text("export default {};", "utf-8")
+        conn = sqlite3.connect(tmp_path / "clara.db")
+        ensure_schema(conn)
+        indexer.index_repo(conn, "r", tmp_path)
+        # main.ts is declared, vite.config.ts is conventional; only the real
+        # orphan is left.
+        assert queries.unused_modules(conn, "r", repo_root=tmp_path) == [
+            "src/orphan.ts"
+        ]
+        conn.close()

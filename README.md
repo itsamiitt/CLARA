@@ -387,6 +387,16 @@ is needed).
 
   Measured on a 2,568-file TypeScript repo: first index 16 s, re-index with
   nothing changed 1.15 s, `code_impact` at depth 3 about 150 ms.
+
+  `code_health`'s "nothing imports this" list uses what the project declares
+  about itself — `package.json` entry points and script commands, `<script
+  src>` in any HTML page, a Chrome extension manifest — plus conventions the
+  tools define (test files, `*.config.*`, framework routes). On that same repo
+  the raw "no importer" list was 848 files, 33% of the repo, and was mostly
+  configs, tests and app entries; with that evidence applied it is 86 files
+  (3%), spot-checked as genuinely unreferenced. It is still not a delete list:
+  a file loaded by name at runtime cannot be seen by a static import graph, and
+  the tool says so rather than pretending otherwise.
 - **Docs curator (5):** `docs_status`, `docs_classify`, `docs_supersede`,
   `docs_fulfill`, `docs_report`.
 - **Knowledge graph (4):** `graph_entity`, `graph_neighbors`, `graph_path`,

@@ -23,9 +23,13 @@ a way to return the whole repo.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+
+from clara.index import indexer
 
 # Relations that mean "A needs B" for dependency and dead-code purposes.
 DEPENDENCY_RELATIONS = ("imports",)
@@ -244,6 +248,165 @@ def test_roots(repo_root: Path) -> tuple[str, ...]:
     )
 
 
+# Files a JS/TS toolchain loads by name rather than by import. These are
+# conventions the tools themselves define, not guesses about what looks
+# unimportant: a test runner collects *.test.*, a bundler reads *.config.*,
+# and Next.js routes app/**/page.tsx by filename.
+_TEST_MARKERS = (".test.", ".spec.")
+_TEST_DIRS = ("__tests__", "__mocks__", "e2e", "cypress")
+_ROUTE_FILES = frozenset(
+    {"page", "layout", "route", "template", "loading", "error", "not-found",
+     "default", "middleware", "instrumentation"}
+)
+_SCRIPT_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+
+def _normalise(value: str) -> str:
+    return value.replace("\\", "/").lstrip("./")
+
+
+def _collect_paths(value: object, into: set[str]) -> None:
+    """Every string that names a script file, at any depth of a JSON value.
+
+    package.json's ``exports`` is a nested map of conditions to paths, and its
+    shape varies by package. Walking it is more honest than assuming one form.
+    """
+    if isinstance(value, str):
+        if value.endswith(_SCRIPT_SUFFIXES):
+            into.add(_normalise(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            _collect_paths(item, into)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_paths(item, into)
+
+
+_HTML_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*["']([^"']+)["']""", re.I)
+
+
+def _find_declaring_files(repo_root: Path) -> dict[str, list[tuple[Path, str]]]:
+    """The files that declare entry points, bucketed, in one pruned walk.
+
+    Pruned rather than filtered afterwards, for the same reason walk_repo is:
+    node_modules holds thousands of package.json files, none of which describe
+    *this* project, and rglob would read every one of them. One walk rather
+    than three, because the tree is the expensive part, not the matching.
+    """
+    buckets: dict[str, list[tuple[Path, str]]] = {
+        "package": [], "html": [], "manifest": []
+    }
+    for current, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [d for d in dirnames if d not in indexer.SKIP_DIRS]
+        directory = Path(current)
+        rel = directory.relative_to(repo_root).as_posix()
+        rel = "" if rel == "." else rel
+        for name in filenames:
+            if name == "package.json":
+                buckets["package"].append((directory / name, rel))
+            elif name == "manifest.json":
+                buckets["manifest"].append((directory / name, rel))
+            elif name.endswith((".html", ".htm")):
+                # Any HTML page, not just index.html: a Chrome extension's
+                # popup.html and sidepanel.html load their scripts this way,
+                # and scanning only index.html left 42 live files looking dead.
+                buckets["html"].append((directory / name, rel))
+    return buckets
+
+
+def script_entrypoints(repo_root: Path) -> set[str]:
+    """Files the project *declares* as entry points, for JS/TS repos.
+
+    Evidence only, each from a file the project maintains:
+
+    * every package.json's ``main``/``module``/``browser``/``bin``/``exports``,
+      and any script file named in a ``scripts`` command (``tsx server/index.ts``
+      means server/index.ts is run, not imported);
+    * ``<script src=...>`` in any index.html -- the Vite entry convention;
+    * a Chrome extension manifest.json, whose background and content scripts
+      are loaded by the browser.
+
+    Paths are resolved relative to the manifest that names them, so a monorepo
+    package declaring "src/main.tsx" resolves under its own directory.
+    """
+    found: set[str] = set()
+    declaring = _find_declaring_files(repo_root)
+    for manifest, rel_dir in declaring["package"]:
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        local: set[str] = set()
+        for key in ("main", "module", "browser", "bin", "exports", "types"):
+            _collect_paths(data.get(key), local)
+        scripts = data.get("scripts")
+        if isinstance(scripts, dict):
+            for command in scripts.values():
+                if not isinstance(command, str):
+                    continue
+                for token in re.split(r"[\s;&|'\"]+", command):
+                    if token.endswith(_SCRIPT_SUFFIXES):
+                        local.add(_normalise(token))
+        found |= {f"{rel_dir}/{p}" if rel_dir else p for p in local}
+
+    for page, rel_dir in declaring["html"]:
+        try:
+            html = page.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        for src in _HTML_SRC.findall(html):
+            if src.startswith(("http://", "https://", "//")):
+                continue
+            path = _normalise(src)
+            found.add(f"{rel_dir}/{path}" if rel_dir else path)
+
+    for manifest, rel_dir in declaring["manifest"]:
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or "manifest_version" not in data:
+            continue
+        local = set()
+        for key in ("background", "content_scripts", "web_accessible_resources",
+                    "action", "chrome_url_overrides"):
+            _collect_paths(data.get(key), local)
+        found |= {f"{rel_dir}/{p}" if rel_dir else p for p in local}
+
+    return found
+
+
+def is_conventional_entry(rel_path: str) -> bool:
+    """True for files a toolchain loads by filename convention.
+
+    Named conventions with defined meanings, not a "looks unused" heuristic:
+    test files a runner collects, tool config files read by name, and
+    framework route files. Each is a real reason a file has no importer.
+    """
+    parts = rel_path.split("/")
+    name = parts[-1]
+    stem = name.split(".")[0]
+
+    if any(marker in name for marker in _TEST_MARKERS):
+        return True
+    if any(part in _TEST_DIRS for part in parts[:-1]):
+        return True
+    # foo.config.ts, vite.config.js -- read by the tool, by name.
+    if ".config." in name:
+        return True
+    # A dotfile that is itself a script is a tool's config: .eslintrc.cjs,
+    # .dependency-cruiser.cjs. Nothing imports these; the tool loads them.
+    if name.startswith(".") and name.endswith(_SCRIPT_SUFFIXES):
+        return True
+    # Next.js app router and pages router: routed by path, never imported.
+    if stem in _ROUTE_FILES and any(p in ("app", "pages", "src") for p in parts[:-1]):
+        return True
+    # Everything under a pages/ or api/ directory is routed by its path.
+    return "pages" in parts[:-1] or "api" in parts[:-1]
+
+
 def unused_modules(
     conn: sqlite3.Connection,
     repo_id: str,
@@ -278,12 +441,21 @@ def unused_modules(
 
     declared = declared_entrypoints(repo_root) if repo_root else set()
     roots = test_roots(repo_root) if repo_root else ()
+    # For JS/TS the qualified name is the repo-relative path, so entry points
+    # are matched as paths. Without this, a third of a real Node repo reported
+    # as unused -- vite.config.ts, every *.test.ts, every framework route.
+    scripts = script_entrypoints(repo_root) if repo_root else set()
 
     found: list[str] = []
     for name, attributes in rows:
-        if name in declared:
+        if name in declared or name in scripts:
             continue
         if roots and any(name == r or name.startswith(f"{r}.") for r in roots):
+            continue
+        # Script suffix, not "contains a slash": a JS qualified name is a path
+        # and a Python one is dotted, but a *root-level* config like
+        # eslint.config.js has no slash and was wrongly skipped by that test.
+        if name.endswith(_SCRIPT_SUFFIXES) and is_conventional_entry(name):
             continue
         try:
             attrs = json.loads(attributes or "{}")

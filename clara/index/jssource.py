@@ -54,6 +54,15 @@ _PATTERNS = (
 # Index into _PATTERNS of the dynamic import() form, whose imports are deferred.
 _DYNAMIC_IMPORT = len(_PATTERNS) - 1
 
+# importScripts("a.js", "b.js") -- how a Web Worker and an MV3 extension
+# service worker load their code. TypeScript does not model this, because it is
+# a runtime function call rather than an import, so it is absent from the
+# compiler comparison this scanner was checked against. It is still a real
+# dependency: a Chrome extension in the corpus loads 24 of its files this way,
+# and without it every one of them looks like dead code.
+_IMPORT_SCRIPTS = re.compile(r"\bimportScripts\s*\(([^)]*)\)")
+_ANY_SPECIFIER = re.compile(_SPECIFIER)
+
 # Characters that can begin something the scanner must interpret. Everything
 # between two of these is ordinary code and is copied in one slice.
 _SPECIAL = re.compile(r"""[/'"`]""")
@@ -242,6 +251,23 @@ def parse_script(rel_path: str, source: str) -> ParsedScript:
             # as static, which is what actually happens at load.
             if position == _DYNAMIC_IMPORT:
                 parsed.deferred.add(specifier)
+
+    for call in _IMPORT_SCRIPTS.finditer(code):
+        for match in _ANY_SPECIFIER.finditer(call.group(1)):
+            index = int(match.group(1))
+            if index >= len(literals):
+                continue
+            specifier = literals[index].strip()
+            # importScripts resolves against the loading script's own location,
+            # so a bare "config.js" means "./config.js" -- unlike an import,
+            # where a bare name is a package. Normalising here lets resolution
+            # treat both the same way.
+            if specifier and not specifier.startswith((".", "/")):
+                specifier = f"./{specifier}"
+            if not specifier or specifier in seen or "://" in specifier:
+                continue
+            seen.add(specifier)
+            parsed.specifiers.append(specifier)
     parsed.specifiers.sort()
     return parsed
 

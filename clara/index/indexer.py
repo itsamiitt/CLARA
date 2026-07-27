@@ -50,7 +50,7 @@ INDEXABLE_SUFFIXES = PYTHON_SUFFIXES | SCRIPT_SUFFIXES
 # Indexing them doubles the node count and adds no edge anyone asks about.
 _SKIP_FILES = (".d.ts",)
 
-_SKIP_DIRS = frozenset(
+SKIP_DIRS = frozenset(
     {
         ".git", ".hg", ".svn", "__pycache__", ".venv", "venv", "node_modules",
         ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build",
@@ -443,7 +443,7 @@ def walk_repo(repo_root: Path) -> list[str]:
     root = str(repo_root)
     for current, dirnames, filenames in os.walk(root):
         # Mutating dirnames in place is what stops os.walk descending.
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         for name in sorted(filenames):
             if os.path.splitext(name)[1] not in INDEXABLE_SUFFIXES:
                 continue
