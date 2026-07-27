@@ -826,6 +826,23 @@ class LocalMemory:
     # Mutate / lifecycle
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_memory_id(memory_id: str) -> uuid.UUID:
+        """A malformed id is "not found", not a stack trace.
+
+        ``uuid.UUID`` raises "badly formed hexadecimal UUID string", which says
+        nothing about what was passed or what to do about it, and leaked
+        straight through the MCP tool to the model. A caller that invented an
+        id should get the same answer as one that used a well-formed id which
+        happens not to exist, because those are the same situation.
+        """
+        try:
+            return uuid.UUID(str(memory_id))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError(
+                f"Memory {memory_id!r} not found (not a valid memory id)."
+            ) from None
+
     async def update(
         self,
         memory_id: str,
@@ -835,7 +852,7 @@ class LocalMemory:
     ) -> dict[str, Any]:
         """Update confidence and/or tags on an existing memory."""
         self._require_writable()
-        mid = uuid.UUID(str(memory_id))
+        mid = self._parse_memory_id(memory_id)
 
         async def _attempt() -> str:
             async with self._session_factory() as session, session.begin():
@@ -859,7 +876,7 @@ class LocalMemory:
     async def forget(self, memory_id: str, *, archive: bool = False) -> dict[str, Any]:
         """Deprecate (default) or archive a memory. Never hard-deletes."""
         self._require_writable()
-        mid = uuid.UUID(str(memory_id))
+        mid = self._parse_memory_id(memory_id)
         new_status = MemoryStatus.archived if archive else MemoryStatus.deprecated
 
         async def _attempt() -> None:

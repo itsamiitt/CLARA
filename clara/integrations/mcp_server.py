@@ -218,6 +218,32 @@ def _index_populated(conn: Any, repo_key: str) -> bool:
     return row is not None
 
 
+def _validated_confidence(confidence: float | None) -> float | None:
+    """Reject a confidence outside 0..1 rather than quietly clamping it.
+
+    Both tools document "confidence (0..1)". Accepting 5.0 and storing 1.0
+    reports success for a value that was silently replaced, and the caller here
+    is a model, which will go on sending 5.0 because nothing told it otherwise.
+
+    Library callers still clamp defensively (that behaviour is relied on and
+    tested); this is the boundary where a wrong value is a mistake worth
+    naming.
+    """
+    if confidence is None:
+        return None
+    try:
+        value = float(confidence)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"confidence must be a number between 0.0 and 1.0 (got {confidence!r})."
+        ) from None
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(
+            f"confidence must be between 0.0 and 1.0 (got {confidence!r})."
+        )
+    return value
+
+
 def _deps_sync(
     anchor: str, target: str, direction: str, depth: int
 ) -> dict[str, Any]:
@@ -353,7 +379,7 @@ def build_server() -> Any:
             properties=properties,
             description=description,
             domain=domain,
-            confidence=confidence,
+            confidence=_validated_confidence(confidence),
             tags=tags,
         )
 
@@ -397,7 +423,9 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Adjust an existing memory's confidence (0..1) and/or replace its tags."""
         memory = await _get_memory()
-        return await memory.update(memory_id, confidence=confidence, tags=tags)
+        return await memory.update(
+            memory_id, confidence=_validated_confidence(confidence), tags=tags
+        )
 
     @server.tool()
     async def memory_forget(
