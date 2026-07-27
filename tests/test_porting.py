@@ -65,15 +65,27 @@ class TestImportRoundTrip:
         assert stats["imported"] == 3
         assert stats["skipped_id"] == 0
 
+        # metadata included on purpose: it carries the repo stamp every
+        # locality surface reads. An import that dropped or re-stamped it
+        # would silently relocate every memory to wherever the restore ran —
+        # verified by hand (export from repoA, import from a neutral cwd,
+        # stamp still repoA's) before pinning it here.
         src_rows = sqlite3.connect(src).execute(
-            "SELECT memory_id, content, created_at, updated_at FROM memories "
-            "ORDER BY memory_id"
+            "SELECT memory_id, content, metadata, created_at, updated_at "
+            "FROM memories ORDER BY memory_id"
         ).fetchall()
         dst_rows = sqlite3.connect(dst).execute(
-            "SELECT memory_id, content, created_at, updated_at FROM memories "
-            "ORDER BY memory_id"
+            "SELECT memory_id, content, metadata, created_at, updated_at "
+            "FROM memories ORDER BY memory_id"
         ).fetchall()
         assert src_rows == dst_rows
+        stamps = {
+            json.loads(meta or "{}").get("repo_id")
+            for _, _, meta, _, _ in dst_rows
+        }
+        assert stamps and None not in stamps, (
+            "imported memories lost their repo stamps"
+        )
 
         # FTS indexed the imported rows (triggers fired on raw INSERT).
         fts = sqlite3.connect(dst).execute(
