@@ -29,7 +29,21 @@ if ($env:CLAUDE_SESSION_ID) {
 $rc = $LASTEXITCODE
 
 if ($rc -eq 3) {
-    Write-Output "CLARA is installing in the background - memory will be available next session."
+    # A previous attempt that failed changes what is true here. Retrying is
+    # right -- most failures are transient -- but reporting only "available
+    # next session" after a recorded failure tells someone with no network to
+    # keep waiting for something that will not arrive. Say both: it is
+    # retrying, and the last attempt failed.
+    $failed = Join-Path $dataDir "install.failed"
+    if (Test-Path $failed) {
+        $when = ""
+        try { $when = (Get-Content $failed -Raw).Trim() } catch {}
+        Write-Output "CLARA is retrying its background install (the last attempt failed on $when)."
+        Write-Output "If this repeats, the log says why: $(Join-Path $dataDir 'install.log')"
+        Write-Output "Most often this is no network access to PyPI, or a proxy that blocks it."
+    } else {
+        Write-Output "CLARA is installing in the background - memory will be available next session."
+    }
     exit 0
 }
 

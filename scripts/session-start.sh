@@ -36,7 +36,18 @@ sh "$SCRIPT_DIR/bootstrap.sh"
 rc=$?
 
 if [ "$rc" -eq 3 ]; then
-  printf '%s\n' 'CLARA is installing in the background — memory will be available next session.'
+  # A previous attempt that failed changes what is true here. Retrying is
+  # right -- most failures are transient -- but reporting only "available next
+  # session" after a recorded failure tells someone with no network to keep
+  # waiting for something that will not arrive. Say both: it is retrying, and
+  # the last attempt failed.
+  if [ -f "$DATA_DIR/install.failed" ]; then
+    printf '%s\n' "CLARA is retrying its background install (the last attempt failed on $(cat "$DATA_DIR/install.failed" 2>/dev/null))."
+    printf '%s\n' "If this repeats, the log says why: $DATA_DIR/install.log"
+    printf '%s\n' "Most often this is no network access to PyPI, or a proxy that blocks it."
+  else
+    printf '%s\n' 'CLARA is installing in the background — memory will be available next session.'
+  fi
   exit 0
 fi
 

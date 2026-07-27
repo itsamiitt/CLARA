@@ -319,9 +319,23 @@ if ($InstallWorker) {
             try { Remove-Item $_.FullName -Recurse -Force -Confirm:$false } catch {}
         }
         Write-Output "=== clara install complete: $(Get-Date) ==="
+        # Clear any earlier failure: the install worked, so the next session
+        # must not keep warning about a problem that is over.
+        try {
+            Remove-Item (Join-Path $data "install.failed") -Force `
+                -Confirm:$false -ErrorAction Stop
+        } catch {}
     } else {
         $status = 1
         Write-Output "=== clara install FAILED (see messages above): $(Get-Date) ==="
+        # A marker the next session can see. Without it every session repeated
+        # "memory will be available next session" after an install that had
+        # already failed, so someone with no network waited for something that
+        # was never going to happen.
+        try {
+            Set-Content -Path (Join-Path $data "install.failed") `
+                -Value "$(Get-Date)" -Encoding utf8
+        } catch {}
     }
     try { Remove-Item $flag -Force -Confirm:$false -ErrorAction Stop } catch {}
     try { Remove-Item $lock -Recurse -Force -Confirm:$false -ErrorAction Stop } catch {}

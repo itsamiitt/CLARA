@@ -205,9 +205,17 @@ if [ "${1:-}" = "--install-worker" ]; then
       rm -rf "$stale"
     done
     echo "=== clara install complete: $(date) ==="
+    # Clear any earlier failure: the install worked, so the next session must
+    # not keep warning about a problem that is over.
+    rm -f "$DATA/install.failed"
   else
     status=1
     echo "=== clara install FAILED (see messages above): $(date) ==="
+    # A marker the next session can see. Without it every session repeated
+    # "memory will be available next session" after an install that had
+    # already failed three times, so someone with no network sat waiting for
+    # something that was never going to happen.
+    printf '%s\n' "$(date)" >"$DATA/install.failed" 2>/dev/null || true
   fi
   rm -f "$FLAG"
   rmdir "$LOCK" 2>/dev/null || true
