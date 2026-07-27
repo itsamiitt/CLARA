@@ -776,6 +776,78 @@ async def _cmd_project(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_index(args: argparse.Namespace) -> int:
+    """Index this repo's Python source into the code graph.
+
+    Incremental by default: a file whose bytes are unchanged costs one lookup.
+    --rebuild re-parses everything, which is what to use after changing the
+    parser itself.
+    """
+    import sqlite3 as _sqlite3
+
+    from clara.db.migrations import open_db
+    from clara.index import indexer, journal
+    from clara.repoid import repo_id as _repo_id
+    from clara.store import git_toplevel, resolve_store
+
+    root = Path(args.path or git_toplevel(str(Path.cwd())) or Path.cwd())
+    resolution = resolve_store(create=True)
+    db_path = str(resolution.db_path)
+    repo = _repo_id(str(root))
+
+    # open_db, not a bare sqlite3.connect: it applies pending migrations (the
+    # code-index tables arrived in migration 9) and reopens the store read-only
+    # when its schema is newer than this build, which indexing must respect
+    # rather than write through.
+    conn = open_db(db_path)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        if args.status:
+            nodes = conn.execute(
+                "SELECT count(*) FROM code_nodes WHERE repo_id = ? AND status = 'active'",
+                (repo,),
+            ).fetchone()[0]
+            edges = conn.execute(
+                "SELECT count(*) FROM code_edges WHERE repo_id = ? AND invalid_at IS NULL",
+                (repo,),
+            ).fetchone()[0]
+            files = conn.execute(
+                "SELECT count(*) FROM index_state WHERE repo_id = ? AND kind = 'file'",
+                (repo,),
+            ).fetchone()[0]
+            print(f"repo:    {root}")
+            print(f"store:   {db_path}")
+            print(f"indexed: {files} files")
+            print(f"graph:   {nodes} nodes, {edges} edges")
+            print(f"queued:  {journal.pending_count(conn, repo)} pending changes")
+            return 0
+
+        try:
+            result = indexer.index_repo(conn, repo, root, force=args.rebuild)
+        except _sqlite3.OperationalError as exc:
+            if "readonly" not in str(exc):
+                raise
+            print(
+                "error: this store was written by a newer version of CLARA, so "
+                "it is open read-only and cannot be indexed.\n"
+                "       Upgrade with 'pip install -U clara-memory'.",
+                file=sys.stderr,
+            )
+            return 1
+    finally:
+        conn.close()
+
+    counts = result.as_dict()
+    print(f"indexed {counts['processed']} file(s), "
+          f"skipped {counts['skipped_unchanged']} unchanged")
+    print(f"  {counts['nodes']} nodes, {counts['edges']} edges "
+          f"({counts['edges_invalidated']} retired)")
+    if counts["syntax_errors"]:
+        print(f"  {counts['syntax_errors']} file(s) did not parse — their edges "
+              "are missing, everything else is indexed")
+    return 0
+
+
 async def _cmd_maintain(args: argparse.Namespace) -> int:
     """Run the daily housekeeping pass by hand.
 
@@ -1291,6 +1363,16 @@ def main(argv: list[str] | None = None) -> None:
     p_project.add_argument("--evidence", action="store_true",
                            help="Show the file each fact came from.")
 
+    p_index = sub.add_parser(
+        "index",
+        help="Index this repo's Python source into the code graph.",
+    )
+    p_index.add_argument("path", nargs="?", help="Repo root (default: git toplevel).")
+    p_index.add_argument("--rebuild", action="store_true",
+                         help="Re-parse every file, ignoring the content-hash gate.")
+    p_index.add_argument("--status", action="store_true",
+                         help="Show what is indexed without changing anything.")
+
     p_maintain = sub.add_parser(
         "maintain",
         help="Run housekeeping now: backup, decay, pruning, graph, native export.",
@@ -1338,6 +1420,7 @@ def main(argv: list[str] | None = None) -> None:
         "statusline": _cmd_statusline,
         "sync": _cmd_sync,
         "project": _cmd_project,
+        "index": _cmd_index,
         "maintain": _cmd_maintain,
         "uninstall": _cmd_uninstall,
     }[args.command]
