@@ -37,7 +37,7 @@ from clara import security, stats_cache
 from clara.agent import _make_engine, format_context
 from clara.core.ids import canonical_id
 from clara.db.fts import ensure_fts
-from clara.db.migrations import ensure_schema
+from clara.db.migrations import SchemaTooNew, ensure_schema
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.db.pragmas import apply_runtime
 from clara.db.retry import with_sqlite_retry
@@ -81,9 +81,21 @@ def _ensure_versioned_schema(db_path: str) -> None:
     """Apply versioned migrations (memories, graph, docs, FTS) to a file store.
 
     Since schema v4 this is the primary schema path. A backup is taken before
-    any pending migration runs (see :mod:`clara.db.backup`). Fail-soft: the
-    memory store must work even if migrations cannot run (read-only mount,
-    schema from a newer CLARA) — add-ons then degrade to no-ops.
+    any pending migration runs (see :mod:`clara.db.backup`).
+
+    Fail-soft for migrations that *cannot* run (read-only mount, locked file):
+    memory availability beats add-on availability, and those degrade to no-ops.
+
+    NOT fail-soft for :class:`SchemaTooNew`, which is a different situation
+    wearing the same exception costume. A store written by a newer CLARA may
+    have constraints, columns and triggers this build knows nothing about;
+    writing to it is how you corrupt someone's memory during a downgrade.
+    clara/db/migrations.py states the rule plainly -- "if the database's
+    version is NEWER than this code knows, never write" -- but this function
+    used to swallow it along with everything else, print a traceback, and let
+    the caller carry on writing. Verified before this change: against a store
+    marked v99 the row count still went 1 -> 2. It is re-raised so
+    :meth:`LocalMemory.create` can open the store read-only instead.
     """
     if db_path in ("", ":memory:"):
         return
@@ -97,6 +109,8 @@ def _ensure_versioned_schema(db_path: str) -> None:
             ensure_schema(conn)
         finally:
             conn.close()
+    except SchemaTooNew:
+        raise
     except Exception:  # noqa: BLE001 — memory availability beats graph availability
         logger.warning("versioned schema migration failed for %s", db_path, exc_info=True)
 
@@ -244,6 +258,15 @@ class LocalMemory:
         self._engine = engine
         self._session_factory = session_factory
         self._db_path = db_path
+        # Set by create() when the store's schema is newer than this build
+        # understands; the engine is then bound to a mode=ro URL and SQLite
+        # itself refuses writes.
+        self._read_only = False
+
+    @property
+    def read_only(self) -> bool:
+        """True when the store was opened read-only (schema newer than us)."""
+        return self._read_only
 
     # ------------------------------------------------------------------
     # Construction / lifecycle
@@ -259,11 +282,28 @@ class LocalMemory:
         # Versioned migrations are the primary schema path for file stores
         # (memories DDL lives in migration 4, FTS in 5); create_all stays as
         # a checkfirst no-op safety net and the whole path for ":memory:".
-        await asyncio.to_thread(_ensure_versioned_schema, db_path)
+        read_only = False
+        try:
+            await asyncio.to_thread(_ensure_versioned_schema, db_path)
+        except SchemaTooNew as exc:
+            # Open read-only rather than refusing outright: the user can still
+            # read everything they have, which is the whole point of the store,
+            # and a downgrade becomes a visible degradation instead of silent
+            # corruption. create_all and ensure_fts are skipped deliberately --
+            # both write, and running them here is what would apply this
+            # build's older DDL on top of a newer schema.
+            read_only = True
+            db_url = f"sqlite+aiosqlite:///file:{path_obj.as_posix()}?mode=ro&uri=true"
+            logger.warning(
+                "%s - opening the store READ-ONLY. Memories can be read but "
+                "not written until you upgrade clara-memory.", exc,
+            )
+
         engine = _make_engine(db_url)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        await ensure_fts(engine)
+        if not read_only:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            await ensure_fts(engine)
 
         # The info dict is shared by every session this factory makes, so the
         # LanceDB commit listeners short-circuit and never touch a vector store.
@@ -273,7 +313,9 @@ class LocalMemory:
             info={"_clara_disable_lance": True},
         )
         logger.info("LocalMemory ready (db=%s, backend=none)", db_path)
-        return cls(engine=engine, session_factory=session_factory, db_path=db_path)
+        instance = cls(engine=engine, session_factory=session_factory, db_path=db_path)
+        instance._read_only = read_only
+        return instance
 
     async def close(self) -> None:
         await self._engine.dispose()
@@ -314,6 +356,24 @@ class LocalMemory:
     # Write
     # ------------------------------------------------------------------
 
+    def _require_writable(self) -> None:
+        """Refuse a write up front when the store was opened read-only.
+
+        Without this the write still fails -- SQLite rejects it -- but the
+        caller gets "(sqlite3.OperationalError) attempt to write a readonly
+        database" followed by the whole INSERT and every bound parameter. Over
+        MCP that dump is what the model receives as the tool result, which is
+        both unactionable and needlessly loud. Failing here states the cause
+        and the fix instead, and touches no SQL.
+        """
+        if self._read_only:
+            raise RuntimeError(
+                "this store was written by a newer version of CLARA, so it is "
+                "open read-only and nothing was written. Upgrade with "
+                "'pip install -U clara-memory' to write to it again; reading "
+                "keeps working meanwhile."
+            )
+
     async def save(
         self,
         *,
@@ -345,6 +405,7 @@ class LocalMemory:
         Raises ``ValueError`` if *mem_type* is unknown or required fields for the
         chosen type are missing.
         """
+        self._require_writable()
         if mem_type not in VALID_TYPES:
             raise ValueError(
                 f"Unknown mem_type {mem_type!r}. Expected one of {sorted(VALID_TYPES)}."
@@ -712,7 +773,16 @@ class LocalMemory:
             if not all_edges:
                 return None
             nodes = await graph_traverse.fetch_nodes(session, node_ids)
-            await graph_traverse.bump_traversed(session, all_edges)
+            if not self._read_only:
+                # bump_traversed is usage accounting: it raises edge weight and
+                # node mention_count so traversed paths rank higher next time.
+                # It is a write, and search() drops the whole [GRAPH] section if
+                # anything in here raises -- so on a read-only store this one
+                # bookkeeping call silently cost the user their graph context on
+                # every search. The reading half works fine without it; only the
+                # ranking feedback is lost, which a read-only store cannot
+                # persist anyway.
+                await graph_traverse.bump_traversed(session, all_edges)
             section = graph_render.render_graph_section(groups, nodes)
         if not section:
             return None
@@ -752,6 +822,7 @@ class LocalMemory:
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Update confidence and/or tags on an existing memory."""
+        self._require_writable()
         mid = uuid.UUID(str(memory_id))
 
         async def _attempt() -> str:
@@ -775,6 +846,7 @@ class LocalMemory:
 
     async def forget(self, memory_id: str, *, archive: bool = False) -> dict[str, Any]:
         """Deprecate (default) or archive a memory. Never hard-deletes."""
+        self._require_writable()
         mid = uuid.UUID(str(memory_id))
         new_status = MemoryStatus.archived if archive else MemoryStatus.deprecated
 
@@ -1005,6 +1077,7 @@ class LocalMemory:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Belief-save sugar: pre-resolve typed endpoints, save, return ids."""
+        self._require_writable()
         if not graph_enabled():
             return {"disabled": True, "error": GRAPH_DISABLED_HINT,
                     "hint": "use memory_save for the belief without graph sugar"}

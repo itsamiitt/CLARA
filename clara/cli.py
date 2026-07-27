@@ -1206,6 +1206,21 @@ def main(argv: list[str] | None = None) -> None:
         print("interrupted", file=sys.stderr)
         raise SystemExit(130) from None
     except Exception as exc:  # noqa: BLE001 — top-level: no raw traceback to users
+        # A store opened read-only because its schema is newer than this build
+        # surfaces as SQLite's "attempt to write a readonly database", which
+        # arrives wrapped in a full SQLAlchemy dump of the INSERT and every
+        # bound parameter. That is a true statement about the cause and a
+        # useless one about the fix, so translate it.
+        if "readonly database" in str(exc):
+            print(
+                "error: this store was written by a newer version of CLARA, so it "
+                "is open read-only and nothing was written.\n"
+                "       Upgrade to write to it again:  pip install -U clara-memory\n"
+                "       Reading (clara list, clara context) keeps working meanwhile.",
+                file=sys.stderr,
+            )
+            logging.getLogger(__name__).debug("read-only store write", exc_info=True)
+            raise SystemExit(1) from exc
         # Exit code 70 (EX_SOFTWARE) for an unexpected internal failure, kept
         # distinct from 1 (operation failed) and 2 (usage/precondition error).
         print(f"error: {exc}", file=sys.stderr)
