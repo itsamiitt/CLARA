@@ -1,0 +1,97 @@
+"""
+doctor must check the shim — it is what Claude Code actually spawns.
+
+Found on a real install: the plugin's shim held clara-mcp.exe but not
+clara.exe, so /clara:sync, /clara:docs and `clara sync` had nothing to shell
+out to. doctor reported every check ok, because it looked at the store, the
+schema and the venv but never at the two files the host and the slash commands
+actually run.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+import pytest
+
+
+def doctor(tmp_path, data_dir):
+    env = {
+        **os.environ,
+        "CLARA_HOME": str(tmp_path / "home"),
+        "CLAUDE_PLUGIN_DATA": str(data_dir),
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    }
+    done = subprocess.run(
+        [sys.executable, "-m", "clara.cli", "doctor"],
+        capture_output=True, text=True, encoding="utf-8", env=env, cwd=tmp_path,
+    )
+    assert done.returncode in (0, 1), done.stderr[-300:]
+    return done.stdout
+
+
+@pytest.fixture()
+def installed(tmp_path):
+    """A plugin data dir that looks installed: a current venv and a shim."""
+    data = tmp_path / "data"
+    (data / "shim").mkdir(parents=True)
+    (data / "current").mkdir()
+    return data
+
+
+class TestShimCompleteness:
+    def test_a_complete_shim_reports_ok(self, tmp_path, installed) -> None:
+        for name in ("clara-mcp.exe", "clara.exe"):
+            (installed / "shim" / name).write_bytes(b"stub")
+        out = doctor(tmp_path, installed)
+        assert "[ok] shim clara-mcp: present" in out
+        assert "[ok] shim clara: present" in out
+        assert "MISSING" not in out
+
+    def test_missing_cli_shim_is_flagged(self, tmp_path, installed) -> None:
+        # Exactly the real install's shape.
+        (installed / "shim" / "clara-mcp.exe").write_bytes(b"stub")
+        out = doctor(tmp_path, installed)
+        assert "[warn] shim clara: MISSING" in out
+        assert "what to do:" in out
+
+    def test_missing_mcp_shim_is_flagged(self, tmp_path, installed) -> None:
+        (installed / "shim" / "clara.exe").write_bytes(b"stub")
+        out = doctor(tmp_path, installed)
+        assert "[warn] shim clara-mcp: MISSING" in out
+        # The consequence, not just the fact: memory tools will not load.
+        assert "memory tools" in out
+
+    def test_extensionless_shim_counts(self, tmp_path, installed) -> None:
+        # POSIX installs have no .exe suffix; both layouts are valid.
+        (installed / "shim" / "clara-mcp").write_bytes(b"stub")
+        (installed / "shim" / "clara").write_bytes(b"stub")
+        out = doctor(tmp_path, installed)
+        assert "MISSING" not in out
+
+    def test_nothing_installed_yet_is_not_a_warning(self, tmp_path) -> None:
+        # Before the first bootstrap there is no venv, so an absent shim is
+        # expected rather than broken — warning there would cry wolf at every
+        # brand-new user.
+        data = tmp_path / "data"
+        data.mkdir()
+        out = doctor(tmp_path, data)
+        assert "MISSING" not in out
+        assert "not installed" in out
+
+
+class TestFailedInstallIsSurfaced:
+    def test_marker_is_reported_with_the_log(self, tmp_path, installed) -> None:
+        (installed / "shim" / "clara-mcp.exe").write_bytes(b"stub")
+        (installed / "shim" / "clara.exe").write_bytes(b"stub")
+        (installed / "install.failed").write_text("Mon Jul 27 00:00:00 2026", "utf-8")
+        out = doctor(tmp_path, installed)
+        assert "last background install FAILED" in out
+        assert "install.log" in out
+
+    def test_no_marker_no_noise(self, tmp_path, installed) -> None:
+        (installed / "shim" / "clara-mcp.exe").write_bytes(b"stub")
+        (installed / "shim" / "clara.exe").write_bytes(b"stub")
+        assert "install FAILED" not in doctor(tmp_path, installed)

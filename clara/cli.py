@@ -445,11 +445,36 @@ def _print_plugin_health(db_path: str) -> None:
         print(f"  venv: {target}")
     else:
         print(f"  venv: (not installed under {data_dir})")
+    # The shim is what Claude Code actually spawns: the plugin's mcpServers
+    # entry names shim/clara-mcp, and the slash commands and `clara sync`
+    # shell out to shim/clara because a plugin install never puts the CLI on
+    # PATH. A shim missing either of those is broken in a way nothing else
+    # here notices -- measured on a real install whose shim had clara-mcp but
+    # no clara, where doctor reported every check ok.
+    shim = data_dir / "shim"
+    for name, why in (
+        ("clara-mcp", "the MCP server Claude Code spawns; memory tools will not load"),
+        ("clara", "used by /clara:sync, /clara:docs and `clara sync`"),
+    ):
+        if any((shim / f"{name}{ext}").is_file() for ext in ("", ".exe")):
+            print(f"  [ok] shim {name}: present")
+        elif current.exists():
+            print(f"  [warn] shim {name}: MISSING — {why}")
+            print("        what to do: update the plugin "
+                  "(/plugin marketplace update clara-marketplace, then reinstall) "
+                  "— the shim is rebuilt on install.")
+
     install_log = data_dir / "install.log"
     if install_log.is_file():
         tail = install_log.read_text(encoding="utf-8", errors="replace").splitlines()[-3:]
         for line in tail:
             print(f"    log: {line}")
+    failed = data_dir / "install.failed"
+    if failed.is_file():
+        when = failed.read_text(encoding="utf-8", errors="replace").strip()
+        print(f"  [warn] last background install FAILED ({when})")
+        print(f"        what to do: see {install_log} — usually no network "
+              "access to PyPI, or a proxy blocking it.")
 
 
 # ---------------------------------------------------------------------------
