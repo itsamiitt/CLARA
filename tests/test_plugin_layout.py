@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -265,3 +266,70 @@ class TestSourceFreshness:
         # Renames matter too: the path is folded into the digest.
         (pkg / "sub" / "b.py").rename(pkg / "sub" / "c.py")
         assert source_hash(pkg) != before
+
+
+class TestReadHookGating:
+    """PostToolUse(Read) fires on every file read, so its cost is multiplied.
+
+    Starting PowerShell costs ~500 ms on native Windows (measured 412-1127 ms),
+    and it was paid on every Read even though the hook usually has nothing to
+    say. An annotation can only come from a quarantine manifest under the CLARA
+    home, so when no manifest exists anywhere the dispatcher can skip the
+    interpreter entirely -- a repo-independent check that is free in cmd.exe.
+    """
+
+    def _dispatcher(self) -> str:
+        return (
+            Path(__file__).parents[1] / "scripts" / "read-annotate.cmd"
+        ).read_text(encoding="utf-8")
+
+    def test_polyglot_first_line_is_preserved(self):
+        # The first line must still hand POSIX shells off to the .sh script;
+        # everything added for cmd.exe has to live below it.
+        assert self._dispatcher().splitlines()[0].startswith(":;")
+
+    def test_gates_on_the_quarantine_manifests(self):
+        script = self._dispatcher()
+        assert "quarantine" in script
+        assert "CLARA_HOME" in script, "must honour a relocated CLARA home"
+        assert "USERPROFILE" in script, "must fall back to the default home"
+
+    def test_drains_stdin_before_the_early_exit(self):
+        # The host writes hook JSON into this process; exiting with it unread
+        # can break that write, which is why the shell paths drain it too.
+        script = self._dispatcher()
+        early = script.split("powershell", 1)[0]
+        assert "more > nul" in early
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe dispatcher")
+    def test_skips_dispatch_when_no_manifest_exists(self, tmp_path, monkeypatch):
+        script = Path(__file__).parents[1] / "scripts" / "read-annotate.cmd"
+        env = {**os.environ, "CLARA_HOME": str(tmp_path / "clara-home")}
+        payload = json.dumps(
+            {"tool_input": {"file_path": str(tmp_path / "some.md")}}
+        )
+        proc = subprocess.run(
+            ["cmd", "/c", str(script)],
+            input=payload, env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0
+        assert proc.stdout.strip() == ""
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe dispatcher")
+    def test_dispatches_when_a_manifest_exists(self, tmp_path, monkeypatch):
+        # With a manifest present the dispatcher must hand off rather than
+        # short-circuit; the PowerShell hook then applies its own checks.
+        home = tmp_path / "clara-home"
+        (home / "quarantine").mkdir(parents=True)
+        (home / "quarantine" / "abc123.tsv").write_text("x", encoding="utf-8")
+        script = Path(__file__).parents[1] / "scripts" / "read-annotate.cmd"
+        env = {**os.environ, "CLARA_HOME": str(home)}
+        payload = json.dumps(
+            {"tool_input": {"file_path": str(tmp_path / "some.md")}}
+        )
+        proc = subprocess.run(
+            ["cmd", "/c", str(script)],
+            input=payload, env=env, capture_output=True, text=True, timeout=60,
+        )
+        # Fail-open either way; what matters is that it did not error out.
+        assert proc.returncode == 0
