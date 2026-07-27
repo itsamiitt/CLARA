@@ -20,11 +20,13 @@ _SCRIPTS = [
     "scripts/session-start.sh",
     "scripts/session-stop.sh",
     "scripts/read-annotate.sh",
+    "scripts/prompt-recall.sh",
 ]
 _CMD_DISPATCHERS = [
     "scripts/session-start.cmd",
     "scripts/session-stop.cmd",
     "scripts/read-annotate.cmd",
+    "scripts/prompt-recall.cmd",
 ]
 _PS1_BODIES = [
     "scripts/win/bootstrap.ps1",
@@ -32,6 +34,7 @@ _PS1_BODIES = [
     "scripts/win/session-stop.ps1",
     "scripts/win/read-annotate.ps1",
     "scripts/win/clara-mcp-launch.ps1",
+    "scripts/win/prompt-recall.ps1",
 ]
 
 

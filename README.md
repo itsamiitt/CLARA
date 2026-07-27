@@ -97,9 +97,12 @@ than not starting.
 
 The plugin ships an MCP server exposing 22 tools. The agent calls
 `memory_search` when it needs prior context and `memory_save` when it learns
-something durable. Two more hooks run alongside: `PostToolUse(Read)` annotates
-reads of quarantined documents, and `Stop` offers a one-line nudge when a plan
-document looks finished.
+something durable. Three more hooks run alongside: `UserPromptSubmit` recalls
+stored facts that match the words of each prompt (so a topic that first comes
+up mid-session still gets its memory — each fact shown at most once per
+session, silent when nothing matches, ~290 ms measured per prompt),
+`PostToolUse(Read)` annotates reads of quarantined documents, and `Stop`
+offers a one-line nudge when a plan document looks finished.
 
 **You are the only intelligence in this tier.** There is no backend model doing
 extraction or embeddings — the agent decides what is worth storing, and CLARA
