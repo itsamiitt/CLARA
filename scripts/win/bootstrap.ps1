@@ -81,6 +81,86 @@ function Find-ClaraPython {
     return $null
 }
 
+# ---------------------------------------------------------------------------
+# Portable Python fallback
+#
+# Last resort when no system Python >= 3.10 exists. Without this, a user with
+# no Python hits a dead end ("install Python and start a new session") that a
+# non-technical user cannot action — and on managed machines the usual fixes
+# are blocked outright (winget installs fail with 1625 "Organization policies
+# are preventing installation").
+#
+# This path deliberately avoids anything requiring elevation: the official
+# CPython NuGet package is a plain zip, so it extracts into the plugin's own
+# data dir with no installer, no admin, and no PATH change. The download is
+# pinned by version AND verified by SHA256 before a single byte is executed;
+# a mismatch aborts rather than running unverified code. Set
+# CLARA_NO_AUTO_PYTHON=1 to opt out entirely.
+# ---------------------------------------------------------------------------
+
+$PORTABLE_PY_VERSION = "3.12.10"
+# SHA256 of https://www.nuget.org/api/v2/package/python/3.12.10 — cross-checked
+# against NuGet's published SHA512/packageSize for this exact version.
+$PORTABLE_PY_SHA256 = "0eb85c2dfccccf1b17352de4c397f69194035b7d37149eacc16f1147d93de3b8"
+
+function Get-PortablePython([string]$DataDir) {
+    $root = Join-Path $DataDir "pytools\python-$PORTABLE_PY_VERSION"
+    $exe = Join-Path $root "tools\python.exe"
+    if (Test-Path $exe) { return $exe }
+
+    if ($env:CLARA_NO_AUTO_PYTHON) {
+        Write-ClaraLog "no Python found and CLARA_NO_AUTO_PYTHON is set; not downloading one."
+        return $null
+    }
+
+    Write-ClaraLog "no system Python found - fetching a private CPython $PORTABLE_PY_VERSION (no admin required)."
+    $tmp = Join-Path $env:TEMP "clara-python-$PORTABLE_PY_VERSION.zip"
+    $url = "https://www.nuget.org/api/v2/package/python/$PORTABLE_PY_VERSION"
+    try {
+        $prev = $ProgressPreference
+        $ProgressPreference = "SilentlyContinue"
+        Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+        $ProgressPreference = $prev
+    } catch {
+        Write-ClaraLog "could not download Python: $($_.Exception.Message)"
+        return $null
+    }
+
+    $actual = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower()
+    if ($actual -ne $PORTABLE_PY_SHA256) {
+        Write-ClaraLog "downloaded Python failed checksum verification - refusing to use it."
+        Write-ClaraLog "  expected $PORTABLE_PY_SHA256"
+        Write-ClaraLog "  actual   $actual"
+        try { Remove-Item $tmp -Force -Confirm:$false -ErrorAction Stop } catch {}
+        return $null
+    }
+
+    try {
+        if (Test-Path $root) { Remove-Item $root -Recurse -Force -Confirm:$false }
+        $null = New-Item -ItemType Directory -Force (Split-Path -Parent $root)
+        Expand-Archive -Path $tmp -DestinationPath $root -Force -ErrorAction Stop
+    } catch {
+        Write-ClaraLog "could not unpack Python: $($_.Exception.Message)"
+        return $null
+    } finally {
+        try { Remove-Item $tmp -Force -Confirm:$false -ErrorAction Stop } catch {}
+    }
+
+    if (-not (Test-Path $exe)) {
+        Write-ClaraLog "unpacked Python is missing python.exe - ignoring it."
+        return $null
+    }
+    # Make sure pip exists; the venv build needs it.
+    & $exe -m ensurepip --upgrade 2>$null | Out-Null
+    & $exe -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-ClaraLog "unpacked Python is unusable - ignoring it."
+        return $null
+    }
+    Write-ClaraLog "private Python ready at $exe"
+    return $exe
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ($env:CLAUDE_PLUGIN_ROOT) { $pluginRoot = $env:CLAUDE_PLUGIN_ROOT }
 else { $pluginRoot = Split-Path -Parent $scriptDir }  # scripts\win -> scripts
@@ -224,9 +304,16 @@ if (-not $python) {
             }
             exit 0
         }
-        Write-ClaraLog "no Python >= 3.10 found (tried py -3.13/-3.12/-3.11/-3.10, python, python3)."
-        Write-ClaraLog "install Python 3.10+ (https://www.python.org/downloads/) and start a new session."
-        exit 1
+        # No system Python: provision a private one rather than dead-ending on
+        # an instruction a non-technical user cannot act on.
+        $portable = Get-PortablePython $dataDir
+        if ($portable) {
+            $python = @{ Cmd = $portable; Args = @() }
+        } else {
+            Write-ClaraLog "no Python >= 3.10 found (tried py -3.13/-3.12/-3.11/-3.10, python, python3)."
+            Write-ClaraLog "install Python 3.10+ (https://www.python.org/downloads/) and start a new session."
+            exit 1
+        }
     }
 }
 

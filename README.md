@@ -19,10 +19,21 @@ or your own). Both use the same single SQLite store.
 
 # Installation
 
-> **Requirements:** Python **3.10+** on `PATH`, and `git`. Optionally
-> [`uv`](https://github.com/astral-sh/uv) (bootstrap uses it when present and
-> falls back to `pip` otherwise). On native Windows the plugin hooks run under
-> either PowerShell or Git Bash — both are supported.
+> **Requirements:** `git`, and Python **3.10+**.
+>
+> On **native Windows you do not need to install Python yourself** — if none is
+> found, CLARA downloads a private, checksum-verified CPython into its own data
+> directory (no installer, no admin rights, no change to your `PATH`). This is
+> what makes it work on locked-down machines where `winget install` is blocked
+> by policy. Opt out with `CLARA_NO_AUTO_PYTHON=1`.
+>
+> On **macOS/Linux**, install Python 3.10+ with your package manager if it is
+> missing (`brew install python@3.12`, `sudo apt-get install -y python3
+> python3-venv`, …) — the bootstrap prints the exact command for your system.
+>
+> Optionally [`uv`](https://github.com/astral-sh/uv) (bootstrap uses it when
+> present and falls back to `pip` otherwise). On native Windows the plugin
+> hooks run under either PowerShell or Git Bash — both are supported.
 >
 > **PyPI note:** `clara-memory` is not published to PyPI yet, so `pip install
 > clara-memory` will not resolve. Install from the plugin marketplace (which

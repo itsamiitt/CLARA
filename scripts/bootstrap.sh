@@ -176,8 +176,24 @@ if [ -z "${PY:-}" ]; then
       fi
       exit 0
     fi
+    # Give a command the user can actually paste, not just a download URL.
     log 'no Python >= 3.10 on PATH (tried python3.13 python3.12 python3.11 python3.10 python3 python).'
-    log 'install Python 3.10+ (https://www.python.org/downloads/) and start a new session.'
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+      Darwin) log 'install it with:  brew install python@3.12' ;;
+      Linux)
+        if command -v apt-get >/dev/null 2>&1; then
+          log 'install it with:  sudo apt-get install -y python3 python3-venv'
+        elif command -v dnf >/dev/null 2>&1; then
+          log 'install it with:  sudo dnf install -y python3'
+        elif command -v pacman >/dev/null 2>&1; then
+          log 'install it with:  sudo pacman -S --noconfirm python'
+        else
+          log 'install Python 3.10+ with your package manager.'
+        fi
+        ;;
+      *) log 'install Python 3.10+ from https://www.python.org/downloads/' ;;
+    esac
+    log 'then start a new session — CLARA sets itself up automatically.'
     exit 1
   fi
 fi
