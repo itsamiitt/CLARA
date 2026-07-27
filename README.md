@@ -193,8 +193,8 @@ CLARA is installing in the background — memory will be available next session.
 ```
 
 This is expected, not an error. CLARA is building its own private Python
-environment so it never touches your system packages. It takes roughly one to
-two minutes and happens once per plugin version. Keep working — nothing is
+environment so it never touches your system packages. It takes about two
+minutes and happens once per plugin version. Keep working — nothing is
 blocked.
 
 **3. Start another session.** The install is done. Now the session begins with
@@ -261,9 +261,10 @@ background, so your **first session** prints:
 CLARA is installing in the background — memory will be available next session.
 ```
 
-The build takes roughly one to two minutes, once per plugin version (measured:
-113 s on a Windows machine using the bundled interpreter; a warm pip cache and
-a faster disk cut it). **From the second session on**, your memory context is
+The build takes about two minutes, once per plugin version (measured on a
+Windows machine using the bundled interpreter, three cold installs: 113 s,
+114 s and 130 s; a warm pip cache and a faster disk cut it). **From the second
+session on**, your memory context is
 injected automatically at session start and the `memory_*` tools are live.
 Nothing blocks the session while it installs.
 

@@ -914,6 +914,25 @@ async def _cmd_uninstall(args: argparse.Namespace) -> int:
             except OSError as exc:
                 print(f"warning: could not remove {target}: {exc}", file=sys.stderr)
 
+    # The status line is the one thing CLARA writes OUTSIDE its own data
+    # directory, and the loop above just deleted the binary it points at. A
+    # real plugin install registers
+    # "<CLAUDE_PLUGIN_DATA>/current/Scripts/clara.exe statusline"; left behind,
+    # Claude Code runs a missing command every session and the only way to stop
+    # it is hand-editing settings.json, which is exactly what the plugin exists
+    # to avoid. Removed only when the entry is CLARA's own -- uninstall()
+    # checks that and leaves a user's custom status line untouched.
+    from clara import statusline_setup
+
+    statusline = statusline_setup.uninstall()
+    if statusline.get("action") == "removed":
+        removed.append(f"{statusline['path']} (statusLine entry)")
+    elif not statusline.get("ok"):
+        print(
+            f"warning: could not remove the status line: {statusline.get('error')}",
+            file=sys.stderr,
+        )
+
     if args.purge_memories:
         # clara.db.stats is the status-line sidecar (clara/stats_cache.py). It
         # holds counts derived from the store, so leaving it behind means a
