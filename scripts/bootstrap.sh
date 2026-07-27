@@ -54,6 +54,28 @@ ensure_shim() {
   return 0
 }
 
+# Record the active venv in a plain-text pointer beside `current`.
+#
+# `current` is a symlink here but an NTFS junction in bootstrap.ps1, and the
+# Windows hooks read `current.path` whenever the link cannot be resolved. This
+# script previously only *read* that file, so installing from Git Bash on
+# Windows left it naming a venv that had already been garbage-collected, and
+# session-start.ps1 fell back to a dangling path. Writing it keeps both
+# platforms' views of "the active venv" in agreement.
+#
+# The path is written in the native form the Windows scripts expect: under
+# MSYS/Cygwin, `cygpath -w` converts /c/... to C:\... — elsewhere the path is
+# already native.
+write_current_path() {
+  _venv=$1
+  _data=$2
+  _native="$_venv"
+  if command -v cygpath >/dev/null 2>&1; then
+    _native=$(cygpath -w "$_venv" 2>/dev/null || printf '%s' "$_venv")
+  fi
+  printf '%s' "$_native" >"$_data/current.path" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # Detached worker (re-invoked by the spawn below; stdout goes to install.log)
 # ---------------------------------------------------------------------------
@@ -93,6 +115,9 @@ if [ "${1:-}" = "--install-worker" ]; then
 
   if [ "$status" -eq 0 ] && find_bin "$VENV" clara-mcp >/dev/null; then
     ln -sfn "$VENV" "$CURRENT"
+    # Before the GC below deletes the previous venv, so the Windows hooks are
+    # never left reading a pointer to a directory that no longer exists.
+    write_current_path "$VENV" "$DATA"
     ensure_shim "$VENV" "$DATA" || echo "shim refresh failed (non-fatal)"
     # GC: keep the two newest venvs (the one just installed + one fallback).
     # venv-* basenames are fixed-format hex, so parsing ls -dt is safe here.
@@ -218,6 +243,7 @@ if find_bin "$VENV" clara-mcp >/dev/null; then
   elif [ -n "$current_target" ] && [ "$current_target" != "$VENV" ]; then
     ln -sfn "$VENV" "$CURRENT" 2>/dev/null || true
   fi
+  write_current_path "$VENV" "$DATA_DIR"
   # Heal the MCP shim too (dangling after venv GC, missing on upgrade).
   if [ ! -e "$DATA_DIR/shim/clara-mcp" ] && [ ! -e "$DATA_DIR/shim/clara-mcp.exe" ]; then
     ensure_shim "$VENV" "$DATA_DIR" || true
