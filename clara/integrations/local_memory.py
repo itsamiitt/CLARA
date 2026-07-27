@@ -33,7 +33,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from clara import security
+from clara import security, stats_cache
 from clara.agent import _make_engine, format_context
 from clara.db.fts import ensure_fts
 from clara.db.migrations import ensure_schema
@@ -377,7 +377,21 @@ class LocalMemory:
 
         memory_id, rec_type = await with_sqlite_retry(_attempt, what="save")
         logger.info("Saved %s memory %s", rec_type, memory_id)
+        await self._refresh_stats_cache()
         return {"memory_id": memory_id, "type": rec_type, "action": "saved"}
+
+    async def _refresh_stats_cache(self) -> None:
+        """Update the status-line counter after a write. Fail-soft.
+
+        The status line is pulled on a timer and must not open SQLite on that
+        cadence, so the count lives in a sidecar file that write paths refresh.
+        Runs after the transaction has committed (never inside it) and off the
+        event loop, so a cosmetic counter cannot slow or fail a save.
+        """
+        try:
+            await asyncio.to_thread(stats_cache.refresh, self._db_path)
+        except Exception:  # noqa: BLE001 — the counter is cosmetic
+            logger.debug("stats cache refresh skipped", exc_info=True)
 
     @staticmethod
     async def _route_save(
@@ -769,6 +783,7 @@ class LocalMemory:
                 )
 
         await with_sqlite_retry(_attempt, what="forget")
+        await self._refresh_stats_cache()
         return {"memory_id": str(mid), "action": new_status.value}
 
     async def stats(self) -> dict[str, Any]:

@@ -213,6 +213,7 @@ clara backup [--reason R]               rotated store snapshot (VACUUM INTO)
 clara restore FILE [--force]            replace the store with a snapshot
 clara sync [export|import|status]       bridge to Claude Code native memory
 clara statusline                        one-line summary for a statusLine command
+clara statusline --install              add the live memory counter to your status bar
 clara mcp                               run the MCP stdio server (same as clara-mcp)
 clara uninstall [--purge-memories]      remove the private venv/shim/logs (keeps memories)
 
@@ -326,6 +327,38 @@ the repository root: document tiers, type patterns, staleness windows, archive
 behavior, and terminology aliases. See [`clara.yml.example`](clara.yml.example)
 for the full shape. `archive_dir` must be a repo-relative path (absolute or
 `..` values are rejected at load time).
+
+## Live memory counter (status bar)
+
+See at a glance that CLARA is actually storing things:
+
+```bash
+clara statusline --install     # then start a new Claude Code session
+```
+
+```
+CLARA - 1,248 memories - global
+```
+
+The count updates as soon as a memory is saved or forgotten, and covers every
+memory type in the store. One command is all that is needed — it writes the
+`statusLine` block into `~/.claude/settings.json` for you, keeping every other
+setting intact and backing the file up first. It will not replace a status line
+you already use without `--force`.
+
+```bash
+clara statusline --install --refresh-interval 10   # re-run the counter every 10s
+clara statusline --uninstall                       # remove it again
+```
+
+Why a command rather than automatic setup: Claude Code plugins may ship a
+`subagentStatusLine`, but **not** a main `statusLine` — that has to live in your
+own settings file, so CLARA writes it for you instead of asking you to hand-edit
+JSON.
+
+Under the hood the counter never opens the database on the status-bar cadence:
+writes refresh a small sidecar file next to the store, and the status line just
+reads it.
 
 ## Removing CLARA
 

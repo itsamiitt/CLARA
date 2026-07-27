@@ -24,6 +24,8 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -818,18 +820,148 @@ async def _cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _statusline_command() -> str:
+    """Shell command Claude Code should run for the status line.
+
+    An absolute path to this interpreter's ``clara`` entry point: Claude Code
+    does not expand ``${CLAUDE_PLUGIN_ROOT}`` inside settings.json, and the
+    plugin's venv is deliberately not on the user's PATH.
+    """
+    exe = Path(sys.executable)
+    candidates = [
+        exe.with_name("clara.exe"),
+        exe.with_name("clara"),
+        exe.parent / "Scripts" / "clara.exe",
+        exe.parent / "bin" / "clara",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            target = str(candidate)
+            # Prefer the version-independent `current` pointer when this
+            # interpreter lives in the plugin's own venv: venv directories are
+            # named by a pyproject hash and are garbage-collected on upgrade,
+            # so a versioned path here would blank the status bar the next
+            # time the plugin updates.
+            data_dir = Path(
+                os.environ.get("CLAUDE_PLUGIN_DATA")
+                or (Path(os.environ.get("CLARA_HOME") or (Path.home() / ".clara")) / "plugin")
+            )
+            try:
+                venv_root = candidate.parents[1]
+                if venv_root.parent == data_dir and venv_root.name.startswith("venv-"):
+                    stable = data_dir / "current" / candidate.parent.name / candidate.name
+                    if stable.is_file():
+                        target = str(stable)
+            except (IndexError, OSError):
+                pass
+            break
+    else:
+        # No console script (e.g. running from a source checkout): drive the
+        # module through the interpreter itself, which always exists.
+        return f'"{exe}" -m clara.cli statusline'
+    return f'"{target}" statusline'
+
+
+def _cmd_statusline_install(args: argparse.Namespace) -> int:
+    """Write the statusLine block into the user's Claude Code settings.
+
+    A plugin cannot ship a `statusLine` (Claude Code only accepts
+    `subagentStatusLine` from plugin settings), so the counter has to be
+    registered in the user's own settings.json. This edits a file the user
+    owns, so it merges rather than overwrites, backs the file up first, and
+    refuses to replace someone else's statusLine without --force.
+    """
+    import json as _json
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+    settings: dict[str, Any] = {}
+    if settings_path.is_file():
+        try:
+            raw = settings_path.read_text(encoding="utf-8").strip()
+            settings = _json.loads(raw) if raw else {}
+        except ValueError as exc:
+            print(f"error: {settings_path} is not valid JSON ({exc}).", file=sys.stderr)
+            print("fix or remove that file, then re-run.", file=sys.stderr)
+            return 2
+        except OSError as exc:
+            print(f"error: cannot read {settings_path}: {exc}", file=sys.stderr)
+            return 2
+    if not isinstance(settings, dict):
+        print(f"error: {settings_path} must contain a JSON object.", file=sys.stderr)
+        return 2
+
+    existing = settings.get("statusLine")
+    command = _statusline_command()
+
+    if args.uninstall:
+        if not isinstance(existing, dict) or "clara" not in str(existing.get("command", "")):
+            print("no CLARA status line is configured — nothing to remove.")
+            return 0
+        settings.pop("statusLine", None)
+    else:
+        foreign_command: str | None = None
+        if isinstance(existing, dict):
+            current_command = str(existing.get("command", ""))
+            if "clara" not in current_command:
+                foreign_command = current_command
+        if foreign_command is not None and not args.force:
+            print(
+                "a different statusLine is already configured:\n"
+                f"  {foreign_command}\n"
+                "re-run with --force to replace it.",
+                file=sys.stderr,
+            )
+            return 2
+        interval = max(1, int(args.refresh_interval))
+        settings["statusLine"] = {
+            "type": "command",
+            "command": command,
+            "refreshInterval": interval,
+        }
+
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        if settings_path.is_file():
+            backup = settings_path.with_suffix(".json.clara-bak")
+            shutil.copyfile(settings_path, backup)
+        tmp = settings_path.with_suffix(".json.clara-tmp")
+        tmp.write_text(
+            _json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        os.replace(tmp, settings_path)
+    except OSError as exc:
+        print(f"error: cannot write {settings_path}: {exc}", file=sys.stderr)
+        return 2
+
+    if args.uninstall:
+        print(f"removed CLARA from the status bar ({settings_path})")
+    else:
+        print(f"status bar configured ({settings_path})")
+        print(f"  command: {command}")
+        print(f"  refresh: every {max(1, int(args.refresh_interval))}s")
+        print("start a new Claude Code session to see it.")
+    return 0
+
+
 async def _cmd_statusline(args: argparse.Namespace) -> int:
     """Statusline provider: `CLARA - N memories - scope`.
 
-    Reads the statusline JSON (for the session cwd) from stdin; never opens
-    SQLite on the statusline cadence — counts come from a stats cache file
-    refreshed by saves/maintenance, falling back to one count query only
-    when the cache is absent.
+    Reads the statusline JSON (for the session cwd) from stdin. Counts come
+    from the sidecar counter that every write path refreshes
+    (:mod:`clara.stats_cache`), so this never opens SQLite on the status-line
+    cadence; it falls back to a single count query only when the sidecar is
+    missing or stale.
+
+    Always prints exactly one line and always exits 0: Claude Code blanks the
+    status bar when the command exits non-zero or produces no output.
     """
     import json as _json
-    import sqlite3 as _sqlite3
 
+    from clara import stats_cache
     from clara.store import resolve_store
+
+    if args.install or args.uninstall:
+        return _cmd_statusline_install(args)
 
     anchor = None
     if not args.no_stdin and not sys.stdin.isatty():
@@ -846,28 +978,16 @@ async def _cmd_statusline(args: argparse.Namespace) -> int:
     if not res.exists:
         print("CLARA - no store")
         return 0
-    cache = Path(str(res.db_path) + ".stats")
-    count: int | None = None
-    try:
-        import time as _time
-
-        if cache.is_file() and _time.time() - cache.stat().st_mtime < 300:
-            count = int(cache.read_text(encoding="utf-8").strip() or 0)
-    except (OSError, ValueError):
-        count = None
+    count = stats_cache.read(res.db_path)
     if count is None:
-        try:
-            conn = _sqlite3.connect(res.db_path)
-            conn.execute("PRAGMA busy_timeout = 200")
-            count = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE status = 'active'"
-            ).fetchone()[0]
-            conn.close()
-            cache.write_text(str(count), encoding="utf-8")
-        except (OSError, _sqlite3.Error):
-            print("CLARA - store busy")
-            return 0
-    print(f"CLARA - {count} memories - {res.scope}")
+        # Cold sidecar (older store, or a writer that died before refreshing):
+        # recount once and repopulate it. Every later pull is a file read.
+        count = stats_cache.refresh(res.db_path)
+    if count is None:
+        print("CLARA - store busy")
+        return 0
+    label = "memory" if count == 1 else "memories"
+    print(f"CLARA - {count} {label} - {res.scope}")
     return 0
 
 
@@ -987,6 +1107,22 @@ def main(argv: list[str] | None = None) -> None:
     )
     p_status_line.add_argument("--no-stdin", action="store_true",
                                help="Ignore statusline JSON on stdin (use cwd).")
+    p_status_line.add_argument(
+        "--install", action="store_true",
+        help="Add CLARA's memory counter to your Claude Code status bar.",
+    )
+    p_status_line.add_argument(
+        "--uninstall", action="store_true",
+        help="Remove CLARA's entry from the Claude Code status bar.",
+    )
+    p_status_line.add_argument(
+        "--refresh-interval", type=int, default=5, metavar="SECONDS",
+        help="How often the bar re-runs the counter (default: 5).",
+    )
+    p_status_line.add_argument(
+        "--force", action="store_true",
+        help="Replace an existing statusLine that is not CLARA's.",
+    )
 
     p_sync = sub.add_parser(
         "sync", help="Sync with Claude Code native memory (import then export)."
