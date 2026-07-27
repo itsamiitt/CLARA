@@ -27,11 +27,17 @@ _HEDGES = re.compile(
     re.IGNORECASE,
 )
 
-_SENTENCE_SPLIT = re.compile(r"[.!?;\n]+")
+# A period only ends a sentence when nothing non-blank follows it. Splitting on
+# every dot truncated dotted names mid-token ("fly.io" -> "fly", "node.js" ->
+# "node"), which stored a confidently wrong fact rather than none.
+_SENTENCE_SPLIT = re.compile(r"(?:\.(?!\S)|[!?;\n])+")
 
-# Object captures: bounded, non-greedy, stopped by clause delimiters.
-_OBJ = r"(?P<object>[^,.;:!?]{2,80}?)"
-_OBJ2 = r"(?P<object2>[^,.;:!?]{2,80}?)"
+# Object captures: bounded, non-greedy, stopped by clause delimiters. A dot is
+# part of the object when it sits inside a token (fly.io) and terminates it
+# otherwise (".", ". And ...") — same rule as the sentence splitter above.
+_DOT_IN_TOKEN = r"|\.(?=\S)"
+_OBJ = rf"(?P<object>(?:[^,.;:!?]{_DOT_IN_TOKEN}){{2,80}}?)"
+_OBJ2 = rf"(?P<object2>(?:[^,.;:!?]{_DOT_IN_TOKEN}){{2,80}}?)"
 _END = r"(?=$|,|;|:| for | because | since | when | so that | which )"
 
 # Optional trailing domain: "... for web work" → domain="web work".

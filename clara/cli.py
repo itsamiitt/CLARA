@@ -120,7 +120,7 @@ command = "clara-mcp"
     "generic": """\
 # Any CLI that can shell out (Aider, custom agents):
 #   put context into your prompt:      clara context "<task description>"
-#   store a fact from plain text:      clara remember "we deploy with fly.io" """,
+#   store a fact from plain text:      clara remember "we use fly.io for deploys" """,
 }
 
 

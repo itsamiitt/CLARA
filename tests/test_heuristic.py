@@ -93,6 +93,41 @@ class TestFilters:
         assert len(result) == 3
 
 
+class TestDottedNames:
+    """Regression: the sentence splitter used to break on every period, so a
+    dotted technology name was truncated mid-token and stored as a confidently
+    wrong fact ("fly.io" -> "fly", "node.js" -> "node")."""
+
+    @pytest.mark.parametrize(
+        "text, expected_object",
+        [
+            ("we use fly.io for deploys", "fly.io"),
+            ("we use socket.io for realtime", "socket.io"),
+            ("the api runs on node.js", "node.js"),
+            ("I use vue.js for the frontend", "vue.js"),
+            ("the site runs on example.com", "example.com"),
+        ],
+    )
+    def test_dotted_object_is_not_truncated(self, extractor, text, expected_object):
+        result = extractor.extract_sync(text)
+        assert result, f"nothing extracted from {text!r}"
+        assert result[0].object == expected_object
+
+    def test_domain_survives_a_dotted_object(self, extractor):
+        # The truncation also swallowed the trailing "for <domain>" clause.
+        (fact,) = extractor.extract_sync("we use fly.io for deploys")
+        assert fact.object == "fly.io"
+        assert fact.domain == "deploys"
+
+    def test_real_sentence_boundaries_still_split(self, extractor):
+        result = extractor.extract_sync("I use Rust. And I use Go.")
+        assert [f.object for f in result] == ["Rust", "Go"]
+
+    def test_trailing_period_is_not_part_of_the_object(self, extractor):
+        (fact,) = extractor.extract_sync("I use Rust.")
+        assert fact.object == "Rust"
+
+
 class TestApiCompat:
     async def test_async_extract(self, extractor):
         result = await extractor.extract("I use SQLite")
