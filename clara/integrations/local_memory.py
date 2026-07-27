@@ -247,6 +247,29 @@ def _source_type(source: str) -> SourceType:
         return SourceType.user_direct
 
 
+def _foreign_memory_ids(result: Any, current_repo: str | None) -> set[str]:
+    """Ids of memories saved while working in a different repository.
+
+    Same rule as clara.fastpath.db.is_local, restated over ORM rows: a memory
+    is local when it carries this repository's stamp, no stamp, or is about
+    the user -- preferences follow the person across projects.
+    """
+    if not current_repo:
+        return set()
+    foreign: set[str] = set()
+    for sm in result.all:
+        meta = sm.memory.metadata_ or {}
+        stamped = meta.get("repo_id") if isinstance(meta, dict) else None
+        if not stamped or str(stamped) == current_repo:
+            continue
+        content = sm.memory.content or {}
+        subject = content.get("subject") if isinstance(content, dict) else None
+        if isinstance(subject, str) and subject.strip().lower() == "user":
+            continue
+        foreign.add(str(sm.memory.memory_id))
+    return foreign
+
+
 def _serialize(sm: ScoredMemory) -> dict[str, Any]:
     return {
         "memory_id": str(sm.memory.memory_id),
@@ -727,8 +750,15 @@ class LocalMemory:
         types: Sequence[str] | None = None,
         user_id: str | None = None,
         graph_depth: int = 0,
+        current_repo: str | None = None,
     ) -> dict[str, Any]:
         """Keyword-search memories. Returns a formatted context block + hits.
+
+        With *current_repo*, hits saved while working in another repository
+        are labeled in the context block and flagged in the structured hits.
+        Relevance order is untouched: the caller asked a question, and the
+        answer's ranking should not depend on where a fact was saved -- but
+        the caller must be able to tell whose fact it is.
 
         ``graph_depth > 0`` appends a ``[GRAPH]`` section built by traversing
         the knowledge graph from the entities of the top hits (fail-soft).
@@ -745,11 +775,16 @@ class LocalMemory:
             # Real queries feed the usage score term; the empty-query recency
             # feed (recent()) does not — bumping there would be noise.
             await self._record_accesses(result.all)
+        foreign_ids = _foreign_memory_ids(result, current_repo)
+        hits = [_serialize(sm) for sm in result.all]
+        if current_repo is not None:
+            for hit in hits:
+                hit["foreign"] = hit["memory_id"] in foreign_ids
         payload: dict[str, Any] = {
             "query": query,
             "total": result.total,
-            "context": format_context(result),
-            "hits": [_serialize(sm) for sm in result.all],
+            "context": format_context(result, foreign_ids),
+            "hits": hits,
         }
         if graph_depth > 0 and result.total and graph_enabled():
             try:
@@ -895,9 +930,12 @@ class LocalMemory:
         n: int = 10,
         types: Sequence[str] | None = None,
         user_id: str | None = None,
+        current_repo: str | None = None,
     ) -> dict[str, Any]:
         """Most relevant recent memories (recency + confidence ranked)."""
-        return await self.search("", top_k=n, types=types, user_id=user_id)
+        return await self.search(
+            "", top_k=n, types=types, user_id=user_id, current_repo=current_repo
+        )
 
     # ------------------------------------------------------------------
     # Mutate / lifecycle

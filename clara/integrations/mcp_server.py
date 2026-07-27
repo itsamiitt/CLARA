@@ -352,6 +352,21 @@ def _health_sync(anchor: str) -> dict[str, Any]:
         conn.close()
 
 
+async def _current_repo() -> str | None:
+    """The session anchor's repo id, for labeling another project's facts.
+
+    None on failure: provenance labels are a nicety, and a repo-resolution
+    hiccup must never take memory_search down with it.
+    """
+    try:
+        from clara.repoid import repo_id
+
+        return repo_id(await _session_anchor())
+    except Exception:  # noqa: BLE001 — labeling is best-effort
+        logger.debug("current-repo resolution failed", exc_info=True)
+        return None
+
+
 def build_server() -> Any:
     """Construct the FastMCP server with all tools registered."""
     try:
@@ -471,7 +486,8 @@ def build_server() -> Any:
         """
         memory = await _get_memory()
         return await memory.search(
-            query, top_k=top_k, types=types, graph_depth=graph_depth
+            query, top_k=top_k, types=types, graph_depth=graph_depth,
+            current_repo=await _current_repo(),
         )
 
     @server.tool()
@@ -481,7 +497,7 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Return the most relevant recent memories (no query needed)."""
         memory = await _get_memory()
-        return await memory.recent(n=n, types=types)
+        return await memory.recent(n=n, types=types, current_repo=await _current_repo())
 
     @server.tool()
     async def memory_update(

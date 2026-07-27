@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from clara.core.text import sanitize_memory_text as _s
 from clara.retrieval.engine import RetrievalEngine, RetrievalResult, ScoredMemory
 
@@ -77,14 +79,30 @@ def _format_world_model(sm: ScoredMemory) -> str:
     return f"- {' | '.join(parts)}" if parts else "- (world model entry)"
 
 
-def format_context(result: RetrievalResult) -> str:
-    """Build the standard memory-context block from a retrieval result."""
+def format_context(
+    result: RetrievalResult, foreign_ids: set[str] | None = None
+) -> str:
+    """Build the standard memory-context block from a retrieval result.
+
+    *foreign_ids* are memories saved while working in a different repository;
+    their lines are labeled so the reader cannot mistake another project's
+    fact for this one's. Relevance order is untouched — an explicit query's
+    ranking should win — the label only supplies provenance.
+    """
+    marked = foreign_ids or set()
+
+    def _line(sm: Any, formatter: Any) -> str:
+        line = str(formatter(sm))
+        if str(sm.memory.memory_id) in marked:
+            line += "  [from another project]"
+        return line
+
     sections: list[str] = ["=== MEMORY CONTEXT ===", ""]
 
     sections.append("[BELIEFS]")
     if result.beliefs:
         for sm in result.beliefs:
-            sections.append(_format_belief(sm))
+            sections.append(_line(sm, _format_belief))
     else:
         sections.append("- (none)")
     sections.append("")
@@ -92,7 +110,7 @@ def format_context(result: RetrievalResult) -> str:
     sections.append("[WORLD MODEL]")
     if result.world_model:
         for sm in result.world_model:
-            sections.append(_format_world_model(sm))
+            sections.append(_line(sm, _format_world_model))
     else:
         sections.append("- (none)")
     sections.append("")
@@ -100,7 +118,7 @@ def format_context(result: RetrievalResult) -> str:
     sections.append("[RECENT EVENTS]")
     if result.events:
         for sm in result.events:
-            sections.append(_format_event(sm))
+            sections.append(_line(sm, _format_event))
     else:
         sections.append("- (none)")
     sections.append("")
@@ -108,7 +126,7 @@ def format_context(result: RetrievalResult) -> str:
     sections.append("[RELEVANT SKILLS]")
     if result.skills:
         for sm in result.skills:
-            sections.append(_format_skill(sm))
+            sections.append(_line(sm, _format_skill))
     else:
         sections.append("- (none)")
     sections.append("")
