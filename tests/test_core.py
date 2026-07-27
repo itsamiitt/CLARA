@@ -11,7 +11,6 @@ import pytest
 
 from clara.core.enums import (
     EventStatus,
-    EVENT_TRANSITIONS,
     MemoryStatus,
     MemoryType,
     SkillOutcome,
@@ -24,7 +23,6 @@ from clara.core.exceptions import (
     MemoryNotFoundError,
 )
 from clara.interaction.layer import InteractionRecord
-
 
 # ===================================================================
 # Enums

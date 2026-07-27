@@ -39,12 +39,23 @@ if [ "$rc" -eq 3 ]; then
   printf '%s\n' 'CLARA is installing in the background — memory will be available next session.'
   exit 0
 fi
-if [ "$rc" -ne 0 ]; then
-  # Bootstrap already explained itself on stderr; never block the session.
-  exit 0
+
+# Do NOT bail on a non-zero bootstrap: if a usable venv exists, inject from it
+# anyway. Bootstrap failing (e.g. no system Python on PATH for an upgrade) is
+# not a reason to withhold memory that is already installed and working.
+# Bootstrap has already explained itself on stderr; the session is never blocked.
+PYBIN=''
+if ! PYBIN=$(find_bin "$DATA_DIR/current" python); then
+  PYBIN=''
+  if [ -f "$DATA_DIR/current.path" ]; then
+    _ptr=$(cat "$DATA_DIR/current.path" 2>/dev/null || true)
+    if [ -n "$_ptr" ] && [ -d "$_ptr" ]; then
+      PYBIN=$(find_bin "$_ptr" python 2>/dev/null || true)
+    fi
+  fi
 fi
 
-if PYBIN=$(find_bin "$DATA_DIR/current" python); then
+if [ -n "$PYBIN" ]; then
   "$PYBIN" -m clara.fastpath.context --cwd "$PWD" || true
 fi
 exit 0

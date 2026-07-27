@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from typing import Iterable, Sequence
 
 try:
     from redis.asyncio import from_url as redis_from_url
@@ -150,7 +150,8 @@ class MemoryCache:
     async def _get_payload(self, key: str) -> str | None:
         if self._backend == "redis":
             assert self._client is not None
-            return await self._client.get(key)
+            payload: str | None = await self._client.get(key)
+            return payload
 
         entry = self._entries.get(key)
         if entry is None:
@@ -180,8 +181,12 @@ class MemoryCache:
     async def _invalidate_all(self) -> None:
         if self._backend == "redis":
             assert self._client is not None
-            search_keys = [key async for key in self._client.scan_iter(f"{self._key_prefix}:search:*")]
-            index_keys = [key async for key in self._client.scan_iter(f"{self._key_prefix}:index:*")]
+            search_keys = [
+                key async for key in self._client.scan_iter(f"{self._key_prefix}:search:*")
+            ]
+            index_keys = [
+                key async for key in self._client.scan_iter(f"{self._key_prefix}:index:*")
+            ]
             keys = search_keys + index_keys
             if keys:
                 await self._client.delete(*keys)

@@ -27,10 +27,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-from sqlalchemy.exc import OperationalError
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -53,8 +54,8 @@ from clara.interaction import InteractionLayer
 from clara.reasoning.engine import ReasoningEngine
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import (
-    EmbeddingEngine,
     ENV_OLLAMA_EMBED_MODEL,
+    EmbeddingEngine,
     _create_backend,
 )
 from clara.retrieval.engine import (
@@ -113,7 +114,7 @@ def _make_engine(db_url: str) -> AsyncEngine:
 
     if db_url.startswith("sqlite"):
         @event.listens_for(engine.sync_engine, "connect")
-        def _set_sqlite_pragma(dbapi_connection, connection_record) -> None:
+        def _set_sqlite_pragma(dbapi_connection: Any, connection_record: Any) -> None:
             cursor = dbapi_connection.cursor()
             try:
                 cursor.execute("PRAGMA busy_timeout = 30000")
@@ -133,7 +134,6 @@ def _make_engine(db_url: str) -> AsyncEngine:
 # ---------------------------------------------------------------------------
 
 from clara.reasoning.context import format_context  # noqa: E402,F401
-
 
 # ---------------------------------------------------------------------------
 # ClaraMemory
@@ -177,7 +177,7 @@ class ClaraMemory:
         engine: AsyncEngine,
         session_factory: async_sessionmaker[AsyncSession],
         embedding_engine: EmbeddingEngine,
-        extractor: FactExtractor,
+        extractor: FactExtractor | HeuristicExtractor,
         decay_scheduler: DecayScheduler | None,
         lance_engine: LanceRetrievalEngine | None = None,
         interaction_layer: InteractionLayer | None = None,

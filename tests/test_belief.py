@@ -10,23 +10,17 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event as sa_event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from clara.db.models import Base, Memory, MemoryStatus, MemoryType
+from clara.db.models import Base, MemoryStatus, MemoryType
 from clara.memory.belief import (
-    DEFAULT_DECAY_RATE,
-    DEFAULT_OBSERVATION_STRENGTH,
-    SOURCE_WEIGHTS,
     BeliefMemory,
     SourceType,
     compute_confidence,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -220,7 +214,9 @@ class TestStore:
         assert record.content["domain"] == "systems"
 
     @pytest.mark.asyncio
-    async def test_store_initial_confidence_user_direct(self, beliefs: BeliefMemory, session: AsyncSession):
+    async def test_store_initial_confidence_user_direct(
+        self, beliefs: BeliefMemory, session: AsyncSession
+    ):
         """User direct statement → initial confidence = 1.0."""
         record = await beliefs.store(
             subject="user",
@@ -233,7 +229,9 @@ class TestStore:
         assert record.confidence == pytest.approx(1.0)
 
     @pytest.mark.asyncio
-    async def test_store_initial_confidence_agent_inference(self, beliefs: BeliefMemory, session: AsyncSession):
+    async def test_store_initial_confidence_agent_inference(
+        self, beliefs: BeliefMemory, session: AsyncSession
+    ):
         """Agent inference → initial confidence = 0.5."""
         record = await beliefs.store(
             subject="user",
@@ -389,7 +387,9 @@ class TestUpdate:
         assert evidence[1]["source"] == "system"
 
     @pytest.mark.asyncio
-    async def test_update_increments_prior_weight(self, beliefs: BeliefMemory, session: AsyncSession):
+    async def test_update_increments_prior_weight(
+        self, beliefs: BeliefMemory, session: AsyncSession
+    ):
         record = await beliefs.store(
             subject="user", relation="uses", object_="Linux",
             source=SourceType.user_direct, raw_text="I use Linux.",
@@ -446,7 +446,9 @@ class TestSupersede:
     """Tests for replacing one belief with another."""
 
     @pytest.mark.asyncio
-    async def test_supersede_marks_old_as_superseded(self, beliefs: BeliefMemory, session: AsyncSession):
+    async def test_supersede_marks_old_as_superseded(
+        self, beliefs: BeliefMemory, session: AsyncSession
+    ):
         old = await beliefs.store(
             subject="user", relation="uses", object_="Python",
             source=SourceType.user_direct, raw_text="I use Python.",
@@ -486,7 +488,9 @@ class TestSupersede:
         assert new.metadata_["supersedes"] == str(old_updated.memory_id)
 
     @pytest.mark.asyncio
-    async def test_supersede_creates_new_active_belief(self, beliefs: BeliefMemory, session: AsyncSession):
+    async def test_supersede_creates_new_active_belief(
+        self, beliefs: BeliefMemory, session: AsyncSession
+    ):
         old = await beliefs.store(
             subject="user", relation="db", object_="MySQL",
             source=SourceType.user_direct, raw_text="I use MySQL.",
@@ -517,7 +521,9 @@ class TestSupersede:
             )
 
     @pytest.mark.asyncio
-    async def test_supersede_already_superseded_raises(self, beliefs: BeliefMemory, session: AsyncSession):
+    async def test_supersede_already_superseded_raises(
+        self, beliefs: BeliefMemory, session: AsyncSession
+    ):
         old = await beliefs.store(
             subject="user", relation="editor", object_="Vim",
             source=SourceType.user_direct, raw_text="I use Vim.",

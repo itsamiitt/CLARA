@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
 try:
     import ollama as _ollama_lib  # type: ignore[import-untyped]
 except ImportError:
-    _ollama_lib: Any = None  # type: ignore[assignment]
+    _ollama_lib = None  # type: ignore[assignment]
 
 _lock = threading.Lock()
 _models_ready: set[tuple[str, str]] = set()

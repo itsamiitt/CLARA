@@ -31,14 +31,17 @@ Runs three scheduled jobs using APScheduler:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Sequence
+from typing import Any
+from typing import cast as type_cast
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import String, bindparam, cast, select
+from sqlalchemy import String, Table, bindparam, cast, select
 from sqlalchemy import text as sa_text
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -111,10 +114,8 @@ def _skill_last_used(record: Memory) -> datetime:
     for key in ("last_used", "last_accessed"):
         raw = meta.get(key)
         if isinstance(raw, str):
-            try:
+            with contextlib.suppress(ValueError):
                 candidates.append(_ensure_aware(datetime.fromisoformat(raw)))
-            except ValueError:
-                pass
     if candidates:
         return max(candidates)
     return _ensure_aware(record.created_at)
@@ -166,7 +167,7 @@ class DecayScheduler:
         embedding_engine: EmbeddingEngine | None = None,
         llm_provider: str | None = None,
         llm_model: str | None = None,
-        reflection_generator=None,
+        reflection_generator: Any = None,
         *,
         archival_threshold: float = ARCHIVAL_THRESHOLD,
         event_stale_days: int = EVENT_STALE_DAYS,
@@ -213,7 +214,9 @@ class DecayScheduler:
                 replace_existing=True,
             )
         self._scheduler.start()
-        logger.info("DecayScheduler started (daily decay @ 02:00 UTC, weekly prune @ Sun 02:30 UTC)")
+        logger.info(
+            "DecayScheduler started (daily decay @ 02:00 UTC, weekly prune @ Sun 02:30 UTC)"
+        )
 
     def shutdown(self, wait: bool = True) -> None:
         """Shut down the underlying APScheduler."""
@@ -244,7 +247,7 @@ class DecayScheduler:
         decayed_count = 0
         archived_count = 0
         last_id = ""
-        table = Memory.__table__
+        table = type_cast(Table, Memory.__table__)
 
         while True:
             async with self._session_factory() as session, session.begin():

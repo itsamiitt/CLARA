@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+
 pytest.importorskip(
     "fastapi",
     reason="fastapi not installed - run: pip install 'clara-memory[api]'",
@@ -22,7 +23,6 @@ from clara.config import ClaraConfig
 from clara.db.models import Base, Memory
 from clara.extraction.extractor import ExtractedFact
 from clara.retrieval.embeddings import EmbeddingEngine
-
 
 FAKE_DIM = 8
 
@@ -95,12 +95,11 @@ async def client(api_agent: ClaraMemory):
     from clara.api import create_app
 
     app = create_app(agent=api_agent)
-    async with app.router.lifespan_context(app):
-        async with AsyncClient(
-            transport=ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as http:
-            yield http, api_agent
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as http:
+        yield http, api_agent
 
 
 class TestInteractionRoutes:
@@ -227,12 +226,11 @@ class TestAuthenticatedApi:
             config=ClaraConfig(auth_required=True),
             agent=api_agent,
         )
-        async with app.router.lifespan_context(app):
-            async with AsyncClient(
-                transport=ASGITransport(app=app),
-                base_url="http://testserver",
-            ) as http:
-                response = await http.get("/memory/search", params={"q": "Rust"})
+        async with app.router.lifespan_context(app), AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as http:
+            response = await http.get("/memory/search", params={"q": "Rust"})
 
         assert response.status_code == 401
 
@@ -246,15 +244,14 @@ class TestCors:
         from clara.api import create_app
 
         app = create_app(agent=api_agent)
-        async with app.router.lifespan_context(app):
-            async with AsyncClient(
-                transport=ASGITransport(app=app),
-                base_url="http://testserver",
-            ) as http:
-                response = await http.get(
-                    "/memory/search",
-                    params={"q": "Rust", "user_id": "alice"},
-                    headers={"Origin": "https://example.com"},
-                )
+        async with app.router.lifespan_context(app), AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as http:
+            response = await http.get(
+                "/memory/search",
+                params={"q": "Rust", "user_id": "alice"},
+                headers={"Origin": "https://example.com"},
+            )
 
         assert response.headers.get("access-control-allow-origin") == "https://example.com"

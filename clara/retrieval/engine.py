@@ -15,19 +15,21 @@ import math
 import os
 import uuid
 from ast import literal_eval
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Any, Sequence
+from typing import Any
 
-from sqlalchemy import and_, event, func, inspect as sa_inspect, select
+from sqlalchemy import and_, event, func, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text as sa_text
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
+from clara.db.models import VECTOR_DIMENSIONS, Memory, MemoryStatus, MemoryType
 from clara.retrieval.cache import CachedScoredMemory, MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
 
@@ -63,7 +65,7 @@ DEFAULT_LANCE_PATH = "./clara_vectors"
 LANCE_TABLE_NAME = "memories"
 
 
-def _lance_schema():
+def _lance_schema() -> Any:
     """Build the Lance table schema (requires the [vector] extra)."""
     if pa is None:
         raise LanceSearchError(
@@ -185,7 +187,7 @@ class LanceRetrievalEngine:
     """Handles vector indexing and ANN search against embedded LanceDB."""
 
     _default_path: str = DEFAULT_LANCE_PATH
-    _shared: dict[str, "LanceRetrievalEngine"] = {}
+    _shared: dict[str, LanceRetrievalEngine] = {}
     _shared_lock = Lock()
 
     def __init__(self, lance_path: str = DEFAULT_LANCE_PATH) -> None:
@@ -208,7 +210,7 @@ class LanceRetrievalEngine:
         os.environ["CLARA_LANCE_PATH"] = lance_path
 
     @classmethod
-    def get_default(cls) -> "LanceRetrievalEngine":
+    def get_default(cls) -> LanceRetrievalEngine:
         lance_path = os.environ.get("CLARA_LANCE_PATH", cls._default_path or DEFAULT_LANCE_PATH)
         with cls._shared_lock:
             engine = cls._shared.get(lance_path)
@@ -371,7 +373,7 @@ class LanceRetrievalEngine:
             )
         return text.replace("'", "''")
 
-    def _ensure_table_sync(self):
+    def _ensure_table_sync(self) -> Any:
         with self._table_lock:
             if self._table is not None:
                 return self._table
@@ -410,7 +412,13 @@ class LanceRetrievalEngine:
             parts.append(f"user_id = '{self._escape(user_id)}'")
         if memory_types:
             values = ", ".join(
-                f"'{self._escape(mem_type.value if isinstance(mem_type, MemoryType) else str(mem_type))}'"
+                "'{}'".format(
+                    self._escape(
+                        mem_type.value
+                        if isinstance(mem_type, MemoryType)
+                        else str(mem_type)
+                    )
+                )
                 for mem_type in memory_types
             )
             parts.append(f"memory_type IN ({values})")
@@ -946,7 +954,7 @@ def _install_lance_commit_sync() -> None:
         return
 
     @event.listens_for(Session, "before_flush")
-    def _capture_memory_objects(session, flush_context, instances) -> None:
+    def _capture_memory_objects(session: Any, flush_context: Any, instances: Any) -> None:
         # No-backend mode (e.g. LocalMemory / clara-mcp) never writes vectors,
         # so skip tracking entirely and keep LanceDB completely dormant.
         if session.info.get("_clara_disable_lance"):
@@ -958,7 +966,7 @@ def _install_lance_commit_sync() -> None:
                 tracked[id(obj)] = (obj, obj in session.new)
 
     @event.listens_for(Session, "after_flush_postexec")
-    def _snapshot_tracked_objects(session, flush_context) -> None:
+    def _snapshot_tracked_objects(session: Any, flush_context: Any) -> None:
         tracked = session.info.pop("_lance_tracked_objects", {})
         if not tracked:
             return
@@ -970,7 +978,7 @@ def _install_lance_commit_sync() -> None:
                 snapshots[snapshot.memory_id] = snapshot
 
     @event.listens_for(Session, "after_commit")
-    def _sync_lance_after_commit(session) -> None:
+    def _sync_lance_after_commit(session: Any) -> None:
         if session.info.get("_clara_disable_lance"):
             session.info.pop("_lance_pending_snapshots", None)
             session.info.pop("_lance_tracked_objects", None)
@@ -987,11 +995,12 @@ def _install_lance_commit_sync() -> None:
             logger.exception("Failed to sync memories into LanceDB after commit")
 
     @event.listens_for(Session, "after_rollback")
-    def _clear_lance_pending(session) -> None:
+    def _clear_lance_pending(session: Any) -> None:
         session.info.pop("_lance_tracked_objects", None)
         session.info.pop("_lance_pending_snapshots", None)
 
-    _install_lance_commit_sync._installed = True
+    # Idempotency flag stashed on the function object itself.
+    _install_lance_commit_sync._installed = True  # type: ignore[attr-defined]
 
 
 _install_lance_commit_sync()

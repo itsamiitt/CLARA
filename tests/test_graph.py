@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 import uuid
 
@@ -314,12 +315,13 @@ class TestTraversal:
         await memory.close()
         assert {r["relation"] for r in rows} == {"uses"}
 
-    async def test_hub_fanout_capped_and_fast(self, tmp_path):
+    async def _hub_with_edges(self, tmp_path, count: int = 5000):
+        """Store with one hub node fanning out to *count* edges."""
         memory = await _store(tmp_path)
         async with memory._session_factory() as session, session.begin():
             hub = await create_node(session, canonical="hub", display="hub")
             params = []
-            for i in range(5000):
+            for i in range(count):
                 params.append({
                     "eid": f"edge{i:05d}",
                     "src": hub["node_id"],
@@ -335,6 +337,26 @@ class TestTraversal:
                 ),
                 params,
             )
+        return memory, hub
+
+    async def test_hub_fanout_capped(self, tmp_path):
+        # Correctness only — deterministic, so it belongs in the default tier.
+        # The latency budget lives in the bench tier (see test_bench.py): a
+        # wall-clock assertion here flakes under full-suite load on a busy or
+        # shared runner, which is exactly what the bench marker exists for.
+        memory, hub = await self._hub_with_edges(tmp_path)
+        async with memory._session_factory() as session:
+            rows = await traverse(session, [hub["node_id"]], depth=1, fanout=6)
+        await memory.close()
+        assert len(rows) == 6
+
+    @pytest.mark.bench
+    async def test_hub_fanout_fast(self, tmp_path):
+        # Order-of-magnitude guard against a scan sneaking into the hub path.
+        # Windows spawn/filesystem overhead runs 2-4x POSIX, matching the
+        # budget scaling convention in test_bench.py.
+        budget = 0.20 if sys.platform == "win32" else 0.05
+        memory, hub = await self._hub_with_edges(tmp_path)
         async with memory._session_factory() as session:
             timings = []
             for _ in range(3):
@@ -343,7 +365,7 @@ class TestTraversal:
                 timings.append(time.perf_counter() - start)
         await memory.close()
         assert len(rows) == 6
-        assert min(timings) < 0.05, f"hub traversal too slow: {min(timings):.3f}s"
+        assert min(timings) < budget, f"hub traversal too slow: {min(timings):.3f}s"
 
     async def test_as_of_returns_pre_supersede_edge(self, tmp_path):
         memory = await _store(tmp_path)

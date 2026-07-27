@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Iterable
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from clara.reflection.pipeline import PatternCandidate
@@ -15,7 +16,7 @@ DEFAULT_REFLECTION_SYSTEM_PROMPT = (
 
 
 def build_reflection_prompt(
-    pattern: "PatternCandidate",
+    pattern: PatternCandidate,
     *,
     evidence_lines: Iterable[str],
 ) -> str:
@@ -30,15 +31,16 @@ def build_reflection_prompt(
     )
 
 
-def fallback_reflection_text(pattern: "PatternCandidate") -> str:
+def fallback_reflection_text(pattern: PatternCandidate) -> str:
     if pattern.pattern_type == "recurring_entity":
         return (
             f"Reflection: {pattern.subject} appears repeatedly in recent memory "
             f"activity ({pattern.count} occurrences)."
         )
     if pattern.pattern_type == "repeated_event_type":
+        verb = pattern.relation.removeprefix("repeatedly_")
         return (
-            f"Reflection: {pattern.subject} repeatedly {pattern.relation.removeprefix('repeatedly_')} "
+            f"Reflection: {pattern.subject} repeatedly {verb} "
             f"{pattern.object} ({pattern.count} occurrences)."
         )
     if pattern.pattern_type == "skill_generalization":

@@ -136,6 +136,16 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom is a call in the argument default
+# (`x = Depends(get_thing)`); the framework evaluates it per-request, so B008's
+# "mutable default" concern does not apply. Rewriting these would break the DI.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Header",
+    "fastapi.Query",
+]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
@@ -146,7 +156,10 @@ disallow_untyped_defs = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# Tests exercise behaviour, not type contracts; requiring annotations on every
-# fixture and helper would add noise without catching product bugs.
-module = "tests.*"
-disallow_untyped_defs = false
+# numpy is a transitive dependency (via lancedb) whose shipped stubs use the
+# 3.12+ `type` statement. Since we type-check against python_version 3.10, those
+# stubs are a syntax error that aborts the whole run. Skip following them —
+# CLARA has no direct numpy usage to check.
+module = "numpy.*"
+follow_imports = "skip"
+follow_imports_for_stubs = true

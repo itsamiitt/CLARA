@@ -20,7 +20,6 @@ from clara.memory.skill import (
 )
 from clara.retrieval.engine import RetrievalResult, ScoredMemory
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -320,7 +319,9 @@ class TestSkillQueries:
         )
 
     @pytest.mark.asyncio
-    async def test_match_falls_back_to_substring_when_semantic_search_is_empty(self, session: AsyncSession):
+    async def test_match_falls_back_to_substring_when_semantic_search_is_empty(
+        self, session: AsyncSession
+    ):
         retriever = AsyncMock()
         retriever.search.return_value = RetrievalResult()
         store = SkillStore(session, retrieval_engine=retriever)

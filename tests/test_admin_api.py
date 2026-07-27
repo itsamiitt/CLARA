@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
+
 pytest.importorskip(
     "fastapi",
     reason="fastapi not installed - run: pip install 'clara-memory[api]'",
@@ -21,7 +22,6 @@ from clara.agent import ClaraMemory
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine
-
 
 FAKE_DIM = 8
 
@@ -120,12 +120,11 @@ async def admin_client():
         await session.commit()
 
     app = create_app(agent=agent)
-    async with app.router.lifespan_context(app):
-        async with AsyncClient(
-            transport=ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as http:
-            yield http
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as http:
+        yield http
 
     await agent.close()
 
@@ -186,13 +185,12 @@ class TestAdminAuth:
         )
 
         app = create_app(config=ClaraConfig(auth_required=True), agent=agent)
-        async with app.router.lifespan_context(app):
-            async with AsyncClient(
-                transport=ASGITransport(app=app),
-                base_url="http://testserver",
-            ) as http:
-                stats = await http.get("/admin/stats")
-                health = await http.get("/admin/health")
+        async with app.router.lifespan_context(app), AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as http:
+            stats = await http.get("/admin/stats")
+            health = await http.get("/admin/health")
 
         # All admin routes (including /admin/health) require the header when
         # auth is enabled.

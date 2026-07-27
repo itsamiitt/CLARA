@@ -107,15 +107,14 @@ async def _recall_objects(agent: ClaraMemory, query: str) -> set[str]:
 async def _age_memory(factory, memory_type: MemoryType, days: int) -> None:
     """Push a memory's timestamps into the past so decay/pruning acts on it."""
     old = datetime.now(timezone.utc) - timedelta(days=days)
-    async with factory() as session:
-        async with session.begin():
-            row = (
-                await session.execute(
-                    select(Memory).where(Memory.memory_type == memory_type)
-                )
-            ).scalars().first()
-            row.created_at = old
-            row.updated_at = old
+    async with factory() as session, session.begin():
+        row = (
+            await session.execute(
+                select(Memory).where(Memory.memory_type == memory_type)
+            )
+        ).scalars().first()
+        row.created_at = old
+        row.updated_at = old
 
 
 class TestDecayPropagatesToSearch:

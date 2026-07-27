@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from clara.db.models import MemoryType
 from clara.extraction.heuristic import HeuristicExtractor
 from clara.update.engine import classify_memory_type
-from clara.db.models import MemoryType
 
 
 @pytest.fixture

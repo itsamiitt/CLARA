@@ -118,30 +118,79 @@ mkdir -p "$DATA_DIR" 2>/dev/null || {
   exit 1
 }
 
-# Python gate: first interpreter >= 3.10 wins (the library's requires-python).
-PY=''
-for _cand in python3.13 python3.12 python3.11 python3.10 python3 python; do
-  if command -v "$_cand" >/dev/null 2>&1 \
-    && "$_cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
-      >/dev/null 2>&1; then
-    PY="$_cand"
-    break
+CURRENT="$DATA_DIR/current"
+
+# Hash pyproject with $1; empty output on failure.
+hash_pyproject() {
+  "$1" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()[:12])' \
+    "$PLUGIN_ROOT/pyproject.toml" 2>/dev/null || true
+}
+
+# An already-installed venv is self-sufficient: it ships its own interpreter,
+# so a healthy install must NOT depend on a system Python still being on PATH.
+# (It previously did — the probe below ran first and exited 1, which silently
+# disabled memory injection on any machine whose PATH lost Python after
+# install, even though the venv was intact.) Try the installed interpreter
+# first; only fall back to probing PATH when there is nothing installed yet.
+INSTALLED_PY=''
+if [ -n "$CURRENT" ] && [ -e "$CURRENT" ]; then
+  INSTALLED_PY=$(find_bin "$CURRENT" python 2>/dev/null || true)
+fi
+if [ -z "$INSTALLED_PY" ] && [ -f "$DATA_DIR/current.path" ]; then
+  _ptr=$(cat "$DATA_DIR/current.path" 2>/dev/null || true)
+  if [ -n "$_ptr" ] && [ -d "$_ptr" ]; then
+    INSTALLED_PY=$(find_bin "$_ptr" python 2>/dev/null || true)
   fi
-done
-if [ -z "$PY" ]; then
-  log 'no Python >= 3.10 on PATH (tried python3.13 python3.12 python3.11 python3.10 python3 python).'
-  log 'install Python 3.10+ (https://www.python.org/downloads/) and start a new session.'
-  exit 1
+fi
+
+HASH=''
+if [ -n "$INSTALLED_PY" ]; then
+  HASH=$(hash_pyproject "$INSTALLED_PY")
+  if [ -n "$HASH" ] && find_bin "$DATA_DIR/venv-$HASH" clara-mcp >/dev/null 2>&1; then
+    # Installed venv already matches the current pyproject: nothing to build,
+    # and no system Python is required to say so.
+    PY="$INSTALLED_PY"
+  fi
+fi
+
+# Python gate: first interpreter >= 3.10 wins (the library's requires-python).
+# Only needed when an install/upgrade is actually required.
+if [ -z "${PY:-}" ]; then
+  PY=''
+  for _cand in python3.13 python3.12 python3.11 python3.10 python3 python; do
+    if command -v "$_cand" >/dev/null 2>&1 \
+      && "$_cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
+        >/dev/null 2>&1; then
+      PY="$_cand"
+      break
+    fi
+  done
+  if [ -z "$PY" ]; then
+    if [ -n "$INSTALLED_PY" ]; then
+      # Installed but stale (pyproject changed) and no system Python to rebuild
+      # with: keep serving the existing venv rather than disabling memory.
+      log 'no Python >= 3.10 on PATH; continuing with the installed environment (upgrade skipped).'
+      _stale_venv=$(dirname "$(dirname "$INSTALLED_PY")")
+      if [ ! -e "$DATA_DIR/shim/clara-mcp" ] && [ ! -e "$DATA_DIR/shim/clara-mcp.exe" ]; then
+        ensure_shim "$_stale_venv" "$DATA_DIR" || true
+      fi
+      exit 0
+    fi
+    log 'no Python >= 3.10 on PATH (tried python3.13 python3.12 python3.11 python3.10 python3 python).'
+    log 'install Python 3.10+ (https://www.python.org/downloads/) and start a new session.'
+    exit 1
+  fi
 fi
 
 # Versioned venv: hash of pyproject.toml selects the environment.
-HASH=$("$PY" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()[:12])' "$PLUGIN_ROOT/pyproject.toml" 2>/dev/null || true)
+if [ -z "$HASH" ]; then
+  HASH=$(hash_pyproject "$PY")
+fi
 if [ -z "$HASH" ]; then
   log "cannot hash $PLUGIN_ROOT/pyproject.toml"
   exit 1
 fi
 VENV="$DATA_DIR/venv-$HASH"
-CURRENT="$DATA_DIR/current"
 
 # Fast path: the venv for the current hash is ready. Heal the `current`
 # pointer if it is missing or a symlink aimed elsewhere (a non-symlink

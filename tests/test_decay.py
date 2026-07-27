@@ -28,7 +28,6 @@ from clara.scheduler.decay import (
     should_archive,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -487,9 +486,12 @@ class TestRunDailyDecay:
         factory = _make_session_factory([record])
         scheduler = DecayScheduler(factory)
 
-        summary = await scheduler.run_daily_decay()
+        await scheduler.run_daily_decay()
 
-        # days_elapsed ≈ 0 so confidence should stay the same (or the loop skips it)
+        # days_elapsed ≈ 0 so confidence should stay the same (or the loop skips it).
+        # The summary counts are deliberately not asserted: with an elapsed time of
+        # microseconds the row may be either skipped or decayed by a negligible
+        # amount, so any exact count here would be flaky.
         assert record.confidence == pytest.approx(0.80, abs=0.01)
 
 

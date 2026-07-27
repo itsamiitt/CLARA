@@ -18,8 +18,9 @@ from pathlib import Path
 
 from clara.db.migrations import SchemaTooNew, check_version
 from clara.repoid import repo_id
-from clara.store import global_db_path, resolve_store as _resolve
 from clara.store import git_toplevel as _git_toplevel  # noqa: F401 — re-export for tests
+from clara.store import global_db_path
+from clara.store import resolve_store as _resolve
 
 _BUSY_TIMEOUT_MS = 3_000  # session start must not hang on a locked store
 

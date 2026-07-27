@@ -8,14 +8,13 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from clara.db.models import Base, VECTOR_DIMENSIONS
+from clara.db.models import VECTOR_DIMENSIONS, Base
 from clara.extraction.extractor import ExtractedFact
 from clara.memory.belief import BeliefMemory, SourceType
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
 from clara.retrieval.engine import RetrievalEngine
 from clara.update.engine import MemoryUpdateEngine
-
 
 FAKE_DIM = 8
 

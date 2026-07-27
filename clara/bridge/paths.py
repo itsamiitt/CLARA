@@ -20,6 +20,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from clara.store import git_toplevel
 
@@ -41,10 +42,11 @@ def encode_project_dir(project_path: str) -> str:
     return _ENCODE_RE.sub("-", project_path)
 
 
-def _claude_settings() -> dict:
+def _claude_settings() -> dict[str, Any]:
     settings = Path.home() / ".claude" / "settings.json"
     try:
-        return json.loads(settings.read_text(encoding="utf-8"))
+        loaded = json.loads(settings.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
     except (OSError, ValueError):
         return {}
 

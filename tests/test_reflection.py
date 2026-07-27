@@ -18,7 +18,6 @@ from clara.retrieval.embeddings import EmbeddingEngine
 from clara.scheduler.decay import DecayScheduler
 from clara.update.engine import ActionTaken, UpdateResult
 
-
 FAKE_DIM = 8
 
 
@@ -180,7 +179,8 @@ class TestReflectionEngine:
             for row in rows
         )
         assert all(
-            (row.metadata_ or {}).get("evidence", [{}])[0].get("text") == "Generated reflection insight."
+            (row.metadata_ or {}).get("evidence", [{}])[0].get("text")
+            == "Generated reflection insight."
             for row in rows
         )
 
@@ -274,7 +274,7 @@ class TestReflectionEngine:
             count=3,
         )
 
-        insight = await engine._generate_insight(pattern, [])
+        insight = await engine._generate_insight(pattern, evidence_lines=[])
 
         assert insight == "Async insight"
         engine._call_anthropic.assert_awaited_once()
@@ -310,9 +310,11 @@ class TestReflectionEngine:
             "sync client should not be used"
         )
 
-        with patch.dict("os.environ", {ENV_ANTHROPIC_KEY: "test-key"}):
-            with patch("clara.reflection.pipeline._anthropic", mock_anthropic_module):
-                insight = await engine._call_anthropic("prompt", pattern)
+        with (
+            patch.dict("os.environ", {ENV_ANTHROPIC_KEY: "test-key"}),
+            patch("clara.reflection.pipeline._anthropic", mock_anthropic_module),
+        ):
+            insight = await engine._call_anthropic("prompt", pattern)
 
         assert insight == "Async reflection"
         mock_anthropic_module.AsyncAnthropic.assert_called_once_with(api_key="test-key")
@@ -371,7 +373,8 @@ class TestReflectionScheduler:
             summary = await scheduler.run_daily_reflection()
 
         assert summary == {"users_processed": 2, "insights_generated": 3}
-        assert [call.kwargs["user_id"] for call in reflection.run.await_args_list] == ["alice", "bob"]
+        called_users = [call.kwargs["user_id"] for call in reflection.run.await_args_list]
+        assert called_users == ["alice", "bob"]
 
     @pytest.mark.asyncio
     async def test_run_daily_reflection_uses_legacy_partition_only_when_needed(self):

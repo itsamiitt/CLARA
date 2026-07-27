@@ -169,21 +169,75 @@ try {
     exit 1
 }
 
-$python = Find-ClaraPython
-if (-not $python) {
-    Write-ClaraLog "no Python >= 3.10 found (tried py -3.13/-3.12/-3.11/-3.10, python, python3)."
-    Write-ClaraLog "install Python 3.10+ (https://www.python.org/downloads/) and start a new session."
-    exit 1
-}
-
 $pyproject = Join-Path $pluginRoot "pyproject.toml"
 $hashScript = "import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest()[:12])"
-$hash = & $python.Cmd @($python.Args + @("-c", $hashScript, $pyproject)) 2>$null
-if (-not $hash) {
-    Write-ClaraLog "cannot hash $pyproject"
-    exit 1
+
+# An already-installed venv ships its own interpreter, so a healthy install must
+# NOT depend on a system Python still being on PATH. (It previously did — the
+# probe ran before the fast path and exited 1, silently disabling memory
+# injection on any machine whose PATH lost Python after install, even with the
+# venv intact.) Prefer the installed interpreter; probe PATH only when an
+# install or upgrade is genuinely required.
+$installedVenv = $null
+$currentDir = Join-Path $dataDir "current"
+if (Test-Path $currentDir) {
+    if (Find-VenvBin $currentDir "python") { $installedVenv = $currentDir }
 }
-$hash = "$hash".Trim()
+if (-not $installedVenv) {
+    $pointerFile = Join-Path $dataDir "current.path"
+    if (Test-Path $pointerFile) {
+        $ptr = (Get-Content $pointerFile -Raw -ErrorAction SilentlyContinue)
+        if ($ptr) {
+            $ptr = $ptr.Trim()
+            if ($ptr -and (Test-Path $ptr) -and (Find-VenvBin $ptr "python")) { $installedVenv = $ptr }
+        }
+    }
+}
+
+$python = $null
+$hash = $null
+if ($installedVenv) {
+    $installedPy = Find-VenvBin $installedVenv "python"
+    $candidateHash = & $installedPy "-c" $hashScript $pyproject 2>$null
+    if ($candidateHash) {
+        $candidateHash = "$candidateHash".Trim()
+        if (Find-VenvBin (Join-Path $dataDir "venv-$candidateHash") "clara-mcp") {
+            # Installed venv already matches the current pyproject: nothing to
+            # build, and no system Python is required to say so.
+            $python = @{ Cmd = $installedPy; Args = @() }
+            $hash = $candidateHash
+        }
+    }
+}
+
+if (-not $python) {
+    $python = Find-ClaraPython
+    if (-not $python) {
+        if ($installedVenv) {
+            # Installed but stale (pyproject changed) and no system Python to
+            # rebuild with: keep serving the existing venv rather than
+            # disabling memory entirely.
+            Write-ClaraLog "no Python >= 3.10 found; continuing with the installed environment (upgrade skipped)."
+            Set-CurrentPointer $dataDir $installedVenv
+            if (-not (Test-Path (Join-Path $dataDir "shim\clara-mcp.exe"))) {
+                $null = Update-ClaraShim $dataDir $installedVenv
+            }
+            exit 0
+        }
+        Write-ClaraLog "no Python >= 3.10 found (tried py -3.13/-3.12/-3.11/-3.10, python, python3)."
+        Write-ClaraLog "install Python 3.10+ (https://www.python.org/downloads/) and start a new session."
+        exit 1
+    }
+}
+
+if (-not $hash) {
+    $hash = & $python.Cmd @($python.Args + @("-c", $hashScript, $pyproject)) 2>$null
+    if (-not $hash) {
+        Write-ClaraLog "cannot hash $pyproject"
+        exit 1
+    }
+    $hash = "$hash".Trim()
+}
 $venv = Join-Path $dataDir "venv-$hash"
 
 # Fast path: venv for the current hash is ready.

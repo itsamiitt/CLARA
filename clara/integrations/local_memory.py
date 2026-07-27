@@ -31,7 +31,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy import text as sa_text
 from sqlalchemy import update as sa_update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from clara import security
 from clara.agent import _make_engine, format_context
@@ -236,7 +236,7 @@ class LocalMemory:
     def __init__(
         self,
         *,
-        engine,
+        engine: AsyncEngine,
         session_factory: async_sessionmaker[AsyncSession],
         db_path: str,
     ) -> None:

@@ -13,7 +13,6 @@ from clara.extraction.extractor import ExtractedFact
 from clara.retrieval.embeddings import EmbeddingEngine
 from clara.update.background import BackgroundWriter
 
-
 FAKE_DIM = 8
 
 
@@ -66,6 +65,9 @@ class TestBackgroundWriter:
         await writer.stop()
 
         async with factory() as session:
-            rows = (await session.execute(select(Memory).where(Memory.user_id == "alice"))).scalars().all()
+            result = await session.execute(
+                select(Memory).where(Memory.user_id == "alice")
+            )
+            rows = result.scalars().all()
 
         assert rows

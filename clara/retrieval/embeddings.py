@@ -20,7 +20,6 @@ import logging
 import os
 import threading
 from abc import ABC, abstractmethod
-from typing import Any
 
 from clara.db.models import VECTOR_DIMENSIONS
 
@@ -35,17 +34,17 @@ _TRUNCATION_WARNED: set[int] = set()
 try:
     import openai as openai  # type: ignore[import-untyped]
 except ImportError:
-    openai: Any = None  # type: ignore[assignment]
+    openai = None  # type: ignore[assignment]
 
 try:
     from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
 except ImportError:
-    SentenceTransformer: Any = None  # type: ignore[assignment]
+    SentenceTransformer = None  # type: ignore[assignment]
 
 try:
     import ollama as _ollama_lib  # type: ignore[import-untyped]
 except ImportError:
-    _ollama_lib: Any = None  # type: ignore[assignment]
+    _ollama_lib = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +129,7 @@ class _OpenAIBackend(_EmbeddingBackend):
 
         api_key = os.environ.get(ENV_OPENAI_KEY)
         if not api_key:
-            raise EnvironmentError(
+            raise OSError(
                 f"Environment variable {ENV_OPENAI_KEY!r} is not set. "
                 "It is required for the OpenAI embedding backend."
             )
@@ -192,7 +191,8 @@ class _LocalBackend(_EmbeddingBackend):
 
     def embed(self, text: str) -> list[float]:
         vector = self._model.encode(text, convert_to_numpy=True)
-        return vector.tolist()  # type: ignore[union-attr]
+        values: list[float] = vector.tolist()  # type: ignore[union-attr]
+        return values
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:

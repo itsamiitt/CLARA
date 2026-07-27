@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,13 +20,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.retrieval.engine import (
-    DEFAULT_CANDIDATE_MULTIPLIER,
-    LanceRetrievalEngine,
     RECENCY_LAMBDA,
     W_CONFIDENCE,
     W_RECENCY,
     W_SIMILARITY,
     W_USAGE,
+    LanceRetrievalEngine,
     RetrievalEngine,
     RetrievalResult,
     ScoredMemory,
@@ -36,7 +33,6 @@ from clara.retrieval.engine import (
     compute_recency_score,
     compute_usage_frequency,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers — lightweight stand-in for Memory (avoids SQLAlchemy instrumentation)
@@ -151,7 +147,7 @@ class TestComputeUsageFrequency:
 
 class TestComputeFinalScore:
     def test_weights_sum_to_one(self):
-        assert W_SIMILARITY + W_CONFIDENCE + W_RECENCY + W_USAGE == pytest.approx(1.0)
+        assert pytest.approx(1.0) == W_SIMILARITY + W_CONFIDENCE + W_RECENCY + W_USAGE
 
     def test_perfect_scores(self):
         score = compute_final_score(
@@ -381,7 +377,10 @@ class TestRetrievalEngineSearch:
         assert mem.metadata_["access_count"] == 1
 
     @pytest.mark.asyncio
-    async def test_flush_called_after_access_update(self):
+    async def test_access_update_issued_without_touching_updated_at(self):
+        # Access recording is a raw UPDATE, not ORM attribute mutation: assigning
+        # to metadata_ would fire the updated_at onupdate hook and let a *read*
+        # inflate the recency score of whatever was just searched.
         mem = FakeMemory()
         session = _make_async_session([mem])
         embedder = _make_embedder()
@@ -390,7 +389,15 @@ class TestRetrievalEngineSearch:
         _stub_lance(engine, [(mem, 0.9)])
         await engine.search("test")
 
-        session.flush.assert_called()
+        statements = [str(call.args[0]) for call in session.execute.call_args_list if call.args]
+        updates = [sql for sql in statements if sql.lstrip().upper().startswith("UPDATE")]
+        assert updates, "expected an UPDATE for the access bump"
+        access_update = " ".join(updates[-1].split())
+        # The bump is a json_set on metadata...
+        assert "metadata=json_set" in access_update
+        # ...and updated_at is self-assigned, so the ORM onupdate hook cannot
+        # fire and a read can never look like a content change.
+        assert "updated_at=memories.updated_at" in access_update
 
     # -- World model grouping --
 

@@ -4,7 +4,7 @@ import hashlib
 import math
 import re
 from collections import Counter
-from typing import Iterable
+from collections.abc import Iterable
 from unittest.mock import patch
 
 import pytest
@@ -16,18 +16,19 @@ from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import ExtractedFact
 from clara.reasoning.engine import ReasoningEngine
 
-
 TOKEN_RE = re.compile(r"[a-z0-9_+-]+")
 USE_RE = re.compile(
     r"^(?P<subject>[a-z][a-z0-9_-]*) uses (?P<object>[a-z0-9_+-]+) for (?P<domain>[a-z0-9 _-]+)$",
     re.IGNORECASE,
 )
 NEGATED_USE_RE = re.compile(
-    r"^(?P<subject>[a-z][a-z0-9_-]*) no longer uses (?P<object>[a-z0-9_+-]+) for (?P<domain>[a-z0-9 _-]+)$",
+    r"^(?P<subject>[a-z][a-z0-9_-]*) no longer uses (?P<object>[a-z0-9_+-]+)"
+    r" for (?P<domain>[a-z0-9 _-]+)$",
     re.IGNORECASE,
 )
 DEPLOY_RE = re.compile(
-    r"^(?:yesterday )?(?P<subject>[a-z][a-z0-9_-]*) deployed (?:the )?(?P<object>[a-z0-9_ -]+?)(?: to [a-z0-9_ -]+)?$",
+    r"^(?:yesterday )?(?P<subject>[a-z][a-z0-9_-]*) deployed (?:the )?"
+    r"(?P<object>[a-z0-9_ -]+?)(?: to [a-z0-9_ -]+)?$",
     re.IGNORECASE,
 )
 KNOWS_RE = re.compile(
@@ -92,7 +93,7 @@ class _SemanticConversationBackend:
         for token in tokens:
             for salt in ("a", "b"):
                 digest = hashlib.blake2b(
-                    f"{salt}:{token}".encode("utf-8"),
+                    f"{salt}:{token}".encode(),
                     digest_size=8,
                 ).digest()
                 idx = int.from_bytes(digest[:4], "big") % self._dimensions
@@ -224,7 +225,9 @@ def _has_match(
             continue
         if _normalize_text(content.get("object", "")) != _normalize_text(object_):
             continue
-        if domain is not None and _normalize_text(content.get("domain", "")) != _normalize_text(domain):
+        if domain is not None and (
+            _normalize_text(content.get("domain", "")) != _normalize_text(domain)
+        ):
             continue
         if is_negation is not None and bool(content.get("is_negation", False)) != is_negation:
             continue

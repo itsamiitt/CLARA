@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -265,7 +266,6 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
     from sqlalchemy import text as sa_text
 
     from clara.db.fts import FTS_TABLE
-
     from clara.store import orphaned_project_stores, resolve_store
 
     checks: list[tuple[str, bool, str]] = []

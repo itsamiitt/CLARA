@@ -6,13 +6,15 @@ import asyncio
 import inspect
 import logging
 import os
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Sequence, TypeAlias
+from typing import TypeAlias
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clara.core.ollama import ensure_model as _ensure_ollama_model
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import (
     DEFAULT_ANTHROPIC_MODEL,
@@ -27,24 +29,22 @@ from clara.extraction.extractor import (
     _anthropic,
     _openai,
 )
-from clara.retrieval.cache import MemoryCache
-from clara.retrieval.embeddings import EmbeddingEngine
-from clara.retrieval.engine import RetrievalEngine
 from clara.memory.belief import SourceType
 from clara.reflection.prompts import (
     DEFAULT_REFLECTION_SYSTEM_PROMPT,
     build_reflection_prompt,
     fallback_reflection_text,
 )
+from clara.retrieval.cache import MemoryCache
+from clara.retrieval.embeddings import EmbeddingEngine
+from clara.retrieval.engine import RetrievalEngine
 from clara.update.engine import MemoryUpdateEngine, UpdateResult
 
 logger = logging.getLogger(__name__)
 try:
     import ollama as _ollama_lib  # type: ignore[import-untyped]
 except ImportError:
-    _ollama_lib: Any = None  # type: ignore[assignment]
-
-from clara.core.ollama import ensure_model as _ensure_ollama_model
+    _ollama_lib = None  # type: ignore[assignment]
 
 DEFAULT_REFLECTION_WINDOW_DAYS = 7
 DEFAULT_MIN_OCCURRENCES = 3
@@ -239,24 +239,38 @@ class ReflectionEngine:
         single late failure.
         """
         memories = await self.recent_memories(user_id=user_id)
-        # Release the read snapshot before the first network call.
-        await self._session.rollback()
         if not memories:
+            await self._session.rollback()
             return []
 
         patterns = detect_patterns(memories, min_occurrences=self._min_occurrences)
         if not patterns:
+            await self._session.rollback()
             return []
 
+        # Materialize everything the prompts need *before* releasing the read
+        # snapshot: rollback() expires loaded ORM instances, and touching
+        # ``memory.content`` afterwards would trigger a lazy reload.
         memory_by_id = {str(memory.memory_id): memory for memory in memories}
-        stored: list[UpdateResult] = []
-        for pattern in patterns:
-            supporting = [
-                memory_by_id[memory_id]
-                for memory_id in pattern.supporting_memory_ids
+        evidence_by_pattern: list[list[str]] = [
+            [
+                _memory_line(memory_by_id[memory_id])
+                for memory_id in pattern.supporting_memory_ids[:5]
                 if memory_id in memory_by_id
             ]
-            insight_text = await self._generate_insight(pattern, supporting)
+            for pattern in patterns
+        ]
+
+        # Release the read snapshot before the first network call.
+        await self._session.rollback()
+
+        stored: list[UpdateResult] = []
+        # strict=True: evidence_by_pattern is built one-per-pattern above, so a
+        # length mismatch would be a logic error, not something to silently drop.
+        for pattern, evidence_lines in zip(patterns, evidence_by_pattern, strict=True):
+            insight_text = await self._generate_insight(
+                pattern, evidence_lines=evidence_lines
+            )
             fact = ExtractedFact(
                 subject=pattern.subject,
                 relation=pattern.relation,
@@ -275,10 +289,13 @@ class ReflectionEngine:
     async def _generate_insight(
         self,
         pattern: PatternCandidate,
-        supporting_memories: Sequence[Memory],
+        *,
+        evidence_lines: Sequence[str],
     ) -> str:
-        evidence_lines = [_memory_line(memory) for memory in supporting_memories[:5]]
-        prompt = build_reflection_prompt(pattern, evidence_lines=evidence_lines)
+        """Generate one insight. *evidence_lines* are pre-rendered by the caller
+        while the read snapshot is still open — this method may run after the
+        session has been released, so it must not touch ORM instances."""
+        prompt = build_reflection_prompt(pattern, evidence_lines=list(evidence_lines))
 
         if self._insight_generator is not None:
             response = self._insight_generator(

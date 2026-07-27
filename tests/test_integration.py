@@ -12,17 +12,15 @@ cosine similarity over the FakeMemory rows that exist in the session.
 
 from __future__ import annotations
 
-import math
 import hashlib
-import uuid
+import math
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Sequence
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import event, select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
-    AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
@@ -31,9 +29,8 @@ from clara.agent import ClaraMemory, format_context
 from clara.db.models import Base, Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import ExtractedFact
 from clara.retrieval.embeddings import EmbeddingEngine
-from clara.update.background import BackgroundWriter
 from clara.retrieval.engine import RetrievalEngine, RetrievalResult, ScoredMemory
-
+from clara.update.background import BackgroundWriter
 
 # ---------------------------------------------------------------------------
 # Fake embedding backend
@@ -73,7 +70,11 @@ def _fake_embedding_engine() -> EmbeddingEngine:
 # ---------------------------------------------------------------------------
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
+    # Deliberately NOT strict=True: the production query vector is zero-padded to
+    # VECTOR_DIMENSIONS (1536) while the fake embedder emits FAKE_DIM (8), so the
+    # lengths differ by design. zip() truncates to the meaningful prefix, which is
+    # exactly the comparison this mock wants.
+    dot = sum(x * y for x, y in zip(a, b))  # noqa: B905
     mag_a = math.sqrt(sum(x * x for x in a))
     mag_b = math.sqrt(sum(x * x for x in b))
     if mag_a == 0 or mag_b == 0:
@@ -228,7 +229,7 @@ def _make_fetch_candidates_mock(embedder: EmbeddingEngine):
         memory_types: Sequence[MemoryType] | None = None,
         user_id: str | None = None,
     ) -> list[tuple[Memory, float]]:
-        from sqlalchemy import select, and_
+        from sqlalchemy import and_, select
 
         filters = [Memory.status == MemoryStatus.active]
         if user_id is not None:
@@ -284,7 +285,7 @@ class TestRemember:
 
         # Verify records actually exist in the DB
         async with factory() as session:
-            from sqlalchemy import select, func
+            from sqlalchemy import func, select
             count = await session.scalar(
                 select(func.count()).select_from(Memory)
             )

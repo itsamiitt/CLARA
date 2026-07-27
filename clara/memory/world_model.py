@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any
 
 from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
@@ -410,12 +411,17 @@ class WorldModelStore:
         record.metadata_ = meta
 
         if embedding is not None:
-            record.embedding = embedding
+            # hybrid_property setter; mypy reads the getter as a plain method.
+            record.embedding = embedding  # type: ignore[method-assign]
 
         record.updated_at = now
         await self._session.flush()
 
-        logger.debug("Updated world model %s: merged %d properties", record.memory_id, len(new_properties))
+        logger.debug(
+            "Updated world model %s: merged %d properties",
+            record.memory_id,
+            len(new_properties),
+        )
         return record
 
     async def _get_model_or_none(self, model_id: uuid.UUID) -> Memory | None:

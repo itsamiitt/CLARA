@@ -287,7 +287,9 @@ class ClaraConfig:
         return cls(
             db_url=_str("CLARA_DB_URL", _DEFAULT_DB_URL),
             embedding_backend=_str("CLARA_EMBEDDING_BACKEND", _DEFAULT_EMBEDDING_BACKEND),
-            openai_embedding_model=_str("CLARA_OPENAI_EMBEDDING_MODEL", _DEFAULT_OPENAI_EMBEDDING_MODEL),
+            openai_embedding_model=_str(
+                "CLARA_OPENAI_EMBEDDING_MODEL", _DEFAULT_OPENAI_EMBEDDING_MODEL
+            ),
             llm_provider=_str("CLARA_LLM_PROVIDER", _DEFAULT_LLM_PROVIDER),
             openai_model=_str("CLARA_OPENAI_MODEL", _DEFAULT_OPENAI_MODEL),
             anthropic_model=_str("CLARA_ANTHROPIC_MODEL", _DEFAULT_ANTHROPIC_MODEL),
@@ -316,7 +318,11 @@ class ClaraConfig:
                 "CLARA_SKILL_UNUSED_DAYS", _DEFAULT_SKILL_UNUSED_DAYS, minimum=1
             ),
             start_scheduler=_bool("CLARA_START_SCHEDULER", True),
-            cache_url=_str("CLARA_CACHE_URL", "memory://") if os.environ.get("CLARA_CACHE_URL", "").strip() else None,
+            cache_url=(
+                _str("CLARA_CACHE_URL", "memory://")
+                if os.environ.get("CLARA_CACHE_URL", "").strip()
+                else None
+            ),
             auth_required=_bool("CLARA_AUTH_REQUIRED", _DEFAULT_AUTH_REQUIRED),
             api_tokens=_api_tokens(),
             graph_enabled=_bool("CLARA_GRAPH_ENABLED", _DEFAULT_GRAPH_ENABLED),

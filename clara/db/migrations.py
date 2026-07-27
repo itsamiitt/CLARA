@@ -231,7 +231,10 @@ FTS_TEXT_EXPR = (
     " || ' ' || coalesce(json_extract({row}.metadata, '$.origin_file'), ''))"
 )
 
-_FTS_COLUMNS = "memory_id UNINDEXED, user_id UNINDEXED, memory_type UNINDEXED, status UNINDEXED, text"
+_FTS_COLUMNS = (
+    "memory_id UNINDEXED, user_id UNINDEXED, memory_type UNINDEXED, "
+    "status UNINDEXED, text"
+)
 
 
 def _fts_trigger_ddl(table: str) -> list[str]:

@@ -22,7 +22,8 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+
+from clara.core.ollama import ensure_model as _ensure_ollama_model_shared
 
 logger = logging.getLogger(__name__)
 
@@ -60,20 +61,17 @@ LLM_MAX_RETRIES = 2
 try:
     import openai as _openai  # type: ignore[import-untyped]
 except ImportError:
-    _openai: Any = None  # type: ignore[assignment]
+    _openai = None  # type: ignore[assignment]
 
 try:
     import anthropic as _anthropic  # type: ignore[import-untyped]
 except ImportError:
-    _anthropic: Any = None  # type: ignore[assignment]
+    _anthropic = None  # type: ignore[assignment]
 
 try:
     import ollama as _ollama_lib  # type: ignore[import-untyped]
 except ImportError:
-    _ollama_lib: Any = None  # type: ignore[assignment]
-
-from clara.core.ollama import ensure_model as _ensure_ollama_model_shared
-
+    _ollama_lib = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -199,7 +197,7 @@ async def _call_openai(text: str, model: str) -> str:
         )
     api_key = os.environ.get(ENV_OPENAI_KEY)
     if not api_key:
-        raise EnvironmentError(
+        raise OSError(
             f"Environment variable {ENV_OPENAI_KEY!r} is not set."
         )
 
@@ -232,7 +230,7 @@ async def _call_anthropic(text: str, model: str) -> str:
         )
     api_key = os.environ.get(ENV_ANTHROPIC_KEY)
     if not api_key:
-        raise EnvironmentError(
+        raise OSError(
             f"Environment variable {ENV_ANTHROPIC_KEY!r} is not set."
         )
 
@@ -315,7 +313,7 @@ def _parse_llm_response(raw: str, original_text: str) -> ExtractionResult:
     if cleaned.startswith("```"):
         lines = cleaned.splitlines()
         # Remove first line (```json) and last line (```)
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [line for line in lines if not line.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
 
     try:
@@ -489,7 +487,7 @@ class FactExtractor:
                     status="llm_unavailable",
                     detail=f"unknown provider {self._provider!r}",
                 )
-        except (EnvironmentError, ImportError) as exc:
+        except (OSError, ImportError) as exc:
             logger.error("LLM provider unavailable: %s", exc)
             return ExtractionResult(status="llm_unavailable", detail=str(exc))
         except Exception as exc:

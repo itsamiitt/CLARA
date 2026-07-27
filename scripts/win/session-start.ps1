@@ -32,10 +32,11 @@ if ($rc -eq 3) {
     Write-Output "CLARA is installing in the background - memory will be available next session."
     exit 0
 }
-if ($rc -ne 0) {
-    # Bootstrap already explained itself on stderr; never block the session.
-    exit 0
-}
+
+# Do NOT bail on a non-zero bootstrap: if a usable venv exists, inject from it
+# anyway. Bootstrap failing (e.g. no system Python on PATH for an upgrade) is
+# not a reason to withhold memory that is already installed and working.
+# Bootstrap has already explained itself on stderr; the session is never blocked.
 
 # Resolve the venv python: junction `current` or the pointer-file fallback.
 $py = $null

@@ -4,9 +4,9 @@ import asyncio
 import hashlib
 import math
 import re
+import uuid
 from collections import Counter
 from pathlib import Path
-import uuid
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +15,6 @@ from sqlalchemy import func, select
 from clara.agent import ClaraMemory
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import ExtractedFact
-
 
 TOKEN_RE = re.compile(r"[a-z0-9_]+")
 USE_RE = re.compile(
@@ -79,7 +78,7 @@ class _SemanticFakeBackend:
         for token in tokens:
             for salt in ("a", "b"):
                 digest = hashlib.blake2b(
-                    f"{salt}:{token}".encode("utf-8"),
+                    f"{salt}:{token}".encode(),
                     digest_size=8,
                 ).digest()
                 idx = int.from_bytes(digest[:4], "big") % self._dimensions

@@ -10,24 +10,24 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import (
     JSON,
-    Text,
     DateTime,
     Enum,
-    event,
     Float,
-    func,
     Index,
     MetaData,
+    Text,
     Uuid,
+    event,
+    func,
     literal,
     text,
 )
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, reconstructor
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -125,7 +125,10 @@ class Memory(Base):
     content: Mapped[dict] = mapped_column(
         JSON_STORAGE_TYPE,
         nullable=False,
-        comment="Type-specific structured content (subject/relation/object, steps, properties, etc.).",
+        comment=(
+            "Type-specific structured content "
+            "(subject/relation/object, steps, properties, etc.)."
+        ),
     )
 
     # --- Scoring ---
@@ -244,15 +247,17 @@ class Memory(Base):
             return None
         return [float(value) for value in cached]
 
-    @embedding.setter
+    # mypy does not model SQLAlchemy's hybrid_property setter/expression
+    # overloads, so it sees each decorated def as a redefinition of the getter.
+    @embedding.setter  # type: ignore[no-redef]
     def embedding(self, value: list[float] | tuple[float, ...] | None) -> None:
         if value is None:
             self._embedding_cache = None
             return
         self._embedding_cache = [float(item) for item in value]
 
-    @embedding.expression
-    def embedding(cls):
+    @embedding.expression  # type: ignore[no-redef]
+    def embedding(cls) -> Any:
         # There is no persisted SQL column anymore. Returning a non-null literal
         # keeps legacy ``Memory.embedding.is_(None)`` checks deterministic in
         # tests without implying any real database storage.
@@ -269,10 +274,10 @@ class Memory(Base):
 
 
 @event.listens_for(Memory, "expire")
-def _clear_embedding_cache_on_expire(target: Memory, attrs) -> None:
+def _clear_embedding_cache_on_expire(target: Memory, attrs: Any) -> None:
     target._embedding_cache = None
 
 
 @event.listens_for(Memory, "refresh")
-def _clear_embedding_cache_on_refresh(target: Memory, context, attrs) -> None:
+def _clear_embedding_cache_on_refresh(target: Memory, context: Any, attrs: Any) -> None:
     target._embedding_cache = None

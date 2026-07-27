@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from clara.extraction.extractor import (
-    CONFIDENCE_FLOOR,
     ENV_ANTHROPIC_KEY,
     ENV_LLM_PROVIDER,
     ENV_OPENAI_KEY,
@@ -29,7 +28,6 @@ from clara.extraction.extractor import (
     FactExtractor,
     _parse_llm_response,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

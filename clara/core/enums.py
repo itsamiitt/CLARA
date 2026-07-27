@@ -16,11 +16,10 @@ from __future__ import annotations
 import enum
 
 # Re-export from db.models — the single-table schema enums
-from clara.db.models import MemoryType, MemoryStatus
+from clara.db.models import MemoryStatus, MemoryType
 
 # Re-export from memory.belief — evidence source classification
 from clara.memory.belief import SourceType
-
 
 # ---------------------------------------------------------------------------
 # New enums for pending milestones
@@ -46,8 +45,17 @@ class EventStatus(str, enum.Enum):
 
 # Valid transitions map: current_status → set of allowed next statuses
 EVENT_TRANSITIONS: dict[EventStatus, frozenset[EventStatus]] = {
-    EventStatus.created: frozenset({EventStatus.in_progress, EventStatus.completed, EventStatus.failed, EventStatus.abandoned}),
-    EventStatus.in_progress: frozenset({EventStatus.completed, EventStatus.failed, EventStatus.abandoned}),
+    EventStatus.created: frozenset({
+        EventStatus.in_progress,
+        EventStatus.completed,
+        EventStatus.failed,
+        EventStatus.abandoned,
+    }),
+    EventStatus.in_progress: frozenset({
+        EventStatus.completed,
+        EventStatus.failed,
+        EventStatus.abandoned,
+    }),
     EventStatus.completed: frozenset(),
     EventStatus.failed: frozenset(),
     EventStatus.abandoned: frozenset(),

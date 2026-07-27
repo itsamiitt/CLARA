@@ -14,6 +14,7 @@ deleted only after a new backup succeeds. Stdlib-only.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
@@ -77,10 +78,8 @@ def backup_db(db_path: str | os.PathLike[str], reason: str = "manual") -> Path |
     except (OSError, sqlite3.Error):
         logger.warning("backup of %s failed", source, exc_info=True)
         if dest.exists():
-            try:
+            with contextlib.suppress(OSError):
                 dest.unlink()
-            except OSError:
-                pass
         return None
 
 

@@ -25,7 +25,11 @@ class TestPatterns:
             ("github-pat", "github_pat_" + "a1B2c3D4e5F6g7H8i9J0k1"),
             ("slack-token", "xoxb-1234567890-abcdefghij"),
             ("private-key", "-----BEGIN RSA PRIVATE KEY-----"),
-            ("jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9P"),
+            (
+                "jwt",
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+                ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9P",
+            ),
             ("credential-assignment", "password: hunter2hunter2"),
             ("credential-assignment", "API_KEY=abcd1234efgh5678"),
         ],

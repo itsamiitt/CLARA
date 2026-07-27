@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, TextIO
+from typing import Any, TextIO
 
 from clara.db.migrations import SCHEMA_VERSION, ensure_schema, get_version
 
@@ -96,9 +97,8 @@ def export_records(
             clauses.append("status = ?")
             params.append(status)
         if types:
-            clauses.append(
-                "memory_type IN (%s)" % ", ".join("?" for _ in types)
-            )
+            placeholders = ", ".join("?" for _ in types)
+            clauses.append(f"memory_type IN ({placeholders})")
             params.extend(types)
         if since:
             clauses.append("updated_at >= ?")
@@ -141,7 +141,10 @@ def export_records(
                 except sqlite3.OperationalError:
                     continue
                 for row in rows:
-                    payload = {key: row[key] for key in row.keys()}
+                    # noqa: SIM118 is a false positive for sqlite3.Row — iterating
+                    # a Row yields VALUES, not keys, so `for key in row` would
+                    # raise IndexError. .keys() is required here.
+                    payload = {key: row[key] for key in row.keys()}  # noqa: SIM118
                     yield {"kind": f"{kind_prefix}:{table}", **payload}
     finally:
         conn.close()

@@ -16,7 +16,7 @@ safety net for plain-text ingestion. Extract less, never wrongly.
 from __future__ import annotations
 
 import re
-from typing import Callable, Iterator
+from collections.abc import Callable, Iterator
 
 from clara.extraction.extractor import ExtractedFact, ExtractionResult
 

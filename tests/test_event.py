@@ -13,7 +13,6 @@ from clara.core.exceptions import InvalidTransitionError, MemoryNotFoundError
 from clara.db.models import Base, MemoryStatus, MemoryType
 from clara.memory.event import EventStore
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -195,7 +194,9 @@ class TestEventQueries:
     async def test_get_timeline(self, session: AsyncSession):
         store = EventStore(session)
         await store.create(subject="user", event_type="deployed", description="v1", user_id="alice")
-        await store.create(subject="user", event_type="committed", description="fix", user_id="alice")
+        await store.create(
+            subject="user", event_type="committed", description="fix", user_id="alice"
+        )
         await store.create(subject="user", event_type="deployed", description="v2", user_id="bob")
         await session.commit()
 

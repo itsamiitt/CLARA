@@ -8,7 +8,7 @@ No real database, LLM, or embedding calls are made.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,20 +16,18 @@ import pytest
 
 from clara.db.models import MemoryStatus, MemoryType
 from clara.extraction.extractor import ExtractedFact
+from clara.memory.belief import SourceType
 from clara.retrieval.engine import RetrievalResult, ScoredMemory
 from clara.update.engine import (
-    CONFLICT_CONFIDENCE_THRESHOLD,
-    SIMILARITY_THRESHOLD,
     ActionTaken,
     MemoryUpdateEngine,
     UpdateResult,
+    _domains_differ,
+    _is_conflicting,
+    _map_source_type,
     _same_belief,
     classify_memory_type,
-    _is_conflicting,
-    _domains_differ,
-    _map_source_type,
 )
-from clara.memory.belief import SourceType
 
 
 class TestClassifyNormalization:
@@ -461,7 +459,10 @@ class TestProcessConflictSupersede:
         old_id = uuid.uuid4()
         existing = FakeMemory(
             memory_id=old_id,
-            content={"subject": "user", "relation": "uses", "object": "Python", "domain": "systems"},
+            content={
+                "subject": "user", "relation": "uses",
+                "object": "Python", "domain": "systems",
+            },
             confidence=0.85,
         )
         exact_candidate = _make_scored(existing, similarity=1.0)

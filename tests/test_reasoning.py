@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from clara.db.models import Base, VECTOR_DIMENSIONS
+from clara.db.models import VECTOR_DIMENSIONS, Base
 from clara.extraction.extractor import (
     ENV_OPENAI_KEY,
     LLM_MAX_RETRIES,
@@ -20,7 +20,6 @@ from clara.memory.belief import BeliefMemory, SourceType
 from clara.reasoning import ContextAssembler, ReasoningEngine
 from clara.retrieval.embeddings import EmbeddingEngine, normalize_embedding_dimensions
 from clara.retrieval.engine import LanceRetrievalEngine, RetrievalResult, ScoredMemory
-
 
 FAKE_DIM = 8
 
@@ -189,9 +188,11 @@ class TestReasoningEngine:
         mock_openai_module.AsyncOpenAI.return_value = mock_client
         mock_openai_module.OpenAI.side_effect = AssertionError("sync client should not be used")
 
-        with patch.dict("os.environ", {ENV_OPENAI_KEY: "sk-test"}):
-            with patch("clara.reasoning.engine._openai", mock_openai_module):
-                response = await engine._call_openai("system prompt", "hello")
+        with (
+            patch.dict("os.environ", {ENV_OPENAI_KEY: "sk-test"}),
+            patch("clara.reasoning.engine._openai", mock_openai_module),
+        ):
+            response = await engine._call_openai("system prompt", "hello")
 
         assert response == "Async answer"
         mock_openai_module.AsyncOpenAI.assert_called_once_with(

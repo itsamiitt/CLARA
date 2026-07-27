@@ -109,7 +109,8 @@ def replace_section(text: str, new_body: str, *, store: str, ts: str) -> SpliceR
     if body_sha(on_disk_body) != recorded_sha:
         return SpliceResult(text=text, changed=False, conflict_body=on_disk_body)
 
-    if body_sha(new_body if new_body.endswith("\n") or not new_body else new_body + "\n") == recorded_sha:
+    normalized_new = new_body if (new_body.endswith("\n") or not new_body) else new_body + "\n"
+    if body_sha(normalized_new) == recorded_sha:
         return SpliceResult(text=text, changed=False, conflict_body=None)
 
     new_text = text[: match.start()] + fence + text[match.end():]

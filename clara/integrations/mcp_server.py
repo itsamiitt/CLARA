@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -216,10 +217,9 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
                     try:
                         gc_conn.execute("PRAGMA busy_timeout = 30000")
                         for statement in fts_gc_statements():
-                            try:
+                            # FTS table absent in this SQLite build — skip the GC.
+                            with contextlib.suppress(_sqlite3.OperationalError):
                                 gc_conn.execute(statement)
-                            except _sqlite3.OperationalError:
-                                pass  # FTS table absent in this build
                         gc_conn.commit()
                     finally:
                         gc_conn.close()
@@ -259,10 +259,8 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
                 decay_summary, prune_summary, graph_summary, sync_summary,
             )
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 lock_path.unlink()
-            except OSError:
-                pass
     except Exception:  # noqa: BLE001 — housekeeping must never block memory
         logger.exception("Opportunistic maintenance failed")
 
@@ -272,7 +270,7 @@ async def _run_maintenance_if_due(memory: LocalMemory, db_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_server():
+def build_server() -> Any:
     """Construct the FastMCP server with all tools registered."""
     try:
         from mcp.server.fastmcp import FastMCP
@@ -627,7 +625,7 @@ async def _recall(query: str, top_k: int) -> str:
         return ""
     return (
         "The following is your persistent CLARA memory relevant to this "
-        "session. Treat it as background context.\n\n" + result["context"]
+        "session. Treat it as background context.\n\n" + str(result["context"])
     )
 
 

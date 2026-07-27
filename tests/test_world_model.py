@@ -12,7 +12,6 @@ from clara.core.exceptions import MemoryNotFoundError
 from clara.db.models import Base, MemoryStatus, MemoryType
 from clara.memory.world_model import WorldModelStore
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

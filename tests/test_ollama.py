@@ -35,9 +35,11 @@ def _reset_ollama_state():
 
 class TestOllamaEmbeddingBackend:
     def test_ollama_backend_raises_without_package(self):
-        with patch("clara.retrieval.embeddings._ollama_lib", None):
-            with pytest.raises(ImportError, match="ollama"):
-                _OllamaBackend()
+        with (
+            patch("clara.retrieval.embeddings._ollama_lib", None),
+            pytest.raises(ImportError, match="ollama"),
+        ):
+            _OllamaBackend()
 
     def test_ollama_embed_normalizes_dimensions(self):
         mock_client = MagicMock()
@@ -64,9 +66,11 @@ class TestOllamaEmbeddingBackend:
 
 class TestOllamaExtractor:
     def test_extractor_raises_without_package(self):
-        with patch("clara.extraction.extractor._ollama_lib", None):
-            with pytest.raises(ImportError, match="ollama"):
-                FactExtractor(provider="ollama")
+        with (
+            patch("clara.extraction.extractor._ollama_lib", None),
+            pytest.raises(ImportError, match="ollama"),
+        ):
+            FactExtractor(provider="ollama")
 
     async def test_extractor_calls_ollama_with_json_format(self):
         mock_client = MagicMock()
@@ -162,7 +166,7 @@ class TestOllamaReflectionEngine:
         loop.run_in_executor = AsyncMock(return_value="Executor insight")
 
         with patch("clara.reflection.pipeline.asyncio.get_running_loop", return_value=loop):
-            insight = await engine._generate_insight(pattern, [])
+            insight = await engine._generate_insight(pattern, evidence_lines=[])
 
         assert insight == "Executor insight"
         loop.run_in_executor.assert_awaited_once()

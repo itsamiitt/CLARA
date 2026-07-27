@@ -22,9 +22,9 @@ from clara.retrieval.embeddings import (
     OPENAI_BATCH_LIMIT,
     OPENAI_DIMENSIONS,
     EmbeddingEngine,
+    _create_backend,
     _LocalBackend,
     _OpenAIBackend,
-    _create_backend,
     get_engine,
     normalize_embedding_dimensions,
     reset_engine,
@@ -157,16 +157,20 @@ class TestOpenAIBackend:
     @patch.dict(os.environ, {}, clear=True)
     def test_missing_api_key_raises(self):
         """Instantiation without OPENAI_API_KEY should raise."""
-        with patch("clara.retrieval.embeddings.openai", create=True):
-            with pytest.raises(EnvironmentError, match="OPENAI_API_KEY"):
-                _OpenAIBackend()
+        with (
+            patch("clara.retrieval.embeddings.openai", create=True),
+            pytest.raises(EnvironmentError, match="OPENAI_API_KEY"),
+        ):
+            _OpenAIBackend()
 
     def test_missing_openai_package_raises(self):
         """When openai is None (not installed), instantiation should raise."""
-        with patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test-key"}):
-            with patch("clara.retrieval.embeddings.openai", None):
-                with pytest.raises(ImportError, match="openai"):
-                    _OpenAIBackend()
+        with (
+            patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test-key"}),
+            patch("clara.retrieval.embeddings.openai", None),
+            pytest.raises(ImportError, match="openai"),
+        ):
+            _OpenAIBackend()
 
     @patch.dict(os.environ, {ENV_OPENAI_KEY: "sk-test-key"})
     @patch("clara.retrieval.embeddings.openai", create=True)
@@ -258,9 +262,11 @@ class TestLocalBackend:
 
     def test_missing_package_raises(self):
         """When SentenceTransformer is None (not installed), instantiation should raise."""
-        with patch("clara.retrieval.embeddings.SentenceTransformer", None):
-            with pytest.raises(ImportError, match="sentence-transformers"):
-                _LocalBackend()
+        with (
+            patch("clara.retrieval.embeddings.SentenceTransformer", None),
+            pytest.raises(ImportError, match="sentence-transformers"),
+        ):
+            _LocalBackend()
 
 
 # ---------------------------------------------------------------------------

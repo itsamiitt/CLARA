@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from pathlib import Path
 
@@ -187,5 +188,5 @@ class TestResolutionDataclass:
     def test_frozen(self, tmp_path, isolated_home):
         res = resolve_store(str(tmp_path))
         assert isinstance(res, StoreResolution)
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             res.scope = "hacked"  # type: ignore[misc]

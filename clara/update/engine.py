@@ -22,11 +22,11 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clara.db.models import Memory, MemoryStatus, MemoryType, VECTOR_DIMENSIONS
+from clara.db.models import VECTOR_DIMENSIONS, Memory, MemoryStatus, MemoryType
 from clara.extraction.extractor import ExtractedFact
 from clara.memory.belief import BeliefMemory, SourceType
 from clara.memory.event import EventStore
@@ -171,10 +171,7 @@ def _is_conflicting(fact: ExtractedFact, candidate: ScoredMemory) -> bool:
         return True
 
     # Direct contradiction between competing positive beliefs.
-    if not candidate_negation and not fact.is_negation and different_object:
-        return True
-
-    return False
+    return not candidate_negation and not fact.is_negation and different_object
 
 
 def _same_belief(fact: ExtractedFact, candidate: ScoredMemory) -> bool:
@@ -216,9 +213,7 @@ def _domains_differ(fact: ExtractedFact, candidate: ScoredMemory) -> bool:
     ).strip().lower()
 
     # Both have domains and they differ → domain-scoped retention
-    if fact_domain and candidate_domain and fact_domain != candidate_domain:
-        return True
-    return False
+    return bool(fact_domain and candidate_domain and fact_domain != candidate_domain)
 
 
 def _map_source_type(source_type_str: str) -> SourceType:
@@ -606,7 +601,7 @@ class MemoryUpdateEngine:
             else:
                 entity_type = "entity"
                 properties = {fact.relation: fact.object}
-            return await self._world_model.upsert(
+            record = await self._world_model.upsert(
                 entity_type=entity_type,
                 name=fact.subject,
                 properties=properties,
@@ -617,6 +612,21 @@ class MemoryUpdateEngine:
                 raw_text=fact.raw_text,
                 embedding=embedding,
             )
+            # The store always writes the triple as (name, "is_a", entity_type).
+            # For a non-identity fact ("payments cluster has 6 nodes") that would
+            # lose the real relation/object that retrieval and context rendering
+            # read, so restore the fact's own triple. Reassign the dict so the
+            # JSON column registers as changed.
+            content = dict(record.content) if isinstance(record.content, dict) else {}
+            if (
+                content.get("relation") != fact.relation
+                or content.get("object") != fact.object
+            ):
+                content["subject"] = fact.subject
+                content["relation"] = fact.relation
+                content["object"] = fact.object
+                record.content = content
+            return record
 
         if memory_type == MemoryType.event:
             return await self._event_store.create(

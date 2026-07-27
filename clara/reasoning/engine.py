@@ -10,11 +10,13 @@ import asyncio
 import inspect
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Awaitable, Callable, Sequence, TypeAlias
+from typing import TypeAlias
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clara.core.ollama import ensure_model as _ensure_ollama_model
 from clara.extraction.extractor import (
     DEFAULT_ANTHROPIC_MODEL,
     DEFAULT_OLLAMA_BASE_URL,
@@ -30,19 +32,18 @@ from clara.extraction.extractor import (
     _anthropic,
     _openai,
 )
+from clara.extraction.heuristic import HeuristicExtractor
+from clara.reasoning.context import ContextAssembler
 from clara.retrieval.cache import MemoryCache
 from clara.retrieval.embeddings import EmbeddingEngine
 from clara.retrieval.engine import RetrievalEngine, ScoredMemory
-from clara.reasoning.context import ContextAssembler
 from clara.update.engine import MemoryUpdateEngine, UpdateResult
 
 logger = logging.getLogger(__name__)
 try:
     import ollama as _ollama_lib  # type: ignore[import-untyped]
 except ImportError:
-    _ollama_lib: Any = None  # type: ignore[assignment]
-
-from clara.core.ollama import ensure_model as _ensure_ollama_model
+    _ollama_lib = None  # type: ignore[assignment]
 
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "You are a helpful assistant. Use the provided memory context when it is relevant. "
@@ -75,7 +76,7 @@ class ReasoningEngine:
         self,
         session: AsyncSession,
         embedding_engine: EmbeddingEngine,
-        extractor: FactExtractor,
+        extractor: FactExtractor | HeuristicExtractor,
         *,
         llm_provider: str = "openai",
         llm_model: str | None = None,
@@ -218,7 +219,7 @@ class ReasoningEngine:
             )
         api_key = os.environ.get(ENV_OPENAI_KEY)
         if not api_key:
-            raise EnvironmentError(
+            raise OSError(
                 f"Environment variable {ENV_OPENAI_KEY!r} is not set."
             )
 
@@ -244,7 +245,7 @@ class ReasoningEngine:
             )
         api_key = os.environ.get(ENV_ANTHROPIC_KEY)
         if not api_key:
-            raise EnvironmentError(
+            raise OSError(
                 f"Environment variable {ENV_ANTHROPIC_KEY!r} is not set."
             )
 

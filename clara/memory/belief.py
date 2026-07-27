@@ -13,15 +13,15 @@ from __future__ import annotations
 import enum
 import math
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any
 
-from sqlalchemy import select, and_
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.graph import project as graph_project
-
 
 # ---------------------------------------------------------------------------
 # Source weights (from CONTEXT.md)
@@ -340,7 +340,8 @@ class BeliefMemory:
 
         record.confidence = new_confidence
         if embedding is not None:
-            record.embedding = embedding
+            # hybrid_property setter; mypy reads the getter as a plain method.
+            record.embedding = embedding  # type: ignore[method-assign]
         record.updated_at = now
         record.metadata_ = meta
 

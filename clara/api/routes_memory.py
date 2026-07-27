@@ -8,7 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clara.api.dependencies import get_agent, get_current_user, get_session, resolve_user_scope
+from clara.agent import ClaraMemory
+from clara.api.dependencies import (
+    get_agent,
+    get_current_user,
+    get_session,
+    resolve_user_scope,
+)
 from clara.db.models import Memory, MemoryStatus, MemoryType
 from clara.memory.belief import BeliefMemory
 from clara.retrieval.engine import RetrievalResult, ScoredMemory
@@ -55,7 +61,7 @@ async def search(
     top_k: int = Query(8, ge=1, le=100),
     user_id: str | None = None,
     current_user: str | None = Depends(get_current_user),
-    agent=Depends(get_agent),
+    agent: ClaraMemory = Depends(get_agent),
 ) -> dict[str, object]:
     effective_user_id = resolve_user_scope(
         requested_user_id=user_id,

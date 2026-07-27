@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import secrets
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,7 +22,7 @@ _UNAUTHENTICATED = {"WWW-Authenticate": "Bearer"}
 
 
 def get_agent(request: Request) -> ClaraMemory:
-    agent = getattr(request.app.state, "agent", None)
+    agent: ClaraMemory | None = getattr(request.app.state, "agent", None)
     if agent is None:
         raise HTTPException(status_code=500, detail="CLARA agent is not initialized.")
     return agent
@@ -100,5 +100,8 @@ def resolve_user_scope(
     if current_user is None:
         return requested_user_id
     if requested_user_id is not None and requested_user_id != current_user:
-        raise HTTPException(status_code=403, detail="Authenticated user does not match requested user_id.")
+        raise HTTPException(
+            status_code=403,
+            detail="Authenticated user does not match requested user_id.",
+        )
     return current_user
