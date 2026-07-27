@@ -1213,12 +1213,29 @@ def _make_output_lossy() -> None:
     Mirrors _make_stdout_lossy in clara/fastpath/context.py, which fixed the
     same class of bug on the session-start path. stderr is reconfigured too:
     that is where the error text above was written.
+
+    Encoding matters as much as the error handler. A pipe gets the *locale*
+    encoding, so `clara context | something` emitted cp1252 on Windows and the
+    em dash went out as byte 0x97 -- not valid UTF-8, so a caller decoding it
+    as UTF-8 failed. Captured output goes to a machine and is written as UTF-8;
+    an interactive console keeps its own encoding so a legacy terminal still
+    renders readable text.
     """
     for stream in (sys.stdout, sys.stderr):
         # Not every stream is reconfigurable (a pipe, pytest's capture object);
         # that is fine, it just means there is nothing to harden here.
+        # An explicit PYTHONIOENCODING is a deliberate instruction and is left
+        # alone; only the locale-inferred encoding is overridden.
+        piped = False
         with contextlib.suppress(AttributeError, ValueError, OSError):
-            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+            piped = not stream.isatty() and not os.environ.get("PYTHONIOENCODING")
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            if piped:
+                stream.reconfigure(  # type: ignore[union-attr]
+                    encoding="utf-8", errors="replace"
+                )
+            else:
+                stream.reconfigure(errors="replace")  # type: ignore[union-attr]
 
 
 def main(argv: list[str] | None = None) -> None:

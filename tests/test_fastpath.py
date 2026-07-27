@@ -26,10 +26,16 @@ def _clean_env(tmp_path) -> dict[str, str]:
 
 
 def _run_context(cwd, env) -> subprocess.CompletedProcess[str]:
+    # encoding="utf-8" explicitly, not the platform default. Captured output is
+    # UTF-8 by contract (see tests/test_output_encoding.py); decoding it with
+    # the locale's code page turned the em dash into a replacement character on
+    # Windows. That previously *passed*, because the hook was emitting cp1252
+    # and the test was reading cp1252 -- both wrong, agreeing with each other.
     return subprocess.run(
         [sys.executable, "-m", "clara.fastpath.context", "--cwd", str(cwd)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=60,
         env=env,
     )

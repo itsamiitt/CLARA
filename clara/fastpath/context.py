@@ -373,12 +373,32 @@ def _make_stdout_lossy() -> None:
 
     Replacing the offending characters degrades one glyph; raising loses the
     entire memory block.
+
+    Encoding matters as much as the error handler. When stdout is a pipe --
+    which is exactly how a host captures a hook -- Python picks the *locale*
+    encoding, so on a Windows machine this block went out as cp1252 and the em
+    dash became byte 0x97. Verified: the SessionStart payload was not valid
+    UTF-8, so a host decoding it as UTF-8 got a decode error or a replacement
+    glyph in the injected memory. Captured output is for a machine and is
+    written as UTF-8; a real console keeps its own encoding, so a legacy
+    terminal still shows readable text rather than mojibake.
     """
     # noqa: SIM105 — contextlib.suppress would read better, but contextlib is
     # not on this package's allowed-import list and widening that list for a
     # style rule is the wrong trade on the session-start path.
+    # An explicit PYTHONIOENCODING is a deliberate instruction and is left
+    # alone; only the encoding Python inferred from the locale is overridden.
     try:  # noqa: SIM105
-        sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
+        piped = not sys.stdout.isatty() and not os.environ.get("PYTHONIOENCODING")
+    except (AttributeError, ValueError, OSError):
+        piped = False
+    try:  # noqa: SIM105
+        if piped:
+            sys.stdout.reconfigure(  # type: ignore[union-attr]
+                encoding="utf-8", errors="replace"
+            )
+        else:
+            sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
     except (AttributeError, ValueError, OSError):
         pass
 
