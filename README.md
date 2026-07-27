@@ -95,7 +95,7 @@ than not starting.
 
 ### 3. During the session (MCP tools)
 
-The plugin ships an MCP server exposing 18 tools. The agent calls
+The plugin ships an MCP server exposing 21 tools. The agent calls
 `memory_search` when it needs prior context and `memory_save` when it learns
 something durable. Two more hooks run alongside: `PostToolUse(Read)` annotates
 reads of quarantined documents, and `Stop` offers a one-line nudge when a plan
@@ -248,6 +248,8 @@ too.
 |---|---|---|
 | "installing in the background" on every session | The build is failing partway | `/clara:doctor` — it prints the tail of the install log |
 | `memory` MCP server unavailable | First session, or the build is still running | Start a new session; it resolves itself |
+| `1 error during load` right after installing | Expected on a first install. `/reload-plugins` tries to start the memory server while the two-minute build is still running, so the binary it points at does not exist yet | Nothing. Start a new session — the binary is there by then. `/clara:doctor` confirms it (`[ok] shim clara-mcp: present`) |
+| Memory tools missing after installing mid-session | The MCP server attaches at session start, so a plugin installed during a session has no server until the next one | Start a new session |
 | `clara: command not found` | Expected — a plugin install does not put the CLI on `PATH` | Use `/clara:doctor`, or the full path `~/.clara/plugin/shim/clara` |
 | Memory block is empty | Nothing saved yet, or you are in a different project | `/clara:memories` to check; stores are per-project when a `.clara/` exists |
 | Nothing at all happens | The plugin's hooks are not firing | `/plugin` to confirm it is enabled, then start a new session |

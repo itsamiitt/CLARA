@@ -289,3 +289,45 @@ class TestReadmeMechanismClaims:
         readme = self._readme()
         assert "not been measured" in readme or "has not been benchmarked" in readme
         assert "does not make the model smarter" in readme
+
+
+class TestToolCountIsConsistent:
+    """Every stated tool count must match the real tool surface.
+
+    The README said "18 tools" in one place and "21 MCP tools" in two others
+    while the server actually registered 21. A number that is wrong in one
+    paragraph and right in the next is worse than no number: a reader who
+    checks the first one concludes the docs are stale and stops trusting the
+    rest.
+    """
+
+    def _expected(self) -> int:
+        import re
+
+        source = (_ROOT / "tests" / "test_mcp_server.py").read_text("utf-8")
+        block = re.search(r"EXPECTED_TOOLS\s*=\s*\{(.*?)\n\}", source, re.S)
+        assert block, "EXPECTED_TOOLS not found — this test needs updating"
+        return len(re.findall(r'"[a-z_]+"', block.group(1)))
+
+    def test_every_count_in_the_readme_matches(self) -> None:
+        import re
+
+        expected = self._expected()
+        readme = (_ROOT / "README.md").read_text("utf-8")
+        # Any "<n> ... tools" claim, however it is phrased.
+        claims = re.findall(r"(\d+)\s+(?:MCP\s+)?tools\b", readme)
+        assert claims, "no tool count found in README"
+        wrong = sorted({c for c in claims if int(c) != expected})
+        assert not wrong, (
+            f"README claims {wrong} tools; the server registers {expected}"
+        )
+
+    def test_the_count_matches_the_registered_tools(self) -> None:
+        import re
+
+        source = (_ROOT / "clara" / "integrations" / "mcp_server.py").read_text("utf-8")
+        registered = re.findall(r"@server\.tool\(\)\s*\n\s*async def (\w+)", source)
+        assert len(registered) == self._expected(), (
+            f"{len(registered)} tools registered, EXPECTED_TOOLS lists "
+            f"{self._expected()}"
+        )
