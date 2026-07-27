@@ -514,3 +514,31 @@ class TestMcpServerUsesClaudeProjectDir:
         assert source.index("list_roots") < source.index("CLAUDE_PROJECT_DIR")
         assert source.index("session-cwd") < source.index("CLAUDE_PROJECT_DIR")
         assert source.index("CLAUDE_PROJECT_DIR") < source.index("os.getcwd()")
+
+
+class TestVersionCoherence:
+    """plugin.json and pyproject must always carry the same version.
+
+    Claude Code keys the plugin's install cache on plugin.json's version
+    (cache/clara-marketplace/clara/<version>). Twenty-five commits shipped
+    while the version string sat at 0.2.0, which left a user's "update"
+    with nothing that looked new to install. A release is a version bump in
+    two files that must never disagree.
+    """
+
+    def test_plugin_and_package_versions_match(self) -> None:
+        import json
+        import re
+
+        plugin = json.loads(
+            (_ROOT / ".claude-plugin" / "plugin.json").read_text("utf-8")
+        )["version"]
+        pyproject = re.search(
+            r'^version = "([^"]+)"',
+            (_ROOT / "pyproject.toml").read_text("utf-8"),
+            re.M,
+        ).group(1)
+        assert plugin == pyproject, (
+            f"plugin.json says {plugin}, pyproject.toml says {pyproject} — "
+            "bump them together or the marketplace ships a stale cache key"
+        )
