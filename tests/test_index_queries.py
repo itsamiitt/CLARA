@@ -149,3 +149,90 @@ class TestRetiredEdgesAreExcluded:
 
         assert "pkg.b" not in names(queries.dependencies(graph, REPO, "pkg.a", depth=2))
         assert "pkg.a" not in names(queries.impact(graph, REPO, "pkg.b", depth=2))
+
+
+class TestEntrypointsAreNotDeadCode:
+    """"Nothing imports it" is not the same as "nothing runs it".
+
+    A CLI main, a `__main__` guard and every pytest module are legitimately
+    unreferenced. Before this filter CLARA's own tree reported 69 unused
+    modules, none of them actually unused; with it, 0 — and a genuinely
+    orphaned module is still found.
+    """
+
+    @staticmethod
+    def _project(tmp_path, *, scripts: str = "", testpaths: str = "") -> object:
+        root = tmp_path / "proj"
+        (root / "pkg").mkdir(parents=True)
+        (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "pkg" / "lib.py").write_text("import os\n", encoding="utf-8")
+        (root / "pkg" / "cli.py").write_text("from pkg import lib\n", encoding="utf-8")
+        (root / "pkg" / "runner.py").write_text(
+            'def go():\n    pass\n\n\nif __name__ == "__main__":\n    go()\n',
+            encoding="utf-8",
+        )
+        (root / "pkg" / "orphan.py").write_text("def nobody():\n    pass\n",
+                                                encoding="utf-8")
+        (root / "tests").mkdir()
+        (root / "tests" / "test_thing.py").write_text("def test_x():\n    pass\n",
+                                                      encoding="utf-8")
+        manifest = "[project]\nname = 'p'\n"
+        if scripts:
+            manifest += f"\n[project.scripts]\n{scripts}\n"
+        if testpaths:
+            manifest += f"\n[tool.pytest.ini_options]\ntestpaths = {testpaths}\n"
+        (root / "pyproject.toml").write_text(manifest, encoding="utf-8")
+        return root
+
+    def _unused(self, tmp_path, root):
+        conn = sqlite3.connect(tmp_path / "c.db")
+        ensure_schema(conn)
+        try:
+            indexer.index_repo(conn, REPO, root)
+            return queries.unused_modules(conn, REPO, repo_root=root)
+        finally:
+            conn.close()
+
+    def test_a_console_script_is_not_unused(self, tmp_path):
+        root = self._project(tmp_path, scripts='p = "pkg.cli:main"')
+        assert "pkg.cli" not in self._unused(tmp_path, root)
+
+    def test_a_main_guard_is_not_unused(self, tmp_path):
+        root = self._project(tmp_path)
+        assert "pkg.runner" not in self._unused(tmp_path, root), (
+            "a module with a __main__ guard is run, not imported"
+        )
+
+    def test_pytest_testpaths_are_not_unused(self, tmp_path):
+        root = self._project(tmp_path, testpaths='["tests"]')
+        assert not [u for u in self._unused(tmp_path, root) if u.startswith("tests")]
+
+    def test_a_genuinely_orphaned_module_is_still_reported(self, tmp_path):
+        """The filter must not swallow the signal it exists to sharpen."""
+        root = self._project(tmp_path, scripts='p = "pkg.cli:main"',
+                             testpaths='["tests"]')
+        assert "pkg.orphan" in self._unused(tmp_path, root)
+
+    def test_without_a_manifest_nothing_is_excluded(self, tmp_path):
+        """No declaration means no evidence; report the raw list rather than
+        guessing which modules are entry points."""
+        root = self._project(tmp_path)
+        (root / "pyproject.toml").unlink()
+        assert queries.declared_entrypoints(root) == set()
+        assert queries.test_roots(root) == ()
+
+    def test_a_malformed_manifest_is_survived(self, tmp_path):
+        root = self._project(tmp_path)
+        (root / "pyproject.toml").write_text("[project\nbroken", encoding="utf-8")
+        assert queries.declared_entrypoints(root) == set()
+
+    def test_reading_the_real_manifest(self):
+        """CLARA's own declarations, as evidence the parsing is right."""
+        from pathlib import Path as _Path
+
+        root = _Path(__file__).parents[1]
+        assert queries.declared_entrypoints(root) == {
+            "clara.cli",
+            "clara.integrations.mcp_server",
+        }
+        assert queries.test_roots(root) == ("tests",)

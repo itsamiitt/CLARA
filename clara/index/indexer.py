@@ -93,6 +93,7 @@ def _upsert_node(
     file_path: str | None,
     lang: str | None,
     span: dict[str, int] | None,
+    attributes: dict[str, object] | None = None,
 ) -> str:
     """Insert or refresh one node; returns its id.
 
@@ -106,16 +107,18 @@ def _upsert_node(
         "INSERT INTO code_nodes "
         "(node_id, repo_id, kind, qualified_name, file_path, lang, span, "
         " attributes, status, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, '{}', 'active', ?) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?) "
         "ON CONFLICT(repo_id, kind, qualified_name) DO UPDATE SET "
         "  file_path = coalesce(excluded.file_path, code_nodes.file_path), "
         "  lang = coalesce(excluded.lang, code_nodes.lang), "
         "  span = coalesce(excluded.span, code_nodes.span), "
+        "  attributes = excluded.attributes, "
         "  status = 'active', "
         "  updated_at = excluded.updated_at",
         (
             identifier, repo_id, kind, qualified_name, file_path, lang,
-            json.dumps(span) if span else None, _now(),
+            json.dumps(span) if span else None,
+            json.dumps(attributes or {}), _now(),
         ),
     )
     return identifier
@@ -260,6 +263,7 @@ def index_file(
     module_node = _upsert_node(
         conn, repo_id, kind="module", qualified_name=module_name,
         file_path=rel_path, lang="python", span=None,
+        attributes={"entrypoint": True} if parsed.has_main_guard else {},
     )
     result.nodes_written += 1
 

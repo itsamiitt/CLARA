@@ -15,8 +15,10 @@ a way to return the whole repo.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 # Relations that mean "A needs B" for dependency and dead-code purposes.
 DEPENDENCY_RELATIONS = ("imports",)
@@ -133,30 +135,112 @@ def impact(
     )
 
 
-def unused_modules(
-    conn: sqlite3.Connection, repo_id: str, *, limit: int = 100
-) -> list[str]:
-    """Modules in this repo that nothing imports.
+def declared_entrypoints(repo_root: Path) -> set[str]:
+    """Modules the project itself declares as entry points.
 
-    Honest about what this is: a module with zero inbound ``imports`` edges.
-    That is **not** the same as dead code. Entry points -- a CLI main, a
-    pytest module, a plugin loaded by name -- are legitimately unreferenced,
-    and the plan's design has entrypoint facts coming from Project Memory to
-    filter them out. That part is not built, so callers must treat this as a
-    list to look at rather than a list to delete.
+    Evidence, not heuristics. Two sources, both stated by the repo:
+
+    * ``[project.scripts]`` in pyproject.toml -- ``clara = "clara.cli:main"``
+      means clara.cli is run, not imported;
+    * ``[tool.pytest.ini_options] testpaths`` -- pytest collects those trees by
+      filename, so nothing imports them either.
+
+    A project that declares neither gets an empty set and the unfiltered list,
+    which is the honest answer rather than a guess.
+    """
+    manifest = repo_root / "pyproject.toml"
+    try:
+        raw = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+        return set()
+    try:
+        data = tomllib.loads(raw)
+    except ValueError:
+        return set()
+
+    entrypoints: set[str] = set()
+    scripts = data.get("project", {}).get("scripts", {})
+    if isinstance(scripts, dict):
+        for target in scripts.values():
+            if isinstance(target, str) and ":" in target:
+                entrypoints.add(target.split(":", 1)[0].strip())
+    return entrypoints
+
+
+def test_roots(repo_root: Path) -> tuple[str, ...]:
+    """Dotted prefixes pytest collects, from ``testpaths``."""
+    manifest = repo_root / "pyproject.toml"
+    try:
+        import tomllib
+
+        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ModuleNotFoundError):
+        return ()
+    paths = data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get(
+        "testpaths", []
+    )
+    if isinstance(paths, str):
+        paths = [paths]
+    return tuple(
+        str(p).strip("/").replace("/", ".") for p in paths if isinstance(p, str)
+    )
+
+
+def unused_modules(
+    conn: sqlite3.Connection,
+    repo_id: str,
+    *,
+    repo_root: Path | None = None,
+    limit: int = 100,
+) -> list[str]:
+    """Modules in this repo that nothing imports and nothing runs.
+
+    "Nothing imports it" alone is not a useful signal: a CLI main, a module
+    with an ``if __name__ == "__main__"`` block, and every pytest module are
+    legitimately unreferenced. Those are excluded using what the project
+    declares about itself -- console scripts and testpaths from pyproject.toml,
+    plus the main-guard recorded at index time -- so what remains is worth
+    looking at.
+
+    Still not a delete list: a module imported only by name (a plugin loaded
+    from config, an entry point declared elsewhere) cannot be seen by a static
+    import graph, and this says so rather than pretending otherwise.
     """
     rows = conn.execute(
-        "SELECT n.qualified_name FROM code_nodes n "
+        "SELECT n.qualified_name, n.attributes FROM code_nodes n "
         "WHERE n.repo_id = ? AND n.status = 'active' AND n.kind = 'module' "
         "AND n.file_path IS NOT NULL "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM code_edges e "
         "  WHERE e.repo_id = n.repo_id AND e.dst_id = n.node_id "
         "  AND e.invalid_at IS NULL AND e.relation = 'imports'"
-        ") ORDER BY n.qualified_name LIMIT ?",
-        (repo_id, limit),
+        ") ORDER BY n.qualified_name",
+        (repo_id,),
     ).fetchall()
-    return [r[0] for r in rows]
+
+    declared = declared_entrypoints(repo_root) if repo_root else set()
+    roots = test_roots(repo_root) if repo_root else ()
+
+    found: list[str] = []
+    for name, attributes in rows:
+        if name in declared:
+            continue
+        if roots and any(name == r or name.startswith(f"{r}.") for r in roots):
+            continue
+        try:
+            attrs = json.loads(attributes or "{}")
+        except ValueError:
+            attrs = {}
+        if attrs.get("entrypoint"):
+            continue
+        found.append(name)
+        if len(found) >= limit:
+            break
+    return found
 
 
 def find_cycles(

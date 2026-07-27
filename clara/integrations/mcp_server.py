@@ -419,7 +419,10 @@ def build_server() -> Any:
         or loop of modules that import each other, usually survivable only
         because one side defers its import.
         """
+        from pathlib import Path as _Path
+
         from clara.index import queries
+        from clara.store import git_toplevel as _git_toplevel
 
         anchor = repo or await _session_anchor()
         conn, repo_key = await asyncio.to_thread(_open_index, anchor)
@@ -427,14 +430,18 @@ def build_server() -> Any:
             if not _index_populated(conn, repo_key):
                 return {"indexed": False,
                         "hint": "run `clara index` in this repo first"}
+            root = _Path(_git_toplevel(anchor) or anchor)
             cycles = queries.find_cycles(conn, repo_key)
-            unused = queries.unused_modules(conn, repo_key)
+            unused = queries.unused_modules(conn, repo_key, repo_root=root)
             return {
                 "indexed": True,
                 "cycles": [" -> ".join(c) for c in cycles],
                 "unused_modules": unused,
-                "note": "unused = no inbound import; entry points and tests "
-                        "appear here legitimately",
+                "note": "unused = nothing imports it, after excluding what the "
+                        "project declares it runs (console scripts, pytest "
+                        "testpaths, __main__ guards). A module imported only by "
+                        "name cannot be seen statically, so review before "
+                        "deleting.",
             }
         finally:
             conn.close()

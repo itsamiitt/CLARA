@@ -53,6 +53,9 @@ class SourceImport:
 class ParsedModule:
     rel_path: str
     is_package: bool = False
+    # `if __name__ == "__main__"` — the module is run directly, so nothing
+    # importing it is expected and it must not count as unreferenced.
+    has_main_guard: bool = False
     nodes: list[SourceNode] = field(default_factory=list)
     imports: list[SourceImport] = field(default_factory=list)
     syntax_error: str | None = None
@@ -104,11 +107,26 @@ def parse_module(rel_path: str, source: str) -> ParsedModule:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             _collect_import(node, parsed, deferred=id(node) not in module_level)
 
+    parsed.has_main_guard = any(
+        _is_main_guard(node) for node in tree.body if isinstance(node, ast.If)
+    )
+
     # Definitions keep the depth rule: methods are worth naming, closures are
     # not, and a nested helper's qualified name is noise.
     for statement in tree.body:
         _collect_defs(statement, module_name, parsed, depth=0)
     return parsed
+
+
+def _is_main_guard(node: ast.If) -> bool:
+    """True for `if __name__ == "__main__":` at module level."""
+    test = node.test
+    if not isinstance(test, ast.Compare) or len(test.comparators) != 1:
+        return False
+    left, right = test.left, test.comparators[0]
+    if not (isinstance(left, ast.Name) and left.id == "__name__"):
+        return False
+    return isinstance(right, ast.Constant) and right.value == "__main__"
 
 
 def _collect_defs(node: ast.AST, prefix: str, parsed: ParsedModule, *, depth: int) -> None:
