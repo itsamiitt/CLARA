@@ -35,6 +35,8 @@ EXPECTED_TOOLS = {
     # configure it for users who never open a terminal
     "statusline_install",
     "statusline_status",
+    # project (1) — what the repo *is*, read from its manifests
+    "project_profile",
 }
 
 
@@ -57,7 +59,7 @@ def test_build_server_registers_all_tools():
         f"tool surface changed: +{names - EXPECTED_TOOLS} -{EXPECTED_TOOLS - names} "
         "— update EXPECTED_TOOLS, README, and SKILL.md together"
     )
-    assert len(EXPECTED_TOOLS) == 17
+    assert len(EXPECTED_TOOLS) == 18
 
 
 def test_docs_status_respects_kill_switch(monkeypatch):

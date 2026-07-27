@@ -405,6 +405,29 @@ def build_server() -> Any:
         return await memory.stats()
 
     @server.tool()
+    async def project_profile(repo: str | None = None) -> dict[str, Any]:
+        """Describe what this project *is*: language, package manager,
+        frameworks, build/test tooling, and whether it is a monorepo.
+
+        Read straight from the repository's manifests, so it is current even
+        for a project CLARA has never seen before and needs no memories to
+        have been saved. Every claim carries the file it came from; anything
+        the manifests do not state is simply absent rather than guessed.
+
+        Call this instead of shelling out to inspect package.json/pyproject.
+        """
+        from clara.project import detect_project
+
+        root = await _repo_root(repo)
+        profile = await asyncio.to_thread(detect_project, root)
+        summary = profile.summary()
+        summary["evidence"] = [
+            {"category": f.category, "value": f.value, "source": f.evidence}
+            for f in profile.facts
+        ]
+        return summary
+
+    @server.tool()
     async def statusline_install(
         enable: bool = True,
         refresh_interval: int = 5,

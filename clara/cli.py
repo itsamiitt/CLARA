@@ -707,6 +707,39 @@ async def _cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_project(args: argparse.Namespace) -> int:
+    """Print what CLARA can tell about this project from its manifests."""
+    from clara.project import detect_project
+    from clara.store import git_toplevel
+
+    root = args.path or git_toplevel(str(Path.cwd())) or str(Path.cwd())
+    profile = detect_project(root)
+    if args.json:
+        summary = profile.summary()
+        summary["evidence"] = [
+            {"category": f.category, "value": f.value, "source": f.evidence}
+            for f in profile.facts
+        ]
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    print(f"project: {profile.name or '(unnamed)'}")
+    print(f"  root: {profile.root}")
+    if profile.is_monorepo:
+        print(f"  monorepo workspaces: {', '.join(profile.workspaces)}")
+    detected = profile.summary()["detected"]
+    if not detected:
+        print("  nothing detected — no recognised manifest at this path")
+        return 0
+    for category in sorted(detected):
+        print(f"  {category.replace('_', ' ')}: {', '.join(detected[category])}")
+    if args.evidence:
+        print("\nevidence:")
+        for fact in profile.facts:
+            print(f"  {fact.category}={fact.value}  <- {fact.evidence}")
+    return 0
+
+
 async def _cmd_uninstall(args: argparse.Namespace) -> int:
     """Remove plugin runtime state; keep memories unless --purge-memories."""
     import os as _os
@@ -1086,6 +1119,14 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("mcp", help="Run the MCP stdio server (same as clara-mcp).")
 
+    p_project = sub.add_parser(
+        "project", help="Show what this project is (language, frameworks, tooling)."
+    )
+    p_project.add_argument("path", nargs="?", help="Repo root (default: current repo).")
+    p_project.add_argument("--json", action="store_true", help="Machine-readable output.")
+    p_project.add_argument("--evidence", action="store_true",
+                           help="Show the file each fact came from.")
+
     p_uninstall = sub.add_parser(
         "uninstall",
         help="Remove CLARA's private venv, shim, and install log (keeps memories).",
@@ -1123,6 +1164,7 @@ def main(argv: list[str] | None = None) -> None:
         "restore": _cmd_restore,
         "statusline": _cmd_statusline,
         "sync": _cmd_sync,
+        "project": _cmd_project,
         "uninstall": _cmd_uninstall,
     }[args.command]
     try:

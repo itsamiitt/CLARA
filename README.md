@@ -11,7 +11,7 @@ full pipeline adds LLM fact extraction, embeddings, and vector retrieval on
 top of the same store.
 
 CLARA doubles as a **Claude Code plugin** — session-start memory + knowledge-map
-injection, 15 MCP tools, a knowledge graph, and a document-lifecycle curator —
+injection, 18 MCP tools, a knowledge graph, and a document-lifecycle curator —
 and as a **standalone CLI + MCP server** for any agent (Codex, Gemini, Cursor,
 or your own). Both use the same single SQLite store.
 
@@ -143,7 +143,7 @@ clara-mcp recall --top-k 3   # prints your memory context block (empty at first)
 
 # Usage
 
-## The 15 MCP tools
+## The 18 MCP tools
 
 Once wired, your agent's model calls these directly — **CLARA is storage +
 ranked retrieval; the host model is the intelligence** (that is why no API key
@@ -157,6 +157,8 @@ is needed).
   `memory_link`.
 - **Status bar (2):** `statusline_install`, `statusline_status` — used by
   `/clara:statusline` to put the live memory counter in your status bar.
+- **Project (1):** `project_profile` — language, package manager, frameworks,
+  build/test tooling and monorepo layout, read from the repo's own manifests.
 
 ## Slash commands (plugin)
 
@@ -214,6 +216,7 @@ clara import FILE [--on-conflict ...]   load a clara-export file (dedup-aware)
 clara backup [--reason R]               rotated store snapshot (VACUUM INTO)
 clara restore FILE [--force]            replace the store with a snapshot
 clara sync [export|import|status]       bridge to Claude Code native memory
+clara project [PATH] [--evidence]       what this project is (language, frameworks, tooling)
 clara statusline                        one-line summary for a statusLine command
 clara statusline --install              add the live memory counter to your status bar
                                         (in Claude Code, use /clara:statusline instead)
