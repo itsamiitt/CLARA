@@ -34,7 +34,11 @@ DEFAULT_REFRESH_INTERVAL = 5
 
 def settings_path() -> Path:
     """The user settings file Claude Code reads."""
-    return Path.home() / ".claude" / "settings.json"
+    # Honour CLAUDE_CONFIG_DIR: writing the statusLine into ~/.claude when
+    # Claude Code is reading elsewhere installs a status bar that never appears.
+    from clara.bridge.paths import claude_config_dir
+
+    return claude_config_dir() / "settings.json"
 
 
 def statusline_command() -> str:

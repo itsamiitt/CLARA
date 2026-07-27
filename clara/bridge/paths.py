@@ -8,7 +8,8 @@ outside ``[A-Za-z0-9-]`` replaced by ``-`` (verified against live
 project path is the git toplevel when inside a repo, else the anchor
 directory — mirroring "keyed by git repo, worktrees share".
 
-Respects ``autoMemoryDirectory`` from ``~/.claude/settings.json`` and the
+Respects ``autoMemoryDirectory`` from the Claude config dir
+(``$CLAUDE_CONFIG_DIR`` or ``~/.claude``) and the
 disable switches (``autoMemoryEnabled: false`` /
 ``CLAUDE_CODE_DISABLE_AUTO_MEMORY=1``): when auto memory is off, export
 targets nothing.
@@ -42,8 +43,25 @@ def encode_project_dir(project_path: str) -> str:
     return _ENCODE_RE.sub("-", project_path)
 
 
+def claude_config_dir() -> Path:
+    """Claude Code's config directory: ``$CLAUDE_CONFIG_DIR`` or ``~/.claude``.
+
+    Claude Code lets users relocate it, and its own changelog records
+    "Respect CLAUDE_CONFIG_DIR everywhere" plus later fixes for spots that did
+    not. CLARA hardcoded ``~/.claude``, so with the variable set every native
+    file went somewhere Claude Code never reads: `clara sync` reported
+    "MEMORY.md updated" while writing to a directory nothing consumes, and the
+    settings lookup (autoMemoryDirectory, autoMemoryEnabled) silently read
+    defaults from the wrong file.
+    """
+    override = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if override:
+        return Path(os.path.expanduser(override))
+    return Path.home() / ".claude"
+
+
 def _claude_settings() -> dict[str, Any]:
-    settings = Path.home() / ".claude" / "settings.json"
+    settings = claude_config_dir() / "settings.json"
     try:
         loaded = json.loads(settings.read_text(encoding="utf-8"))
         return loaded if isinstance(loaded, dict) else {}
@@ -71,8 +89,7 @@ def auto_memory_dir(anchor: str) -> Path | None:
         base = Path(os.path.expanduser(override))
         return base / encode_project_dir(project_root(anchor)) / "memory"
     return (
-        Path.home()
-        / ".claude"
+        claude_config_dir()
         / "projects"
         / encode_project_dir(project_root(anchor))
         / "memory"
@@ -96,6 +113,6 @@ def claude_md_paths(anchor: str) -> list[Path]:
         root / "CLAUDE.md",
         root / ".claude" / "CLAUDE.md",
         root / "CLAUDE.local.md",
-        Path.home() / ".claude" / "CLAUDE.md",
+        claude_config_dir() / "CLAUDE.md",
     ]
     return [p for p in candidates if p.is_file()]
