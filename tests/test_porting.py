@@ -246,3 +246,121 @@ class TestPreMigrationBackup:
         backup_before_migration(conn, str(db))
         conn.close()
         assert not backup_dir(db).exists()
+
+
+class TestParseTimestamp:
+    """`--on-conflict newest` compares parsed datetimes, never strings.
+
+    Timestamps in the wild mix the two ISO separators. A space (0x20) sorts
+    below "T" (0x54), so a lexical compare calls "2026-05-01T00:00:00" newer
+    than "2026-06-01 00:00:00" and keeps the OLDER row -- silent data loss on
+    exactly the operation a user runs to merge two stores. There was no test
+    for `newest` or for the parser at all.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["2026-06-01T12:00:00", "2026-06-01 12:00:00", "2026-06-01T12:00:00+00:00"],
+    )
+    def test_both_separators_parse(self, raw):
+        from clara.porting import _parse_ts
+
+        assert _parse_ts(raw) is not None
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", "not-a-date", "2026-13-45"])
+    def test_unparseable_is_none(self, raw):
+        from clara.porting import _parse_ts
+
+        assert _parse_ts(raw) is None
+
+    def test_space_form_beats_earlier_t_form(self):
+        """The exact ordering a lexical compare gets backwards.
+
+        The inversion needs the SAME date on both sides -- then the separator
+        at index 10 decides, and " " (0x20) < "T" (0x54). With different dates
+        the comparison is settled before the separator is reached, so a pair
+        like May-with-T vs June-with-space proves nothing.
+        """
+        from clara.porting import _parse_ts
+
+        earlier_t = "2026-06-01T09:00:00"
+        later_space = "2026-06-01 12:00:00"
+        assert later_space < earlier_t, (
+            "precondition: as strings the later time really does sort first"
+        )
+        parsed_earlier = _parse_ts(earlier_t)
+        parsed_later = _parse_ts(later_space)
+        assert parsed_earlier is not None and parsed_later is not None
+        assert parsed_later > parsed_earlier, "parsing must restore real order"
+
+
+class TestOnConflictNewest:
+    _MID = "61daad0731a041008a1afcace3f12afd"
+
+    def _export(self, updated_at: str, obj: str) -> list[str]:
+        header = {
+            "kind": "header", "format": 1, "schema_version": 8,
+            "exported_at": "2026-07-27T00:00:00+00:00", "source": "t",
+            "counts": {"memories": 1},
+        }
+        row = {
+            "kind": "memory", "memory_id": self._MID, "user_id": None,
+            "memory_type": "belief",
+            "content": {"subject": "user", "relation": "uses", "object": obj},
+            "confidence": 0.9, "status": "active", "decay_rate": 0.02,
+            "created_at": "2026-01-01 00:00:00", "updated_at": updated_at,
+            "metadata": {},
+        }
+        return [json.dumps(header), json.dumps(row)]
+
+    def _stored(self, db: str) -> str:
+        conn = sqlite3.connect(db)
+        try:
+            row = conn.execute("SELECT content FROM memories").fetchone()
+            return json.loads(row[0])["object"] if row else "EMPTY"
+        finally:
+            conn.close()
+
+    def test_later_space_form_replaces_earlier_t_form(self, tmp_path):
+        db = str(tmp_path / "c.db")
+        import_records(db, self._export("2026-06-01T09:00:00", "OldValue"))
+        assert self._stored(db) == "OldValue"
+
+        stats = import_records(
+            db, self._export("2026-06-01 12:00:00", "NewValue"), on_conflict="newest"
+        )
+        assert self._stored(db) == "NewValue", "the newer row lost to a string compare"
+        assert stats["conflicts_updated"] == 1
+
+    def test_earlier_row_never_clobbers_a_newer_one(self, tmp_path):
+        db = str(tmp_path / "c.db")
+        import_records(db, self._export("2026-06-01 12:00:00", "NewValue"))
+        stats = import_records(
+            db, self._export("2026-06-01T09:00:00", "OldValue"), on_conflict="newest"
+        )
+        assert self._stored(db) == "NewValue"
+        assert stats["skipped_id"] == 1
+
+    def test_unparseable_timestamp_keeps_the_existing_row(self, tmp_path):
+        """Ambiguity resolves toward not losing what is already stored."""
+        db = str(tmp_path / "c.db")
+        import_records(db, self._export("2026-06-01 12:00:00", "NewValue"))
+        import_records(
+            db, self._export("whenever", "Garbage"), on_conflict="newest"
+        )
+        assert self._stored(db) == "NewValue"
+
+    def test_skip_is_the_default(self, tmp_path):
+        db = str(tmp_path / "c.db")
+        import_records(db, self._export("2026-06-01T09:00:00", "OldValue"))
+        import_records(db, self._export("2026-06-01 12:00:00", "NewValue"))
+        assert self._stored(db) == "OldValue"
+
+    def test_dry_run_writes_nothing(self, tmp_path):
+        db = str(tmp_path / "c.db")
+        import_records(db, self._export("2026-06-01T09:00:00", "OldValue"))
+        import_records(
+            db, self._export("2026-06-01 12:00:00", "NewValue"),
+            on_conflict="force", dry_run=True,
+        )
+        assert self._stored(db) == "OldValue"
