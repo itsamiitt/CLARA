@@ -213,10 +213,14 @@ a block like this, which the model can see and you normally cannot:
 [KNOWLEDGE MAP]
 active work (T2): 3
 rule: treat quarantined/archived documents as historical record.
+
+[MEMORY PROTOCOL]
+CLARA memory tools are connected over MCP (memory_*). Use them in real time...
 ```
 
-On a brand-new store this is empty. That is correct — there is nothing to
-remember yet.
+On a brand-new store the memory section is empty — correct, nothing to
+remember yet — but the `[MEMORY PROTOCOL]` footer still appears: the first
+session is exactly when the model needs telling to start saving unprompted.
 
 **4. Save your first memory.** Either tell Claude something durable and let it
 call `memory_save`, or be explicit:
