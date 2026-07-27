@@ -293,6 +293,20 @@ if ($InstallWorker) {
                 try { Remove-Item $_.FullName -Recurse -Force -Confirm:$false } catch {}
             }
         }
+        # Second sweep, by shape rather than by name. Observed on a real
+        # install: six abandoned venvs totalling ~580 MB, each with a
+        # pyvenv.cfg whose `command =` line still named the venv-<hash> path it
+        # was built at, so something outside CLARA had renamed the directory
+        # (no rename exists in this repo). The name-based GC cannot reclaim
+        # those. Identify a venv by the file that defines one, and delete only
+        # what is provably not in use.
+        Get-ChildItem -Path $data -Directory | ForEach-Object {
+            if ($_.Name -like "venv-*") { return }      # handled above
+            if ($_.Name -in @("current", "shim", "pytools")) { return }
+            if ($_.FullName -eq $venv) { return }
+            if (-not (Test-Path (Join-Path $_.FullName "pyvenv.cfg"))) { return }
+            try { Remove-Item $_.FullName -Recurse -Force -Confirm:$false } catch {}
+        }
         Write-Output "=== clara install complete: $(Get-Date) ==="
     } else {
         $status = 1

@@ -167,6 +167,25 @@ if [ "${1:-}" = "--install-worker" ]; then
     ls -dt "$DATA"/venv-*/ 2>/dev/null | tail -n +3 | while IFS= read -r old_venv; do
       rm -rf "$old_venv"
     done
+    # Second sweep, by shape rather than by name. Observed on a real install:
+    # six abandoned venvs totalling ~580 MB, each with a pyvenv.cfg whose
+    # `command =` line still named the venv-<hash> path it was built at, so
+    # something outside CLARA had renamed the directory (no rename exists in
+    # this repo). The name-based GC above can never reclaim those. Identify a
+    # venv by the file that defines one, and delete only what is provably not
+    # in use: never the active venv, never the `current` pointer, and only
+    # directly under $DATA.
+    for stale in "$DATA"/*/; do
+      stale=${stale%/}
+      case "$stale" in
+        "$VENV"|"$DATA/current"|"$DATA/shim"|"$DATA/pytools") continue ;;
+      esac
+      [ -f "$stale/pyvenv.cfg" ] || continue
+      case "$(basename "$stale")" in
+        venv-*) continue ;;  # handled by the age-ordered GC above
+      esac
+      rm -rf "$stale"
+    done
     echo "=== clara install complete: $(date) ==="
   else
     status=1
