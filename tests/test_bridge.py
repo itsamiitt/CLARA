@@ -359,3 +359,99 @@ class TestHandEditedFenceGuidance:
         body = build_section_body([], time.time())
         assert "OUTSIDE this fence" in body
         assert "edits inside it are not" in body
+
+
+class TestUserLevelImportIsUnstamped:
+    """Facts from the user-level CLAUDE.md belong to the person, everywhere.
+
+    Every save is stamped with the repository it runs in, and sync runs in
+    whatever project the user happened to be standing in. For the global
+    CLAUDE.md that stamp is an accident: verified before the fix, a fact
+    imported from it rendered "[from another project]" in every other
+    repository. User-level imports now carry no stamp, which the locality
+    rule reads as local everywhere.
+    """
+
+    @pytest.mark.asyncio
+    async def test_global_claude_md_import_has_no_repo_stamp(
+        self, tmp_path, monkeypatch
+    ):
+        import subprocess as sp
+
+        from clara.bridge.importer import import_native
+        from clara.integrations.local_memory import LocalMemory
+
+        config = tmp_path / "cfg"
+        config.mkdir()
+        (config / "CLAUDE.md").write_text(
+            "the staging database is at db.staging.example.com\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+        monkeypatch.delenv("CLAUDE_CODE_DISABLE_AUTO_MEMORY", raising=False)
+        repo = tmp_path / "repoA"
+        repo.mkdir()
+        sp.run(["git", "init", "-q", str(repo)], capture_output=True)
+        monkeypatch.chdir(repo)
+
+        memory = await LocalMemory.create(str(tmp_path / "clara.db"))
+        try:
+            await import_native(memory, str(repo))
+            found = await memory.search("staging database")
+            assert found["total"] == 1
+            # The stamp lives in stored metadata; check the row directly.
+        finally:
+            await memory.close()
+
+        import json as _json
+        import sqlite3 as _sqlite3
+
+        conn = _sqlite3.connect(tmp_path / "clara.db")
+        try:
+            (metadata,) = conn.execute(
+                "SELECT metadata FROM memories"
+            ).fetchone()
+        finally:
+            conn.close()
+        stored = _json.loads(metadata or "{}")
+        assert stored.get("origin_file") == "native:CLAUDE.md"
+        assert "repo_id" not in stored, (
+            "a user-level fact must not inherit the sync directory's stamp"
+        )
+
+    @pytest.mark.asyncio
+    async def test_project_claude_md_import_keeps_its_stamp(
+        self, tmp_path, monkeypatch
+    ):
+        import json as _json
+        import sqlite3 as _sqlite3
+        import subprocess as sp
+
+        from clara.bridge.importer import import_native
+        from clara.integrations.local_memory import LocalMemory
+
+        config = tmp_path / "cfg"
+        config.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+        repo = tmp_path / "repoA"
+        repo.mkdir()
+        sp.run(["git", "init", "-q", str(repo)], capture_output=True)
+        (repo / "CLAUDE.md").write_text(
+            "auth service depends on redis\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(repo)
+
+        memory = await LocalMemory.create(str(tmp_path / "clara.db"))
+        try:
+            await import_native(memory, str(repo))
+        finally:
+            await memory.close()
+
+        conn = _sqlite3.connect(tmp_path / "clara.db")
+        try:
+            (metadata,) = conn.execute("SELECT metadata FROM memories").fetchone()
+        finally:
+            conn.close()
+        stored = _json.loads(metadata or "{}")
+        # A project file's facts ARE this project's: the stamp stays.
+        assert stored.get("repo_id"), "project CLAUDE.md facts keep their stamp"

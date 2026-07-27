@@ -96,7 +96,18 @@ async def import_file(
     *,
     origin_label: str,
     verbatim: bool = False,
+    user_level: bool = False,
 ) -> dict[str, int]:
+    """Import one native file's lines as memories.
+
+    *user_level* marks sources that belong to the person, not to any project
+    — the CLAUDE.md in the Claude config directory. Saves are stamped with
+    the repository sync happens to run in, which for a user-level source is
+    an accident of where the command was typed: verified, a fact imported
+    from the global CLAUDE.md rendered "[from another project]" in every
+    other repository. Those imports have their stamp removed so the locality
+    rule reads them as belonging everywhere.
+    """
     stats = {"lines": 0, "imported": 0, "skipped_dup": 0, "skipped_no_extract": 0}
     try:
         text = paths.long_path(path).read_text(encoding="utf-8")
@@ -115,6 +126,8 @@ async def import_file(
             "origin_file": origin_label,
             "origin_hash": origin_hash,
         }
+        if user_level:
+            provenance["repo_id"] = None  # None removes the key on stamping
         if facts:
             fact = facts[0]
             if fact.subject and fact.relation and fact.object:
@@ -158,6 +171,19 @@ async def _stamp_provenance(
 
     async with memory.session() as session:
         for key, value in provenance.items():
+            if value is None:
+                # A None value means "this key must not exist" — used to
+                # strip the repo stamp from user-level imports.
+                await session.execute(
+                    sa_text(
+                        "UPDATE memories SET metadata = json_remove("
+                        "coalesce(metadata, '{}'), :path), "
+                        "updated_at = updated_at "
+                        "WHERE memory_id = :mid"
+                    ),
+                    {"path": f"$.{key}", "mid": memory_id.replace("-", "")},
+                )
+                continue
             await session.execute(
                 sa_text(
                     "UPDATE memories SET metadata = json_set("
@@ -178,10 +204,14 @@ async def import_native(
 ) -> dict[str, Any]:
     """Import every native source for *anchor*'s project. Returns per-file stats."""
     results: dict[str, Any] = {}
+    # The user-level CLAUDE.md is the one source that belongs to the person,
+    # not the project; its facts must not inherit this repository's stamp.
+    user_claude_md = paths.claude_config_dir() / "CLAUDE.md"
     for source in paths.claude_md_paths(anchor):
         label = f"native:{source.name}"
         results[str(source)] = await import_file(
-            memory, source, origin_label=label, verbatim=verbatim
+            memory, source, origin_label=label, verbatim=verbatim,
+            user_level=(source == user_claude_md),
         )
     memory_md = paths.memory_md_path(anchor)
     if memory_md is not None and memory_md.is_file():
