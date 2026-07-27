@@ -33,8 +33,9 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,6 +50,20 @@ INDEXABLE_SUFFIXES = PYTHON_SUFFIXES | SCRIPT_SUFFIXES
 # Declaration files describe types for code that already has a module node.
 # Indexing them doubles the node count and adds no edge anyone asks about.
 _SKIP_FILES = (".d.ts",)
+
+# How many written files the apply phase commits per transaction. With
+# planning already lock-free, this bounds the write lock's hold time per
+# batch; see index_repo.
+COMMIT_EVERY_FILES = 200
+
+# Pause after each batch commit so a writer waiting on the lock can take it
+# before the next batch begins. Committing alone is not a handoff: the next
+# BEGIN retakes the lock in microseconds, and SQLite's busy handler polls with
+# backoff that reaches ~100 ms between attempts, so a waiter sleeps straight
+# through a smaller gap -- a 20 ms yield still left a cross-process writer
+# waiting 7.1 s. The yield must exceed the waiter's poll interval to guarantee
+# one poll lands inside it.
+COMMIT_YIELD_SECONDS = 0.15
 
 SKIP_DIRS = frozenset(
     {
@@ -228,17 +243,59 @@ def _lang_for(rel_path: str) -> str:
     return "javascript"
 
 
-def _emit_script(
-    conn: sqlite3.Connection,
-    repo_id: str,
+@dataclass(slots=True)
+class _NodeSpec:
+    """One def/class node a plan will upsert."""
+
+    kind: str
+    qualified_name: str
+    span: dict[str, int] | None
+
+
+@dataclass(slots=True)
+class _EdgeSpec:
+    """One import edge a plan will write, by target qualified name."""
+
+    target: str
+    metadata: dict[str, object]
+
+
+@dataclass(slots=True)
+class _FilePlan:
+    """Everything indexing one file will write, decided without writing.
+
+    Planning (stat, read, hash, parse, resolve) is the expensive part of an
+    index pass and needs no lock; applying is cheap and does. Separating them
+    is what caps how long a background index can block an interactive
+    memory_save -- see index_repo.
+
+    ``action`` is one of:
+      * ``skip``    -- stat signature matched; nothing to do at all;
+      * ``refresh`` -- bytes unchanged but the stat moved; re-record only;
+      * ``retire``  -- file unreadable or gone; retire its nodes;
+      * ``index``   -- parse results in ``nodes`` and ``edges``.
+    """
+
+    rel_path: str
+    action: str
+    lang: str | None = None
+    digest: str | None = None
+    signature: tuple[int, int] | None = None
+    module_name: str | None = None
+    attributes: dict[str, object] | None = None
+    nodes: list[_NodeSpec] = field(default_factory=list)
+    edges: list[_EdgeSpec] = field(default_factory=list)
+    syntax_error: bool = False
+
+
+def _plan_script(
     repo_root: Path,
     rel_path: str,
     source: str,
-    lang: str,
     aliases: dict[str, list[str]],
-    result: IndexResult,
+    plan: _FilePlan,
 ) -> None:
-    """Nodes and edges for one JS/TS file.
+    """Fill *plan* with one JS/TS file's edges.
 
     A JS module has no dotted name, so the repo-relative path *is* the
     qualified name. Resolution decides the other end: a specifier that lands on
@@ -248,16 +305,6 @@ def _emit_script(
     path) becomes a node with no file_path, which is what "external" means here.
     """
     parsed = jssource.parse_script(rel_path, source)
-    module_node = _upsert_node(
-        conn, repo_id, kind="module", qualified_name=rel_path,
-        file_path=rel_path, lang=lang, span=None,
-    )
-    result.nodes_written += 1
-
-    result.edges_invalidated += _invalidate_outbound(
-        conn, repo_id, _node_ids_for_file(conn, repo_id, rel_path)
-    )
-
     seen: set[str] = set()
     for specifier in parsed.specifiers:
         target = jssource.resolve_specifier(repo_root, rel_path, specifier, aliases)
@@ -267,120 +314,31 @@ def _emit_script(
         if qualified in seen or qualified == rel_path:
             continue
         seen.add(qualified)
-        dst = _upsert_node(
-            conn, repo_id, kind="module", qualified_name=qualified,
-            file_path=None, lang=None, span=None,
-        )
-        conn.execute(
-            "INSERT INTO code_edges "
-            "(edge_id, repo_id, src_id, dst_id, relation, confidence, "
-            " valid_from, metadata) VALUES (?, ?, ?, ?, 'imports', 1.0, ?, ?)",
-            (
-                uuid.uuid4().hex, repo_id, module_node, dst, _now(),
-                json.dumps({
-                    "specifier": specifier,
-                    "resolver": "static",
-                    "external": target is None,
-                    "deferred": specifier in parsed.deferred,
-                }),
-            ),
-        )
-        result.edges_written += 1
+        plan.edges.append(_EdgeSpec(qualified, {
+            "specifier": specifier,
+            "resolver": "static",
+            "external": target is None,
+            "deferred": specifier in parsed.deferred,
+        }))
 
 
-def index_file(
-    conn: sqlite3.Connection,
-    repo_id: str,
-    repo_root: Path,
-    rel_path: str,
-    result: IndexResult,
-    *,
-    force: bool = False,
-    aliases: dict[str, list[str]] | None = None,
+def _plan_python(
+    repo_root: Path, rel_path: str, source: str, plan: _FilePlan
 ) -> None:
-    """Index one file, skipping it when its bytes are unchanged."""
-    absolute = repo_root / rel_path
-    lang = _lang_for(rel_path)
-
-    # Cheapest check first. A stat that matches the recorded size and mtime
-    # means the file need not be read at all -- reading every file to hash it
-    # was the entire cost of a no-op re-index (8.4 s on 5,000 files).
-    signature = state.stat_signature(absolute)
-    if not force and state.is_unchanged_by_stat(
-        conn, repo_id, path=rel_path, kind="file", signature=signature
-    ):
-        result.skipped_unchanged += 1
-        return
-
-    try:
-        raw = absolute.read_bytes()
-    except OSError:
-        nodes, edges = _retire_file(conn, repo_id, rel_path)
-        result.removed += 1
-        result.edges_invalidated += edges
-        return
-
-    # One read, not two: hash the bytes already in hand rather than streaming
-    # the file a second time. That was 43% of first-index time.
-    digest = state.hash_bytes(raw)
-    if not force and state.is_unchanged(
-        conn, repo_id, path=rel_path, kind="file", current_hash=digest
-    ):
-        # Bytes are the same but the stat moved (a touch, or a checkout that
-        # rewrote the file identically). Record the new signature so the next
-        # pass takes the cheap path again.
-        state.record_indexed(
-            conn, repo_id, path=rel_path, kind="file",
-            content_hash=digest, lang=lang, signature=signature,
-        )
-        result.skipped_unchanged += 1
-        return
-
-    # utf-8-sig, not utf-8: a leading BOM is a character to ast.parse and
-    # fails the whole file ("invalid non-printable character U+FEFF").
-    # Windows-authored sources carry one routinely. Harmless without a BOM.
-    source = raw.decode("utf-8-sig", errors="replace")
-
-    if lang != "python":
-        if aliases is None:
-            aliases = jssource.load_path_aliases(repo_root)
-        _emit_script(
-            conn, repo_id, repo_root, rel_path, source, lang, aliases, result
-        )
-        state.record_indexed(
-            conn, repo_id, path=rel_path, kind="file",
-            content_hash=digest, lang=lang, signature=signature,
-        )
-        result.processed += 1
-        return
-
+    """Fill *plan* with one Python file's nodes and edges."""
     parsed = pysource.parse_module(rel_path, source)
-    if parsed.syntax_error:
-        result.syntax_errors += 1
-
+    plan.syntax_error = parsed.syntax_error is not None
     module_name = pysource.module_name_for(rel_path)
-    module_node = _upsert_node(
-        conn, repo_id, kind="module", qualified_name=module_name,
-        file_path=rel_path, lang="python", span=None,
-        attributes={"entrypoint": True} if parsed.has_main_guard else {},
-    )
-    result.nodes_written += 1
-
-    # Re-emitting is a replace, not an append: retire what this file used to
-    # point at before writing what it points at now.
-    result.edges_invalidated += _invalidate_outbound(
-        conn, repo_id, _node_ids_for_file(conn, repo_id, rel_path)
-    )
+    plan.module_name = module_name
+    plan.attributes = {"entrypoint": True} if parsed.has_main_guard else {}
 
     for node in parsed.nodes:
         if node.kind == "module":
             continue
-        _upsert_node(
-            conn, repo_id, kind=node.kind, qualified_name=node.qualified_name,
-            file_path=rel_path, lang="python",
-            span={"start_line": node.start_line, "end_line": node.end_line},
-        )
-        result.nodes_written += 1
+        plan.nodes.append(_NodeSpec(
+            node.kind, node.qualified_name,
+            {"start_line": node.start_line, "end_line": node.end_line},
+        ))
 
     seen: set[str] = set()
     targets: list[tuple[str, pysource.SourceImport]] = []
@@ -403,8 +361,128 @@ def index_file(
         if target in seen:
             continue
         seen.add(target)
+        plan.edges.append(_EdgeSpec(target, {
+            "line": imported.line,
+            "resolver": "static",
+            "deferred": imported.deferred,
+        }))
+
+
+def _plan_file(
+    conn: sqlite3.Connection,
+    repo_id: str,
+    repo_root: Path,
+    rel_path: str,
+    *,
+    force: bool = False,
+    aliases: dict[str, list[str]] | None = None,
+) -> _FilePlan:
+    """Decide what indexing this file requires. Reads only; writes nothing.
+
+    The stat/read/hash/parse work here is nearly all of an index pass's time
+    and needs no lock at all -- WAL readers block nobody. Keeping this phase
+    write-free is what lets index_repo hold its transaction only for the brief
+    apply phase; tests/test_index_twophase.py pins the property with a
+    connection that refuses writes.
+    """
+    absolute = repo_root / rel_path
+    lang = _lang_for(rel_path)
+
+    # Cheapest check first. A stat that matches the recorded size and mtime
+    # means the file need not be read at all -- reading every file to hash it
+    # was the entire cost of a no-op re-index (8.4 s on 5,000 files).
+    signature = state.stat_signature(absolute)
+    if not force and state.is_unchanged_by_stat(
+        conn, repo_id, path=rel_path, kind="file", signature=signature
+    ):
+        return _FilePlan(rel_path=rel_path, action="skip")
+
+    try:
+        raw = absolute.read_bytes()
+    except OSError:
+        return _FilePlan(rel_path=rel_path, action="retire")
+
+    # One read, not two: hash the bytes already in hand rather than streaming
+    # the file a second time. That was 43% of first-index time.
+    digest = state.hash_bytes(raw)
+    if not force and state.is_unchanged(
+        conn, repo_id, path=rel_path, kind="file", current_hash=digest
+    ):
+        # Bytes are the same but the stat moved (a touch, or a checkout that
+        # rewrote the file identically). Record the new signature so the next
+        # pass takes the cheap path again.
+        return _FilePlan(
+            rel_path=rel_path, action="refresh", lang=lang,
+            digest=digest, signature=signature,
+        )
+
+    # utf-8-sig, not utf-8: a leading BOM is a character to ast.parse and
+    # fails the whole file ("invalid non-printable character U+FEFF").
+    # Windows-authored sources carry one routinely. Harmless without a BOM.
+    source = raw.decode("utf-8-sig", errors="replace")
+
+    plan = _FilePlan(
+        rel_path=rel_path, action="index", lang=lang, digest=digest,
+        signature=signature, module_name=rel_path, attributes={},
+    )
+    if lang == "python":
+        _plan_python(repo_root, rel_path, source, plan)
+    else:
+        if aliases is None:
+            aliases = jssource.load_path_aliases(repo_root)
+        _plan_script(repo_root, rel_path, source, aliases, plan)
+    return plan
+
+
+def _apply_plan(
+    conn: sqlite3.Connection,
+    repo_id: str,
+    plan: _FilePlan,
+    result: IndexResult,
+) -> None:
+    """Write one file's plan to the store — the only phase needing the lock."""
+    if plan.action == "skip":
+        result.skipped_unchanged += 1
+        return
+    if plan.action == "retire":
+        _, edges = _retire_file(conn, repo_id, plan.rel_path)
+        result.removed += 1
+        result.edges_invalidated += edges
+        return
+    if plan.action == "refresh":
+        state.record_indexed(
+            conn, repo_id, path=plan.rel_path, kind="file",
+            content_hash=plan.digest, lang=plan.lang, signature=plan.signature,
+        )
+        result.skipped_unchanged += 1
+        return
+
+    if plan.syntax_error:
+        result.syntax_errors += 1
+
+    module_node = _upsert_node(
+        conn, repo_id, kind="module", qualified_name=plan.module_name or "",
+        file_path=plan.rel_path, lang=plan.lang, span=None,
+        attributes=plan.attributes,
+    )
+    result.nodes_written += 1
+
+    # Re-emitting is a replace, not an append: retire what this file used to
+    # point at before writing what it points at now.
+    result.edges_invalidated += _invalidate_outbound(
+        conn, repo_id, _node_ids_for_file(conn, repo_id, plan.rel_path)
+    )
+
+    for spec in plan.nodes:
+        _upsert_node(
+            conn, repo_id, kind=spec.kind, qualified_name=spec.qualified_name,
+            file_path=plan.rel_path, lang=plan.lang, span=spec.span,
+        )
+        result.nodes_written += 1
+
+    for edge in plan.edges:
         dst = _upsert_node(
-            conn, repo_id, kind="module", qualified_name=target,
+            conn, repo_id, kind="module", qualified_name=edge.target,
             file_path=None, lang=None, span=None,
         )
         conn.execute(
@@ -413,20 +491,33 @@ def index_file(
             " valid_from, metadata) VALUES (?, ?, ?, ?, 'imports', 1.0, ?, ?)",
             (
                 uuid.uuid4().hex, repo_id, module_node, dst, _now(),
-                json.dumps({
-                    "line": imported.line,
-                    "resolver": "static",
-                    "deferred": imported.deferred,
-                }),
+                json.dumps(edge.metadata),
             ),
         )
         result.edges_written += 1
 
     state.record_indexed(
-        conn, repo_id, path=rel_path, kind="file",
-        content_hash=digest, lang="python", signature=signature,
+        conn, repo_id, path=plan.rel_path, kind="file",
+        content_hash=plan.digest, lang=plan.lang, signature=plan.signature,
     )
     result.processed += 1
+
+
+def index_file(
+    conn: sqlite3.Connection,
+    repo_id: str,
+    repo_root: Path,
+    rel_path: str,
+    result: IndexResult,
+    *,
+    force: bool = False,
+    aliases: dict[str, list[str]] | None = None,
+) -> None:
+    """Index one file, skipping it when its bytes are unchanged."""
+    plan = _plan_file(
+        conn, repo_id, repo_root, rel_path, force=force, aliases=aliases
+    )
+    _apply_plan(conn, repo_id, plan, result)
 
 
 def walk_repo(repo_root: Path) -> list[str]:
@@ -463,24 +554,48 @@ def index_repo(
 ) -> IndexResult:
     """Full walk. First setup, or an explicit rebuild — not the steady state."""
     result = IndexResult()
-    # One transaction for the whole walk. clara.db.migrations.open_db opens the
-    # store in autocommit (isolation_level=None), which turns every INSERT into
-    # its own fsync: measured 84.9 s for CLARA's own tree that way versus 0.7 s
-    # inside a single transaction. Batching is the difference between a usable
-    # command and one nobody runs twice.
     # tsconfig is read once per pass, not once per file: it does not change
     # mid-walk, and re-reading it for every one of thousands of files is pure
     # IO for an unchanging answer.
     aliases = jssource.load_path_aliases(repo_root)
+
+    # Two phases, because SQLite allows one writer and everyone else shares
+    # this file. Planning (stat, read, hash, parse, resolve) is nearly the
+    # whole cost of the pass -- 20 of 21 s on a 2,568-file repo -- and runs
+    # with no transaction open, so an interactive memory_save proceeds
+    # untouched throughout. Only applying the accumulated plans takes the
+    # write lock. The earlier shapes both failed people: one transaction for
+    # the whole walk locked concurrent writers out entirely (two of five
+    # refused after the 30 s busy timeout), and interleaving parse work inside
+    # chunked transactions still held the lock long enough for a
+    # cross-process writer to wait 7.1 s.
+    #
+    # The plans are small -- ~20k tuples for that same repo -- so holding them
+    # in memory is nothing next to parsing the files was.
+    plans = [
+        _plan_file(conn, repo_id, repo_root, rel_path, force=force, aliases=aliases)
+        for rel_path in walk_repo(repo_root)
+    ]
+
+    # Apply in batches: commit-per-plan is the one shape that is always wrong
+    # (autocommit measured 84.9 s against 2.8 s batched). The yield between
+    # batches hands the lock to any waiting writer; "skip" plans write nothing
+    # and do not count toward a batch, so a warm no-op pass stays one cheap
+    # transaction instead of sleeping its way through empty ones.
     managed = not conn.in_transaction
+    written_in_batch = 0
     if managed:
         conn.execute("BEGIN")
     try:
-        for rel_path in walk_repo(repo_root):
-            index_file(
-                conn, repo_id, repo_root, rel_path, result,
-                force=force, aliases=aliases,
-            )
+        for plan in plans:
+            _apply_plan(conn, repo_id, plan, result)
+            if plan.action != "skip":
+                written_in_batch += 1
+            if managed and written_in_batch >= COMMIT_EVERY_FILES:
+                conn.execute("COMMIT")
+                time.sleep(COMMIT_YIELD_SECONDS)
+                conn.execute("BEGIN")
+                written_in_batch = 0
         if managed:
             conn.execute("COMMIT")
         else:

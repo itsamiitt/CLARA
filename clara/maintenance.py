@@ -173,8 +173,13 @@ async def run_if_due(
                     index_summary = (
                         f"index: {counts[0]} parsed, {counts[1]} unchanged"
                     )
-            except Exception:  # noqa: BLE001 — indexing is best-effort
+            except Exception as exc:  # noqa: BLE001 — indexing is best-effort
                 logger.exception("Code indexing failed")
+                # The summary is the only line a person sees, and "skipped"
+                # for both "no repo here" and "crashed" made a real failure
+                # (a cross-thread sqlite connection) invisible for days. Name
+                # the failure; the log has the traceback.
+                index_summary = f"index: FAILED ({type(exc).__name__}: {exc})"
 
             sync_summary = "sync: skipped"
             try:
