@@ -244,6 +244,47 @@ def _validated_confidence(confidence: float | None) -> float | None:
     return value
 
 
+# Fragments of the tool-call wire format. None of these belongs inside a
+# memory's text; when one appears, the caller's tool call was malformed and
+# the XML framing leaked into a field. Observed in a real store: a belief's
+# evidence ended with '.</parameter>\n<parameter name="domain">security' -- the
+# call broke mid-stream, the markup was glued into the description, and the
+# domain field was silently swallowed. Storing that verbatim preserves a
+# mangled fact and hides that a field went missing.
+_MARKUP_MARKERS = (
+    "<parameter", "</parameter",
+    "<invoke", "</invoke",
+    "<function_calls", "</function_calls", "<function_results",
+)
+
+
+def _reject_leaked_markup(value: Any, where: str) -> None:
+    """Refuse strings carrying tool-call framing, wherever they are nested.
+
+    A save whose text contains the wire format is almost never intentional --
+    it means the framing leaked and at least one field was probably lost with
+    it. Rejecting is recoverable (the model re-sends plain text); storing is
+    not, because nothing downstream can tell mangled from meant. The rare
+    legitimate memory *about* this markup loses to the observed failure mode.
+    """
+    if isinstance(value, str):
+        lowered = value.lower()
+        for marker in _MARKUP_MARKERS:
+            if marker in lowered:
+                raise ValueError(
+                    f"{where} contains tool-call markup ({marker!r}...). This "
+                    "usually means the tool call was malformed and its XML "
+                    "framing leaked into a field, losing whatever came after "
+                    "it. Nothing was stored - re-send the save as plain text."
+                )
+    elif isinstance(value, dict):
+        for key, nested in value.items():
+            _reject_leaked_markup(nested, f"{where}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for position, nested in enumerate(value):
+            _reject_leaked_markup(nested, f"{where}[{position}]")
+
+
 def _deps_sync(
     anchor: str, target: str, direction: str, depth: int
 ) -> dict[str, Any]:
@@ -364,24 +405,26 @@ def build_server() -> Any:
         Shared optional fields: description (raw context), domain (a tag like
         "backend"), confidence (0..1), tags (list of strings).
         """
+        fields: dict[str, Any] = {
+            "subject": subject, "relation": relation, "object": object,
+            "event_type": event_type, "name": name,
+            "trigger_conditions": trigger_conditions, "steps": steps,
+            "entity_type": entity_type, "properties": properties,
+            "description": description, "domain": domain, "tags": tags,
+        }
+        _validate_save_fields(fields, "")
         memory = await _get_memory()
         return await memory.save(
             mem_type=mem_type,
-            subject=subject,
-            relation=relation,
-            object=object,
             is_negation=is_negation,
-            event_type=event_type,
-            name=name,
-            trigger_conditions=trigger_conditions,
-            steps=steps,
-            entity_type=entity_type,
-            properties=properties,
-            description=description,
-            domain=domain,
             confidence=_validated_confidence(confidence),
-            tags=tags,
+            **fields,
         )
+
+    def _validate_save_fields(fields: dict[str, Any], where: str) -> None:
+        for key, value in fields.items():
+            if value is not None:
+                _reject_leaked_markup(value, f"{where}{key}")
 
     @server.tool()
     async def memory_save_many(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -404,6 +447,7 @@ def build_server() -> Any:
                 _validated_confidence(item.get("confidence"))
             except ValueError as exc:
                 raise ValueError(f"item {position}: {exc}") from exc
+            _reject_leaked_markup(item, f"item {position}")
         memory = await _get_memory()
         return await memory.save_many(items)
 
@@ -446,6 +490,8 @@ def build_server() -> Any:
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Adjust an existing memory's confidence (0..1) and/or replace its tags."""
+        if tags is not None:
+            _reject_leaked_markup(tags, "tags")
         memory = await _get_memory()
         return await memory.update(
             memory_id, confidence=_validated_confidence(confidence), tags=tags

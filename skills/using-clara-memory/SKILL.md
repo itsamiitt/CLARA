@@ -33,7 +33,15 @@ vault path) instead.
 
 ## When to save (`memory_save`)
 
-Save durable, reusable facts — not transient chatter. Pick the type:
+Save durable, reusable facts — not transient chatter.
+
+**Two or more facts at once → `memory_save_many`, one call.** An audit, a
+review, a planning session ends with a batch; save it as one batch. It is one
+transaction (all or nothing, a bad item names its index), several times faster
+than sequential saves, and — unlike firing parallel `memory_save` calls —
+cannot race itself. Never parallelize single saves.
+
+Pick the type:
 
 - **belief** — stable preference or fact. Requires `subject`, `relation`,
   `object` (e.g. subject="user", relation="prefers", object="pytest over
