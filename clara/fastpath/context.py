@@ -30,6 +30,9 @@ from clara.fastpath import db
 
 TOP_K = 12
 TOKEN_BUDGET = 900
+# At most this many memories stamped by OTHER repositories appear in a
+# session's block; see rank() for the measurement that set it.
+FOREIGN_CAP = 3
 
 # Scoring constants — keep in sync with clara.retrieval.engine.
 _W_CONFIDENCE = 0.20
@@ -92,10 +95,22 @@ def _access_count(memory: dict[str, object]) -> int:
         return 0
 
 
-def rank(memories: list[dict[str, object]], now_epoch: float) -> list[dict[str, object]]:
-    """Composite-score ranking with similarity fixed at 0 (empty query)."""
+def rank(
+    memories: list[dict[str, object]],
+    now_epoch: float,
+    current_repo: str | None = None,
+) -> list[dict[str, object]]:
+    """Composite-score ranking with similarity fixed at 0 (empty query).
+
+    When *current_repo* is given, this project's memories outrank another
+    project's at any score: verified on a real store, nine findings saved
+    from one repository filled eight of ten belief slots in every other
+    project's session start. Foreign survivors are marked so the block can
+    say where they came from. Callers that pass no repo (the bridge
+    exporter, which writes user-global files) get the pure score order.
+    """
     max_access = max((_access_count(m) for m in memories), default=0)
-    scored: list[tuple[float, dict[str, object]]] = []
+    scored: list[tuple[int, float, dict[str, object]]] = []
     for memory in memories:
         meta = memory.get("metadata")
         doc_tier = meta.get("doc_tier") if isinstance(meta, dict) else None
@@ -107,11 +122,30 @@ def rank(memories: list[dict[str, object]], now_epoch: float) -> list[dict[str, 
         score = _W_CONFIDENCE * confidence + _W_RECENCY * recency + _W_USAGE * usage
         if isinstance(doc_tier, str):
             score *= _TIER_MULTIPLIER.get(doc_tier, 1.0)
-        scored.append((score, memory))
+        foreign = current_repo is not None and not db.is_local(
+            memory, current_repo
+        )
+        if foreign:
+            memory["_foreign"] = True
+        scored.append((1 if foreign else 0, score, memory))
     # Stable sort over the updated_at-desc fetch order — same tie-breaking as
-    # the LexicalRetriever path.
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return [memory for _, memory in scored[:TOP_K]]
+    # the LexicalRetriever path. Locality first, score second.
+    scored.sort(key=lambda item: (item[0], -item[1]))
+    # Labels and ordering were not enough on their own: measured on a real
+    # store, nine labeled foreign findings still consumed most of the token
+    # budget of an unrelated project's block. A few foreign lines keep
+    # cross-project awareness; more than that is another project's session.
+    picked: list[dict[str, object]] = []
+    foreign_taken = 0
+    for is_foreign, _, memory in scored:
+        if is_foreign:
+            if foreign_taken >= FOREIGN_CAP:
+                continue
+            foreign_taken += 1
+        picked.append(memory)
+        if len(picked) >= TOP_K:
+            break
+    return picked
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +301,13 @@ def format_block(memories: list[dict[str, object]]) -> str:
         bucket = [m for m in memories if m["type"] == mem_type]
         if bucket:
             for memory in bucket:
-                sections.append(formatter(memory))  # type: ignore[operator]
+                line = formatter(memory)  # type: ignore[operator]
+                if memory.get("_foreign"):
+                    # Saved while working in a different repository; still
+                    # shown when slots remain, but labeled so the model does
+                    # not mistake another project's finding for this one's.
+                    line += "  [from another project]"
+                sections.append(line)
         else:
             sections.append("- (none)")
         sections.append("")
@@ -343,9 +383,13 @@ def _updated_epoch(memory: dict[str, object]) -> int:
     return value if isinstance(value, int) else -1
 
 
-def build_context(memories: list[dict[str, object]], now_epoch: float) -> str | None:
+def build_context(
+    memories: list[dict[str, object]],
+    now_epoch: float,
+    current_repo: str | None = None,
+) -> str | None:
     """Rank, format, and enforce the token budget (drop oldest first)."""
-    top = rank(memories, now_epoch)
+    top = rank(memories, now_epoch, current_repo)
     if not top:
         return None
     block = format_block(top)
@@ -420,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
         if conn is not None:
             try:
                 memories = db.fetch_active(conn)
-                block = build_context(memories, time.time())
+                block = build_context(memories, time.time(), rid)
             except sqlite3.Error as exc:
                 print(f"clara fastpath: {db_path}: read failed ({exc})", file=sys.stderr)
             finally:

@@ -87,9 +87,15 @@ class TestImportPurity:
 
 
 class TestContextOutput:
-    async def test_matches_local_memory_recent(self, tmp_path):
+    async def test_matches_local_memory_recent(self, tmp_path, monkeypatch):
         store = tmp_path / ".clara" / "clara.db"
         store.parent.mkdir(parents=True)
+        # Seed from the same directory the hook will query. Saves stamp the
+        # current repo id; seeding from the test-runner's cwd stamps them as
+        # another project's, and the parity below is defined over LOCAL
+        # memories — recent() is locality-blind by design, the fastpath adds
+        # locality on top (tests/test_context_locality.py owns that layer).
+        monkeypatch.chdir(tmp_path)
         memory = await _seed(store)
         expected = (await memory.recent(n=12))["context"]
         await memory.close()

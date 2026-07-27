@@ -236,18 +236,7 @@ def recall(prompt: str, cwd: str, session_id: str) -> str | None:
     ):
         if str(memory.get("memory_id")) in shown:
             continue
-        # A memory belongs "here" when it is stamped with this repository's
-        # id, carries no stamp at all, or is about the user — preferences
-        # follow the person across every project.
-        metadata = memory.get("metadata")
-        stamped = metadata.get("repo_id") if isinstance(metadata, dict) else None
-        content = memory.get("content")
-        subject = content.get("subject") if isinstance(content, dict) else None
-        local = (
-            not stamped
-            or str(stamped) == current_repo
-            or (isinstance(subject, str) and subject.strip().lower() == "user")
-        )
+        local = db.is_local(memory, current_repo)
         score = _matches(
             prompt_tokens, memory_tokens, naming, frequency, foreign=not local
         )

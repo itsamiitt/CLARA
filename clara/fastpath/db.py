@@ -28,7 +28,33 @@ _BUSY_TIMEOUT_MS = 3_000  # session start must not hang on a locked store
 # clara.retrieval.lexical.DEFAULT_CANDIDATE_LIMIT.
 CANDIDATE_LIMIT = 1000
 
-__all__ = ["CANDIDATE_LIMIT", "global_db_path", "resolve_store", "open_store", "fetch_active"]
+__all__ = [
+    "CANDIDATE_LIMIT", "global_db_path", "resolve_store", "open_store",
+    "fetch_active", "is_local",
+]
+
+
+def is_local(memory: dict[str, object], current_repo: str | None) -> bool:
+    """Does this memory belong to the project we are standing in?
+
+    Three ways to belong: stamped with this repository's id, carrying no
+    stamp at all (nothing known says it is elsewhere's), or being about the
+    user — preferences follow the person across every project. Everything
+    else was saved while working somewhere else, and both the session-start
+    block and per-prompt recall treat it as a guest: ranked after local
+    facts, held to a stricter match. One store, several projects — verified
+    on a real one, where nine findings from another repository were crowding
+    a session's context before this distinction existed.
+    """
+    if not current_repo:
+        return True
+    metadata = memory.get("metadata")
+    stamped = metadata.get("repo_id") if isinstance(metadata, dict) else None
+    if not stamped or str(stamped) == current_repo:
+        return True
+    content = memory.get("content")
+    subject = content.get("subject") if isinstance(content, dict) else None
+    return isinstance(subject, str) and subject.strip().lower() == "user"
 
 
 def resolve_store(cwd: str) -> tuple[Path | None, str]:
