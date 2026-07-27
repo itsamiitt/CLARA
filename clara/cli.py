@@ -1131,8 +1131,18 @@ async def _cmd_sync(args: argparse.Namespace) -> int:
         print(f"auto-memory enabled: {bridge_paths.auto_memory_enabled()}")
         print(f"MEMORY.md target: {memory_md if memory_md else '(disabled)'}")
         print(f"topic file: {bridge_paths.topic_file_path(anchor) or '(disabled)'}")
-        sources = bridge_paths.claude_md_paths(anchor)
-        print(f"import sources: {', '.join(str(s) for s in sources) or '(none found)'}")
+        # Every file import actually reads, with whether it can be read.
+        # Listing only the CLAUDE.md variants was misleading: MEMORY.md is an
+        # import source too, so someone whose hand-written note did not import
+        # could not tell from here whether that file had even been looked at.
+        sources = [*bridge_paths.claude_md_paths(anchor)]
+        if memory_md is not None:
+            sources.append(memory_md)
+        print("import sources:")
+        if not sources:
+            print("  (none found)")
+        for source in sources:
+            print(f"  {source} {_readability(source)}")
         return 0
 
     # Import BEFORE export: pre-existing native notes (and any hand-edited
@@ -1193,6 +1203,28 @@ def _configure_logging() -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(logging.DEBUG if debug else logging.WARNING)
+
+
+def _readability(path: Path) -> str:
+    """Why a source will or will not be read, in a few words.
+
+    "not created yet" and "cannot be read" are different facts and lead to
+    different actions, and neither is visible from a path alone. The long-path
+    case is called out by name because Windows reports a path over its 260
+    character limit as simply absent: the file is there, `ls` shows it, and
+    every stat says it is not, which is not a guess anyone makes unaided.
+    """
+    try:
+        if path.is_file():
+            return "(will be read)"
+    except OSError:
+        return "(cannot be read)"
+    if os.name == "nt" and len(str(path)) > 259:
+        return (
+            f"(path is {len(str(path))} characters; over Windows' 260 limit, "
+            "so it cannot be opened even if it exists)"
+        )
+    return "(not created yet)"
 
 
 def _make_output_lossy() -> None:
