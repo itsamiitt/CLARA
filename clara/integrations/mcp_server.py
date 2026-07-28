@@ -401,6 +401,9 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Save one durable memory to long-term storage.
 
+        Save it the moment you learn it — do not batch saves for the end of
+        the session; an unsaved fact is lost if the session stops first.
+
         Call this when you learn something worth remembering across sessions:
         a stable user preference, an architectural decision, a project fact, a
         reusable procedure, or the current state of a tool/service.
@@ -448,7 +451,9 @@ def build_server() -> Any:
         Use this instead of parallel memory_save calls whenever you have more
         than a couple of facts: one request, one commit (measured: 100 facts
         in 2.1 s against 7.4 s as sequential saves), and a batch cannot race
-        itself the way concurrent single saves can.
+        itself the way concurrent single saves can. A batch is about one
+        moment, not one session: when several facts land together, save them
+        together now — never queue facts for a session-end dump.
 
         Each item takes the same fields as memory_save: mem_type (default
         "belief") plus that type's fields, and optionally confidence (0..1),
