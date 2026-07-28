@@ -40,7 +40,10 @@ case "${CLARA_MEMORY_ENABLED:-1}" in
       if ! PYBIN=$(find_bin "$DATA_DIR/current" python); then
         PYBIN=''
         if [ -f "$DATA_DIR/current.path" ]; then
-          IFS= read -r _venv <"$DATA_DIR/current.path" || _venv=''
+          _venv=''
+          # `|| true`: the pointer file has no trailing newline, so read
+          # exits nonzero with the value already in hand.
+          IFS= read -r _venv <"$DATA_DIR/current.path" || true
           _venv=$(printf '%s' "$_venv" | tr '\\' '/')
           if [ -n "$_venv" ]; then
             PYBIN=$(find_bin "$_venv" python) || PYBIN=''

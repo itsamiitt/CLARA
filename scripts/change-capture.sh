@@ -21,13 +21,15 @@ esac
 payload=$(cat 2>/dev/null || true)
 [ -n "$payload" ] || exit 0
 
-# Keyword pre-filter for Bash events (the noisiest matcher). Coarse on
-# purpose: a false positive costs one interpreter start, a false negative
-# waits for the daily walk.
+# Keyword pre-filter for Bash events (the noisiest matcher). Keys on the
+# tool_name FIELD, not a bare "Bash" substring — an edited file's content may
+# legitimately contain the word Bash and must not push a file event through
+# the keyword gate. Coarse on purpose: a false positive costs one
+# interpreter start, a false negative waits for the daily walk.
 case "$payload" in
-  *'"Bash"'*)
+  *'"tool_name":"Bash"'* | *'"tool_name": "Bash"'*)
     case "$payload" in
-      *git*|*npm*|*yarn*|*bun*|*pip*|*poetry*|*cargo*|*'go get'*|*' uv '*) : ;;
+      *git*|*npm*|*yarn*|*bun*|*pip*|*poetry*|*cargo*|*'go get'*|*'uv '*) : ;;
       *) exit 0 ;;
     esac
     ;;
@@ -50,7 +52,10 @@ PYBIN=''
 if ! PYBIN=$(find_bin "$DATA_DIR/current" python); then
   PYBIN=''
   if [ -f "$DATA_DIR/current.path" ]; then
-    IFS= read -r _venv <"$DATA_DIR/current.path" || _venv=''
+    _venv=''
+    # `|| true`, not `|| _venv=''`: the pointer file has no trailing
+    # newline, so read exits nonzero at EOF with the value already in hand.
+    IFS= read -r _venv <"$DATA_DIR/current.path" || true
     _venv=$(printf '%s' "$_venv" | tr '\\' '/')
     if [ -n "$_venv" ]; then
       PYBIN=$(find_bin "$_venv" python) || PYBIN=''

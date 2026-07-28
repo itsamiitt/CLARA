@@ -56,7 +56,8 @@ _GIT_RE = re.compile(
 )
 _MANIFEST_RE = re.compile(
     r"\b(?:pnpm|npm|yarn|bun)\b[^|;&]*\b(?:add|install|remove|uninstall|update|up)\b"
-    r"|\b(?:pip3?|uv)\b[^|;&]*\b(?:install|uninstall)\b"
+    r"|\bpip3?\b[^|;&]*\b(?:install|uninstall)\b"
+    r"|\buv\b[^|;&]*\b(?:add|remove|sync|lock|install|uninstall)\b"
     r"|\bpoetry\b[^|;&]*\b(?:add|remove|update|install|lock)\b"
     r"|\bcargo\b[^|;&]*\b(?:add|remove)\b"
     r"|\bgo\s+get\b"
@@ -153,7 +154,8 @@ def capture(payload: dict[str, object], cwd: str) -> bool:
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read() or "{}")
-    except ValueError:
+    except (OSError, ValueError):
+        # A closed or absent stdin must not break the exit-0 hook contract.
         return 0
     if not isinstance(payload, dict):
         return 0

@@ -552,21 +552,10 @@ def _host_integration_report(cwd: str) -> list[tuple[str, str]]:
     if data_root.is_dir():
         for data_dir in sorted(p for p in data_root.glob("*clara*")
                                if p.is_dir()):
-            shim_bin = None
-            for ext in (".exe", ""):
-                candidate = data_dir / "shim" / f"clara-mcp{ext}"
-                if candidate.is_file():
-                    shim_bin = candidate
-                    break
-            if shim_bin is None:
-                rows.append((
-                    "warn",
-                    f"no MCP shim under {data_dir.name} — the memory server "
-                    "cannot start.\n"
-                    "        what to do: start a new session (bootstrap "
-                    "rebuilds the shim) or reinstall the plugin",
-                ))
-                continue
+            # Resolve the active venv FIRST: a directory with neither a
+            # `current` link nor a pointer file is not a CLARA plugin data
+            # layout (the *clara* glob can catch unrelated plugins), and
+            # judging its shim would be a false alarm.
             venv = None
             if (data_dir / "current").exists():
                 venv = data_dir / "current"
@@ -582,6 +571,21 @@ def _host_integration_report(cwd: str) -> list[tuple[str, str]]:
                     if candidate and candidate.is_dir():
                         venv = candidate
             if venv is None:
+                continue
+            shim_bin = None
+            for ext in (".exe", ""):
+                candidate = data_dir / "shim" / f"clara-mcp{ext}"
+                if candidate.is_file():
+                    shim_bin = candidate
+                    break
+            if shim_bin is None:
+                rows.append((
+                    "warn",
+                    f"no MCP shim under {data_dir.name} — the memory server "
+                    "cannot start.\n"
+                    "        what to do: start a new session (bootstrap "
+                    "rebuilds the shim) or reinstall the plugin",
+                ))
                 continue
             src = None
             for sub in ("Scripts", "bin"):

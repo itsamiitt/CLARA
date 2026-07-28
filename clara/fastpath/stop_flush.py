@@ -18,6 +18,7 @@ failure is a skipped nicety, never an error the user sees.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -43,8 +44,15 @@ def _clara_base() -> Path:
     return Path(os.environ.get("CLARA_HOME") or Path.home() / ".clara")
 
 
-def _cursor_file(rid: str) -> Path:
-    return _clara_base() / "journal-cursor" / rid
+def _cursor_file(rid: str, root: str) -> Path:
+    # Keyed by repo_id AND checkout path: repo_id is the root-commit hash,
+    # shared by every clone/worktree of one repository, and a cursor shared
+    # between two checkouts at different HEADs would ping-pong diffs between
+    # them. The path hash keeps one cursor per checkout.
+    checkout = hashlib.sha256(
+        str(Path(root).resolve()).casefold().encode("utf-8", "replace")
+    ).hexdigest()[:12]
+    return _clara_base() / "journal-cursor" / f"{rid}-{checkout}"
 
 
 def _git_head(root: str) -> str | None:
@@ -74,7 +82,7 @@ def enqueue_head_delta(conn: sqlite3.Connection, rid: str, root: str) -> str | N
         return None
     cursor = None
     try:
-        cursor = _cursor_file(rid).read_text(encoding="utf-8").strip() or None
+        cursor = _cursor_file(rid, root).read_text(encoding="utf-8").strip() or None
     except OSError:
         pass
     if cursor is None or cursor == head:
@@ -88,7 +96,9 @@ def enqueue_head_delta(conn: sqlite3.Connection, rid: str, root: str) -> str | N
             timeout=_GIT_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):
-        return head
+        # Transient failure (timeout, spawn error): do NOT advance the
+        # cursor — the delta is still owed, and the next Stop retries it.
+        return None
     if proc.returncode != 0:
         # An unknown cursor (rebase, gc) has no diff; restart from here.
         return head
@@ -111,6 +121,29 @@ def enqueue_head_delta(conn: sqlite3.Connection, rid: str, root: str) -> str | N
     return head
 
 
+_FLAG_MAX_AGE_S = 7 * 24 * 3600
+
+
+def _sweep_stale_flags() -> None:
+    """Drop journal-dirty flags nothing has cleared in a week.
+
+    The dirty gate is machine-wide but each flush clears only its own repo's
+    flag, so a flag whose repository is never opened again would force an
+    interpreter start on every Stop in every project forever. A week is long
+    past any daily maintenance walk that would have reconciled the work.
+    """
+    try:
+        cutoff = time.time() - _FLAG_MAX_AGE_S
+        for flag in (_clara_base() / "journal-dirty").iterdir():
+            try:
+                if flag.is_file() and flag.stat().st_mtime < cutoff:
+                    flag.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
 def flush(cwd: str, session_id: str) -> None:
     root = git_toplevel(cwd)
     if not root:
@@ -130,6 +163,10 @@ def flush(cwd: str, session_id: str) -> None:
         new_head = enqueue_head_delta(conn, rid, root)
 
         journal.release_stale_claims(conn)
+        # release_stale_claims leaves its UPDATE in sqlite3's implicit
+        # transaction; commit it so a zero-pending early path cannot roll
+        # the releases back on close.
+        conn.commit()
         deadline = time.monotonic() + _TIME_BUDGET_S
         worker = f"stop-flush-{session_id or os.getpid()}"
         while journal.pending_count(conn, rid) > 0:
@@ -139,7 +176,7 @@ def flush(cwd: str, session_id: str) -> None:
 
         if new_head is not None:
             try:
-                cursor = _cursor_file(rid)
+                cursor = _cursor_file(rid, root)
                 cursor.parent.mkdir(parents=True, exist_ok=True)
                 cursor.write_text(new_head, encoding="utf-8")
             except OSError:
@@ -149,6 +186,7 @@ def flush(cwd: str, session_id: str) -> None:
                 (_clara_base() / "journal-dirty" / rid).unlink()
             except OSError:
                 pass
+        _sweep_stale_flags()
     except sqlite3.Error:
         return
     finally:

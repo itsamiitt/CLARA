@@ -81,6 +81,9 @@ class TestClassifyBash:
         ("npm install", "manifest"),
         ("pip install requests", "manifest"),
         ("uv pip install requests", "manifest"),
+        ("uv add httpx", "manifest"),
+        ("uv remove httpx", "manifest"),
+        ("uv sync", "manifest"),
         ("poetry add httpx", "manifest"),
         ("go get example.com/pkg", "manifest"),
         ("ls -la", None),
@@ -173,7 +176,7 @@ class TestStopFlush:
         assert nodes > 0, "draining the journal must index the journalled file"
         flag = tmp_path / "clara-home" / "journal-dirty" / repo_id(str(repo))
         assert not flag.exists(), "an empty queue must clear the dirty flag"
-        cursor = tmp_path / "clara-home" / "journal-cursor" / repo_id(str(repo))
+        cursor = stop_flush._cursor_file(repo_id(str(repo)), str(repo))
         assert cursor.is_file(), "the flush must record the drained HEAD"
 
     def test_head_delta_enqueues_outside_edits(self, repo, store, tmp_path):

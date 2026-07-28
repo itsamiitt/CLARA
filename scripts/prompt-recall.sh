@@ -35,7 +35,11 @@ PYBIN=''
 if ! PYBIN=$(find_bin "$DATA_DIR/current" python); then
   PYBIN=''
   if [ -f "$DATA_DIR/current.path" ]; then
-    IFS= read -r _venv <"$DATA_DIR/current.path" || _venv=''
+    _venv=''
+    # `|| true`, not `|| _venv=''`: the pointer file has no trailing
+    # newline, so read exits nonzero at EOF with the value already in hand —
+    # the old guard wiped it and made this fallback dead code.
+    IFS= read -r _venv <"$DATA_DIR/current.path" || true
     _venv=$(printf '%s' "$_venv" | tr '\\' '/')
     if [ -n "$_venv" ]; then
       PYBIN=$(find_bin "$_venv" python) || PYBIN=''

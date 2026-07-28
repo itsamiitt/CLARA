@@ -10,12 +10,16 @@ rem python.exe DIRECTLY when the standard layouts expose it, and only falls
 rem back to PowerShell for exotic layouts (pointer file with a junction-less
 rem install). stdin (the hook JSON) passes straight through to the module.
 rem Fail-open everywhere: no interpreter => drain stdin, exit 0, no output.
+rem No parenthesized fallback block: %VAR% inside (...) expands at parse
+rem time, which turned the computed data dir into a literal "\plugin"
+rem whenever CLAUDE_PLUGIN_DATA was unset. Straight-line goto keeps
+rem expansion at execution time.
 set "CLARA_DATA=%CLAUDE_PLUGIN_DATA%"
-if not defined CLARA_DATA (
-  set "CLARA_BASE=%CLARA_HOME%"
-  if not defined CLARA_BASE set "CLARA_BASE=%USERPROFILE%\.clara"
-  set "CLARA_DATA=%CLARA_BASE%\plugin"
-)
+if defined CLARA_DATA goto havedata
+set "CLARA_BASE=%CLARA_HOME%"
+if not defined CLARA_BASE set "CLARA_BASE=%USERPROFILE%\.clara"
+set "CLARA_DATA=%CLARA_BASE%\plugin"
+:havedata
 if exist "%CLARA_DATA%\current\Scripts\python.exe" (
   "%CLARA_DATA%\current\Scripts\python.exe" -m clara.fastpath.prompt_recall
   endlocal
