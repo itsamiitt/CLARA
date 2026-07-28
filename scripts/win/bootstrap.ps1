@@ -50,6 +50,31 @@ function Set-CurrentPointer([string]$DataDir, [string]$Venv) {
     try { Set-Content -Path $pointer -Value $Venv -Encoding Ascii -NoNewline } catch {}
 }
 
+function Copy-ShimExe([string]$Source, [string]$Dest) {
+    try {
+        Copy-Item -Path $Source -Destination $Dest -Force -ErrorAction Stop
+        return $true
+    } catch {}
+    # Overwrite denied — the destination exe is running. Try rename-aside:
+    # NTFS sometimes permits renaming an image that cannot be overwritten
+    # (and sometimes denies both; measured against a live clara-mcp.exe,
+    # both were denied — that case is what the shim.stale marker is for).
+    $aside = "$Dest.old"
+    try {
+        Move-Item -Path $Dest -Destination $aside -Force -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    try {
+        Copy-Item -Path $Source -Destination $Dest -Force -ErrorAction Stop
+        try { Remove-Item $aside -Force -Confirm:$false -ErrorAction Stop } catch {}
+        return $true
+    } catch {
+        try { Move-Item -Path $aside -Destination $Dest -Force -ErrorAction Stop } catch {}
+        return $false
+    }
+}
+
 function Update-ClaraShim([string]$DataDir, [string]$Venv) {
     # clara-mcp is required: the plugin's mcpServers entry spawns this exact
     # path. clara is best-effort but matters just as much in practice -- a
@@ -58,19 +83,27 @@ function Update-ClaraShim([string]$DataDir, [string]$Venv) {
     # shell out to it) all failed with "command not found" for exactly the
     # users who installed the recommended way. Mirrors ensure_shim in
     # scripts/bootstrap.sh.
+    #
+    # The shim.stale marker makes a failed refresh loud and self-healing: a
+    # running clara-mcp.exe locks the copy target exactly when the server
+    # most needs replacing. The fast path retries on the marker every
+    # session start, and doctor warns while it exists, so the stale shim
+    # heals the first time no server holds the file instead of silently
+    # serving old code forever.
     $bin = Find-VenvBin $Venv "clara-mcp"
     if (-not $bin) { return $false }
     $shimDir = Join-Path $DataDir "shim"
     $null = New-Item -ItemType Directory -Force $shimDir
-    try {
-        Copy-Item -Path $bin -Destination (Join-Path $shimDir "clara-mcp.exe") -Force
-    } catch {
+    $staleMarker = Join-Path $DataDir "shim.stale"
+    if (-not (Copy-ShimExe $bin (Join-Path $shimDir "clara-mcp.exe"))) {
+        try { Set-Content -Path $staleMarker -Value "$(Get-Date)" -Encoding Ascii } catch {}
         return $false
     }
     $cli = Find-VenvBin $Venv "clara"
     if ($cli) {
-        try { Copy-Item -Path $cli -Destination (Join-Path $shimDir "clara.exe") -Force } catch {}
+        $null = Copy-ShimExe $cli (Join-Path $shimDir "clara.exe")
     }
+    try { Remove-Item $staleMarker -Force -Confirm:$false -ErrorAction Stop } catch {}
     return $true
 }
 
@@ -435,7 +468,9 @@ if (Find-VenvBin $venv "clara-mcp") {
     Set-CurrentPointer $dataDir $venv
     $shimExe = Join-Path $dataDir "shim\clara-mcp.exe"
     $needShim = $true
-    if (Test-Path $shimExe) {
+    # shim.stale forces a retry: the last refresh failed against a locked
+    # exe, and the size/mtime probe below cannot see that.
+    if ((Test-Path $shimExe) -and -not (Test-Path (Join-Path $dataDir "shim.stale"))) {
         $srcBin = Find-VenvBin $venv "clara-mcp"
         $src = Get-Item $srcBin
         $dst = Get-Item $shimExe

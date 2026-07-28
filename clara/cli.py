@@ -501,6 +501,14 @@ def _print_plugin_health(db_path: str) -> None:
         print(f"  [warn] last background install FAILED ({when})")
         print(f"        what to do: see {install_log} — usually no network "
               "access to PyPI, or a proxy blocking it.")
+    stale = data_dir / "shim.stale"
+    if stale.is_file():
+        when = stale.read_text(encoding="utf-8", errors="replace").strip()
+        print(f"  [warn] MCP shim refresh FAILED ({when}) — the memory server "
+              "may be running outdated code")
+        print("        what to do: close Claude Code sessions and start a new "
+              "one — the refresh retries at session start once no running "
+              "server locks the file.")
 
 
 # ---------------------------------------------------------------------------
