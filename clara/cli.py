@@ -435,10 +435,13 @@ def _host_integration_report(cwd: str) -> list[tuple[str, str]]:
     if not config_dir.is_dir():
         return rows
 
+    # utf-8-sig everywhere below: host files are routinely (re)written by
+    # PowerShell on Windows, which prepends a BOM that strict utf-8 hands to
+    # the JSON parser — and a silent parse failure here reports nothing.
     try:
         installed = json.loads(
             (config_dir / "plugins" / "installed_plugins.json")
-            .read_text(encoding="utf-8")
+            .read_text(encoding="utf-8-sig")
         )
     except (OSError, ValueError):
         return rows
@@ -455,7 +458,7 @@ def _host_integration_report(cwd: str) -> list[tuple[str, str]]:
     #    project, then local; the last word wins per key).
     def _enabled_map(path: Path) -> dict[str, Any]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             return {}
         enabled = data.get("enabledPlugins") if isinstance(data, dict) else None
@@ -520,7 +523,7 @@ def _host_integration_report(cwd: str) -> list[tuple[str, str]]:
         try:
             manifest = json.loads(
                 (Path(install_path) / "hooks" / "hooks.json")
-                .read_text(encoding="utf-8")
+                .read_text(encoding="utf-8-sig")
             )
         except (OSError, ValueError):
             continue
