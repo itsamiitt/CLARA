@@ -281,6 +281,33 @@ class TestProjection:
         dead = [e for e in edges if e["invalid_at"] is not None]
         assert len(live) == 1 and len(dead) == 1
 
+    async def test_path_traverses_property_edges(self, tmp_path):
+        # The README's promise, end to end: two world-model rows whose
+        # properties chain, answerable by graph_path. Before property
+        # projection this found nothing to walk.
+        memory = await _store(tmp_path)
+        await memory.save(mem_type="world_model", entity_type="service",
+                          name="auth service",
+                          properties={"depends_on": "redis"})
+        await memory.save(mem_type="world_model", entity_type="cache",
+                          name="redis", properties={"runs_on": "fly.io"})
+        path = await memory.graph_path("auth service", "fly.io")
+        await memory.close()
+        assert path["found"] is True
+        assert len(path["path"]) == 2  # depends_on hop, then runs_on hop
+
+    async def test_forget_invalidates_property_edges(self, tmp_path):
+        # Property edges carry the row's memory id as belief_id, so the
+        # existing forget invalidation covers them — pinned, not assumed.
+        memory = await _store(tmp_path)
+        saved = await memory.save(mem_type="world_model",
+                                  entity_type="service", name="auth service",
+                                  properties={"depends_on": "redis"})
+        await memory.forget(saved["memory_id"])
+        edges = await _edges(memory)
+        await memory.close()
+        assert edges and all(e["invalid_at"] is not None for e in edges)
+
     async def test_supersede_sets_invalid_at(self, tmp_path):
         from clara.memory.belief import BeliefMemory
 
