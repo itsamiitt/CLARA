@@ -231,6 +231,56 @@ class TestProjection:
         assert nodes[0]["world_model_id"] == saved["memory_id"]
         assert json.loads(nodes[0]["properties"])["host"] == "fly.io"
 
+    async def test_world_model_properties_project_edges(self, tmp_path):
+        # The classifier stores "auth service depends on redis" as
+        # world_model with properties {"depends_on": "redis"}; before this
+        # projected, the ordinary remember path made nodes with no edges and
+        # the README's "queryable by neighbours" example was unreachable.
+        memory = await _store(tmp_path)
+        await memory.save(mem_type="world_model", entity_type="service",
+                          name="auth service",
+                          properties={"depends_on": "redis"})
+        edges = await _edges(memory)
+        await memory.close()
+        assert [(e["relation"], e["invalid_at"]) for e in edges] == [
+            ("depends_on", None)
+        ]
+
+    async def test_synthetic_is_a_triple_is_not_projected(self, tmp_path):
+        # Every world-model row carries subject/is_a/entity_type by
+        # construction; projecting it would mint a noise node per type word.
+        memory = await _store(tmp_path)
+        await memory.save(mem_type="world_model", entity_type="service",
+                          name="api", properties={})
+        edges = await _edges(memory)
+        nodes = await _nodes(memory, "canonical_name = 'service'")
+        await memory.close()
+        assert edges == []
+        assert nodes == []
+
+    async def test_non_string_properties_stay_off_the_graph(self, tmp_path):
+        memory = await _store(tmp_path)
+        await memory.save(mem_type="world_model", entity_type="service",
+                          name="api", properties={"port": 8000,
+                                                  "status": "deployed"})
+        edges = await _edges(memory)
+        await memory.close()
+        assert [e["relation"] for e in edges] == ["status"]
+
+    async def test_property_update_moves_the_edge(self, tmp_path):
+        # A true upsert (same name AND entity_type) must not stack edges:
+        # the old projection is invalidated and the new one replaces it.
+        memory = await _store(tmp_path)
+        await memory.save(mem_type="world_model", entity_type="service",
+                          name="api", properties={"runs_on": "fly.io"})
+        await memory.save(mem_type="world_model", entity_type="service",
+                          name="api", properties={"runs_on": "railway"})
+        edges = await _edges(memory)
+        await memory.close()
+        live = [e for e in edges if e["invalid_at"] is None]
+        dead = [e for e in edges if e["invalid_at"] is not None]
+        assert len(live) == 1 and len(dead) == 1
+
     async def test_supersede_sets_invalid_at(self, tmp_path):
         from clara.memory.belief import BeliefMemory
 

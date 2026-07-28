@@ -240,14 +240,69 @@ async def project_memory_invalidated(
 
 
 @_fail_soft
-async def project_world_model_upserted(session: AsyncSession, record: Memory) -> None:
-    """World-model row → node upsert linking ``world_model_id``."""
+async def project_world_model_upserted(
+    session: AsyncSession, record: Memory, *,
+    temporal_precision: str = "exact",
+) -> None:
+    """World-model row → node upsert linking ``world_model_id``.
+
+    String-valued **properties** also project as edges. The classifier types
+    relational facts like "auth service depends on redis" as world_model and
+    stores the relation in ``properties`` ({"depends_on": "redis"}), so the
+    ordinary `clara remember` path produced graph *nodes with no edges* while
+    the same content saved as an explicit belief produced the edge — same
+    fact, different graph, decided by an implementation detail the user never
+    sees. The README's own example ("api runs_on fly.io, queryable by
+    neighbours or path") was unreachable through the front door until this.
+
+    Two deliberate exclusions: the row's synthetic subject/is_a/entity_type
+    triple (every world-model row carries one by construction; projecting it
+    would grow a noise node per type word, and entity_type already lives on
+    the node), and non-string property values (``port: 8000`` as an edge to a
+    node named "8000" helps nobody).
+
+    Upserts fire on every save of the same entity, so this invalidates the
+    row's previous edges and reprojects from the current properties — edges
+    track the row the way the indexer's invalidate-outbound keeps import
+    edges tracking a file.
+    """
     if not await _graph_ready(session):
         return
     content = record.content if isinstance(record.content, dict) else {}
     name = content.get("name") or content.get("subject")
     if not name:
         return
+    properties = content.get("properties")
+    if isinstance(properties, dict):
+        await _invalidate_by_belief(
+            session, str(record.memory_id), reason="world_model_reprojected"
+        )
+        src = await resolve_node(
+            session, str(name), user_id=record.user_id,
+            entity_type=str(content.get("entity_type") or "entity"), create=True,
+        )
+        for key, value in properties.items():
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if len(value) > 120:
+                continue  # prose, not an entity name
+            relation = normalize_relation(str(key))
+            dst = await resolve_node(
+                session, value, user_id=record.user_id, create=True
+            )
+            if src is None or dst is None or not relation:
+                continue
+            await _insert_edge(
+                session,
+                user_id=record.user_id,
+                src_id=src["node_id"],
+                dst_id=dst["node_id"],
+                relation=relation,
+                belief_id=canonical_id(record.memory_id),
+                confidence=float(record.confidence),
+                valid_from=_stamp(record.created_at),
+                temporal_precision=temporal_precision,
+            )
     node = await resolve_node(
         session,
         str(name),
@@ -329,7 +384,13 @@ async def rebuild(session: AsyncSession, *, from_scratch: bool = False) -> dict[
         mem_type = str(memory_type)
         if mem_type == "world_model":
             fake = _RowShim(memory_id, user_id, content, confidence, created_at)
-            await project_world_model_upserted.__wrapped__(session, fake)  # type: ignore[attr-defined]
+            # A rebuild is a reconstruction: property edges carry the same
+            # temporal_precision the belief branch stamps below. The upsert
+            # projection invalidates the row's previous edges before
+            # reinserting, so rebuilding twice converges instead of stacking.
+            await project_world_model_upserted.__wrapped__(  # type: ignore[attr-defined]
+                session, fake, temporal_precision="reconstructed"
+            )
             continue
         belief_id = canonical_id(memory_id)
         if content.get("is_negation"):
