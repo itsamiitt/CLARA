@@ -100,7 +100,9 @@ The plugin ships an MCP server exposing 22 tools. The agent calls
 something durable. Three more hooks run alongside: `UserPromptSubmit` recalls
 stored facts that match the words of each prompt (so a topic that first comes
 up mid-session still gets its memory — each fact shown at most once per
-session, silent when nothing matches, ~290 ms measured per prompt),
+session, silent when nothing matches; measured per prompt: ~290 ms invoking
+the Python module directly, ~420 ms through the Windows cmd dispatcher that
+actually runs it),
 `PostToolUse(Read)` annotates reads of quarantined documents, and `Stop`
 offers a one-line nudge when a plan document looks finished.
 
