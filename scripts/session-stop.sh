@@ -1,7 +1,11 @@
 #!/bin/sh
-# CLARA Stop hook: one debounced nudge when a plan doc looks complete.
+# CLARA Stop hook: flush the change journal, then one debounced nudge when a
+# plan doc looks complete.
 #
-# Pure sh, zero subprocesses, always exits 0, fail-open on every branch.
+# Always exits 0, fail-open on every branch. Stage 1 (the flush) is the only
+# part that may start an interpreter, and only when change-capture left a
+# journal-dirty flag saying there is queued work. Stage 2 (the nudge) stays
+# pure sh with zero subprocesses.
 # Fuel: $BASE/proposals/<repo_id>.txt (written by the fastpath). repo_id
 # comes from .git/clara-marker (fastpath-stamped; immune to path-spelling
 # differences), falling back to $BASE/proposals/index.tsv for worktrees
@@ -12,12 +16,51 @@
 
 set -u
 
+BASE="${CLARA_HOME:-${HOME:-/tmp}/.clara}"
+
+# --- stage 1: journal flush -------------------------------------------------
+case "${CLARA_MEMORY_ENABLED:-1}" in
+  0 | false | no | off) : ;;
+  *)
+    # Glob test, no subprocess: any flag file means captured work is queued.
+    for _flag in "$BASE"/journal-dirty/*; do
+      [ -e "$_flag" ] || break
+      DATA_DIR="${CLAUDE_PLUGIN_DATA:-$BASE/plugin}"
+      # Keep in sync with prompt-recall.sh / bootstrap.sh.
+      find_bin() {
+        for _cand in "$1/bin/$2" "$1/Scripts/$2" "$1/Scripts/$2.exe"; do
+          if [ -x "$_cand" ]; then
+            printf '%s' "$_cand"
+            return 0
+          fi
+        done
+        return 1
+      }
+      PYBIN=''
+      if ! PYBIN=$(find_bin "$DATA_DIR/current" python); then
+        PYBIN=''
+        if [ -f "$DATA_DIR/current.path" ]; then
+          IFS= read -r _venv <"$DATA_DIR/current.path" || _venv=''
+          _venv=$(printf '%s' "$_venv" | tr '\\' '/')
+          if [ -n "$_venv" ]; then
+            PYBIN=$(find_bin "$_venv" python) || PYBIN=''
+          fi
+        fi
+      fi
+      if [ -n "$PYBIN" ]; then
+        "$PYBIN" -m clara.fastpath.stop_flush >/dev/null 2>&1 || true
+      fi
+      break
+    done
+    ;;
+esac
+
+# --- stage 2: the nudge -----------------------------------------------------
 # Kill switch: the proposals nudge is doc-curator behavior.
 case "${CLARA_DOCS_ENABLED:-1}" in
   0 | false | no | off) exit 0 ;;
 esac
 
-BASE="${CLARA_HOME:-${HOME:-/tmp}/.clara}"
 [ -d "$BASE/proposals" ] || exit 0
 
 FLAG_DIR="$BASE/session-flags"
