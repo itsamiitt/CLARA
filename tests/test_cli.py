@@ -9,8 +9,15 @@ from clara import cli
 
 @pytest.fixture(autouse=True)
 def isolated_store(tmp_path, monkeypatch):
-    """Point the global store at a per-test temp file."""
+    """Point the global store at a per-test temp file.
+
+    CLAUDE_CONFIG_DIR is isolated too: doctor's host-integration report reads
+    the real ~/.claude otherwise, and a machine with a genuinely degraded
+    plugin install (the exact state that motivated the report) would flip
+    these tests' exit codes.
+    """
     monkeypatch.setenv("CLARA_DB_PATH", str(tmp_path / "clara.db"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     yield
 
 

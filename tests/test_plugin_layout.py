@@ -21,12 +21,14 @@ _SCRIPTS = [
     "scripts/session-stop.sh",
     "scripts/read-annotate.sh",
     "scripts/prompt-recall.sh",
+    "scripts/change-capture.sh",
 ]
 _CMD_DISPATCHERS = [
     "scripts/session-start.cmd",
     "scripts/session-stop.cmd",
     "scripts/read-annotate.cmd",
     "scripts/prompt-recall.cmd",
+    "scripts/change-capture.cmd",
 ]
 _PS1_BODIES = [
     "scripts/win/bootstrap.ps1",
@@ -35,6 +37,7 @@ _PS1_BODIES = [
     "scripts/win/read-annotate.ps1",
     "scripts/win/clara-mcp-launch.ps1",
     "scripts/win/prompt-recall.ps1",
+    "scripts/win/change-capture.ps1",
 ]
 
 
@@ -288,6 +291,114 @@ class TestSourceFreshness:
         # Renames matter too: the path is folded into the digest.
         (pkg / "sub" / "b.py").rename(pkg / "sub" / "c.py")
         assert source_hash(pkg) != before
+
+
+class TestCurrentPointerSwap:
+    """bootstrap must replace a `current` pointer that MSYS ln cannot.
+
+    Measured on a real Windows install: bootstrap.ps1 makes `current` an NTFS
+    junction, `ln -sfn` against it fails with "Not a directory" (five installs
+    in a row), and MSYS ln's copy mode deep-copied the venv into four stray
+    ~100 MB directories instead of linking. set_current swaps the pointer with
+    rmdir + mklink /J on Windows and plain ln on POSIX, and a shim refresh
+    that cannot write leaves a shim.stale marker that the next session start
+    retries on.
+    """
+
+    def _fake_env(self, tmp_path: Path) -> tuple[dict, Path, Path]:
+        """A plugin data dir whose venv already matches the repo's pyproject
+        hash, so bootstrap takes the fast path without installing anything."""
+        data = tmp_path / "data"
+        vhash = hashlib.sha256((_ROOT / "pyproject.toml").read_bytes()).hexdigest()[:12]
+        venv = data / f"venv-{vhash}"
+        (venv / "bin").mkdir(parents=True)
+        wrapper = venv / "bin" / "python"
+        wrapper.write_text(
+            f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        wrapper.chmod(0o755)
+        mcp = venv / "bin" / "clara-mcp"
+        mcp.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+        mcp.chmod(0o755)
+        # Pre-write source.hash to match the checkout, so the fast path does
+        # not pip-install the repo into the test runner's interpreter.
+        digest = hashlib.sha256()
+        clara_root = _ROOT / "clara"
+        for path in sorted(clara_root.rglob("*.py")):
+            digest.update(path.relative_to(clara_root).as_posix().encode())
+            digest.update(path.read_bytes())
+        (data / "source.hash").write_text(digest.hexdigest()[:12], encoding="utf-8")
+        (data / "current.path").write_text(str(venv), encoding="utf-8")
+        env = {
+            **os.environ,
+            "CLAUDE_PLUGIN_ROOT": str(_ROOT),
+            "CLAUDE_PLUGIN_DATA": str(data),
+        }
+        return env, data, venv
+
+    def _run(self, env: dict, cwd: Path) -> subprocess.CompletedProcess:
+        bash = _working_bash()
+        if bash is None:
+            pytest.skip("no working bash")
+        return subprocess.run(
+            [bash, str(_ROOT / "scripts" / "bootstrap.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=cwd,
+            timeout=120,
+        )
+
+    def test_stray_copy_current_is_replaced(self, tmp_path):
+        env, data, venv = self._fake_env(tmp_path)
+        stray = data / "current"
+        stray.mkdir()
+        (stray / "pyvenv.cfg").write_text("home = nowhere\n", encoding="utf-8")
+
+        proc = self._run(env, tmp_path)
+        assert proc.returncode == 0, proc.stderr
+
+        current = data / "current"
+        assert current.exists(), "current must be re-created, not just removed"
+        assert current.resolve() == venv.resolve(), (
+            "current must point at the venv, not remain a stale copy"
+        )
+        # No new stray directories: everything in the data dir is accounted for.
+        allowed = {"current", "shim", "current.path", "source.hash", venv.name,
+                   "shim.stale"}
+        leftovers = {p.name for p in data.iterdir()} - allowed
+        assert not leftovers, f"stray artifacts appeared: {leftovers}"
+
+    def test_shim_stale_marker_forces_refresh_and_clears(self, tmp_path):
+        env, data, venv = self._fake_env(tmp_path)
+        (data / "shim").mkdir()
+        (data / "shim" / "clara-mcp").write_text("stale", encoding="utf-8")
+        (data / "shim.stale").write_text("2026-07-28", encoding="utf-8")
+
+        proc = self._run(env, tmp_path)
+        assert proc.returncode == 0, proc.stderr
+
+        assert not (data / "shim.stale").exists(), (
+            "a successful refresh must clear the marker"
+        )
+        refreshed = (data / "shim" / "clara-mcp").read_bytes()
+        assert refreshed == (venv / "bin" / "clara-mcp").read_bytes(), (
+            "the shim must be refreshed from the venv binary"
+        )
+
+    def test_unwritable_shim_dir_writes_marker(self, tmp_path):
+        env, data, venv = self._fake_env(tmp_path)
+        # A file where the shim directory belongs: mkdir -p fails, the shim
+        # cannot be refreshed, and the marker must say so.
+        (data / "shim").write_text("not a directory", encoding="utf-8")
+
+        proc = self._run(env, tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert (data / "shim.stale").exists(), (
+            "a refresh that cannot write must leave the shim.stale marker"
+        )
 
 
 class TestReadHookGating:

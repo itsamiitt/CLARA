@@ -97,6 +97,29 @@ class TestFailedInstallIsSurfaced:
         assert "install FAILED" not in doctor(tmp_path, installed)
 
 
+class TestStaleShimIsSurfaced:
+    """A shim refresh that failed against a locked exe must not stay silent.
+
+    Found on a real install: the running clara-mcp.exe denied both overwrite
+    and rename, bootstrap logged "shim refresh failed (non-fatal)" into a file
+    nobody reads, and the host kept spawning week-old server code. The
+    shim.stale marker is the visible trail; doctor must surface it.
+    """
+
+    def test_stale_marker_is_flagged(self, tmp_path, installed) -> None:
+        (installed / "shim" / "clara-mcp.exe").write_bytes(b"stub")
+        (installed / "shim" / "clara.exe").write_bytes(b"stub")
+        (installed / "shim.stale").write_text("Mon Jul 28 09:00:00 2026", "utf-8")
+        out = doctor(tmp_path, installed)
+        assert "MCP shim refresh FAILED" in out
+        assert "close Claude Code sessions" in out
+
+    def test_no_stale_marker_no_noise(self, tmp_path, installed) -> None:
+        (installed / "shim" / "clara-mcp.exe").write_bytes(b"stub")
+        (installed / "shim" / "clara.exe").write_bytes(b"stub")
+        assert "shim refresh FAILED" not in doctor(tmp_path, installed)
+
+
 class TestStoreBreakdown:
     """doctor's store line says whose memories they are.
 

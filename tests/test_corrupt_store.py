@@ -41,6 +41,9 @@ def store(tmp_path, monkeypatch):
     db = tmp_path / "clara.db"
     monkeypatch.setenv("CLARA_DB_PATH", str(db))
     monkeypatch.setenv("CLARA_HOME", str(tmp_path))
+    # Doctor's host-integration report reads the real ~/.claude otherwise,
+    # and a machine with a degraded plugin install would flip exit codes.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.chdir(tmp_path)
     assert _run(["remember", "I use Postgres for storage"]) == 0
     return db

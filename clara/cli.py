@@ -377,6 +377,9 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
             f".clara/ or delete",
         ))
 
+    host_rows = _host_integration_report(str(Path.cwd()))
+    host_warns = [row for row in host_rows if row[0] == "warn"]
+
     hard_failures = [c for c in checks if not c[1] and c[0] not in
                      ("fts5 index", "backups", "project stores")]
     degraded = [c for c in checks if not c[1]]
@@ -386,6 +389,10 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
         for name, ok, detail in checks:
             print(f"  [{'ok' if ok else '!!'}] {name}: {detail}")
         _print_plugin_health(db_path)
+        if host_rows:
+            print("host:")
+            for level, text in host_rows:
+                print(f"  [{level}] {text}")
         # A corrupt store is the one moment the user most needs to be told what
         # to do, and doctor used to stop at the diagnosis: it printed the
         # integrity failure and, separately, that a backup existed, and left
@@ -406,7 +413,205 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
                 )
     if hard_failures:
         return 2
-    return 1 if degraded else 0
+    return 1 if (degraded or host_warns) else 0
+
+
+def _host_integration_report(cwd: str) -> list[tuple[str, str]]:
+    """Host-side wiring checks: is the plugin Claude Code loads the one on
+    disk, and is it enabled at all?
+
+    Diagnosed on a real machine: clara sat in installed_plugins.json while no
+    settings file enabled it, so no hook fired and no memory tool loaded — and
+    doctor reported every store check ok, because nothing looked at the host.
+    Read-only and fail-soft: a malformed host file yields no report, never a
+    crash. Returns ("ok" | "warn", text) rows; empty when no Claude Code
+    config dir or no clara install exists (a non-plugin user hears nothing).
+    """
+    from clara.bridge.paths import claude_config_dir
+    from clara.store import git_toplevel
+
+    rows: list[tuple[str, str]] = []
+    config_dir = claude_config_dir()
+    if not config_dir.is_dir():
+        return rows
+
+    try:
+        installed = json.loads(
+            (config_dir / "plugins" / "installed_plugins.json")
+            .read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return rows
+    plugins = installed.get("plugins") if isinstance(installed, dict) else None
+    if not isinstance(plugins, dict):
+        return rows
+    clara_keys = [k for k in plugins if k.startswith("clara@")]
+    if not clara_keys:
+        return rows
+
+    toplevel = git_toplevel(cwd) or cwd
+
+    # 1. Enablement — merged the way Claude Code merges it (user, then
+    #    project, then local; the last word wins per key).
+    def _enabled_map(path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        enabled = data.get("enabledPlugins") if isinstance(data, dict) else None
+        return enabled if isinstance(enabled, dict) else {}
+
+    merged: dict[str, Any] = {}
+    for source in (
+        config_dir / "settings.json",
+        Path(toplevel) / ".claude" / "settings.json",
+        Path(toplevel) / ".claude" / "settings.local.json",
+    ):
+        merged.update(_enabled_map(source))
+    enabled_keys = [k for k in clara_keys if merged.get(k) is True]
+    if enabled_keys:
+        rows.append(("ok", f"plugin enabled: {', '.join(enabled_keys)}"))
+    else:
+        rows.append((
+            "warn",
+            "plugin installed but not enabled for this project — no hook "
+            "fires and no memory_* tool loads.\n"
+            f'        what to do: add "{clara_keys[0]}": true to '
+            "enabledPlugins (user-level settings.json enables it everywhere, "
+            "or /plugin in a session)",
+        ))
+
+    # 2. Version pin vs the code actually installed. The host loads hooks
+    #    from the pinned cache directory, not from this checkout.
+    def _norm(p: str) -> str:
+        return p.replace("\\", "/").rstrip("/").casefold()
+
+    entries: list[dict[str, Any]] = []
+    for key in clara_keys:
+        value = plugins.get(key)
+        if isinstance(value, list):
+            entries.extend(e for e in value if isinstance(e, dict))
+    mine = [e for e in entries
+            if _norm(str(e.get("projectPath", ""))) == _norm(toplevel)]
+    scoped = mine or [e for e in entries if "projectPath" not in e]
+
+    pin = next((e.get("version") for e in scoped
+                if isinstance(e.get("version"), str)), None)
+    code_version: str | None
+    try:
+        from importlib.metadata import version as _pkg_version
+        code_version = _pkg_version("clara-memory")
+    except Exception:  # noqa: BLE001 — version lookup is best-effort
+        code_version = None
+    if pin and code_version and pin != code_version:
+        rows.append((
+            "warn",
+            f"this project is pinned to plugin cache {pin} but this CLI runs "
+            f"{code_version} — the pinned cache decides which hooks register.\n"
+            "        what to do: /plugin update clara in this project",
+        ))
+
+    # 3. Hook registration in the pinned cache.
+    hook_events: set[str] | None = None
+    for entry in scoped:
+        install_path = entry.get("installPath")
+        if not isinstance(install_path, str):
+            continue
+        try:
+            manifest = json.loads(
+                (Path(install_path) / "hooks" / "hooks.json")
+                .read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            continue
+        hooks = manifest.get("hooks") if isinstance(manifest, dict) else None
+        hook_events = set(hooks) if isinstance(hooks, dict) else set()
+        break
+    if hook_events is not None:
+        expected = {"SessionStart", "PostToolUse", "UserPromptSubmit", "Stop"}
+        absent = sorted(expected - hook_events)
+        if absent:
+            recall_note = (
+                " — no per-prompt recall" if "UserPromptSubmit" in absent else ""
+            )
+            rows.append((
+                "warn",
+                f"pinned plugin registers no {', '.join(absent)} "
+                f"hook{recall_note}.\n"
+                "        what to do: /plugin update clara — the current "
+                "version registers them",
+            ))
+        else:
+            rows.append(("ok", "pinned plugin registers all hook events"))
+
+    # 4. The host's own shim — the exe its mcpServers entry actually spawns.
+    #    _print_plugin_health checks CLAUDE_PLUGIN_DATA or the default data
+    #    dir; sessions use ~/.claude/plugins/data/<plugin>/shim, which on a
+    #    real machine was stale while both of those were healthy.
+    data_root = config_dir / "plugins" / "data"
+    if data_root.is_dir():
+        for data_dir in sorted(p for p in data_root.glob("*clara*")
+                               if p.is_dir()):
+            # Resolve the active venv FIRST: a directory with neither a
+            # `current` link nor a pointer file is not a CLARA plugin data
+            # layout (the *clara* glob can catch unrelated plugins), and
+            # judging its shim would be a false alarm.
+            venv = None
+            if (data_dir / "current").exists():
+                venv = data_dir / "current"
+            else:
+                pointer = data_dir / "current.path"
+                if pointer.is_file():
+                    try:
+                        candidate = Path(
+                            pointer.read_text(encoding="utf-8").strip()
+                        )
+                    except OSError:
+                        candidate = None
+                    if candidate and candidate.is_dir():
+                        venv = candidate
+            if venv is None:
+                continue
+            shim_bin = None
+            for ext in (".exe", ""):
+                candidate = data_dir / "shim" / f"clara-mcp{ext}"
+                if candidate.is_file():
+                    shim_bin = candidate
+                    break
+            if shim_bin is None:
+                rows.append((
+                    "warn",
+                    f"no MCP shim under {data_dir.name} — the memory server "
+                    "cannot start.\n"
+                    "        what to do: start a new session (bootstrap "
+                    "rebuilds the shim) or reinstall the plugin",
+                ))
+                continue
+            src = None
+            for sub in ("Scripts", "bin"):
+                for ext in (".exe", ""):
+                    candidate = venv / sub / f"clara-mcp{ext}"
+                    if candidate.is_file():
+                        src = candidate
+                        break
+                if src is not None:
+                    break
+            try:
+                stale = (src is not None
+                         and shim_bin.stat().st_mtime < src.stat().st_mtime)
+            except OSError:
+                stale = False
+            if stale:
+                rows.append((
+                    "warn",
+                    f"the MCP shim under {data_dir.name} is older than the "
+                    "active venv's binary — sessions may run outdated server "
+                    "code.\n"
+                    "        what to do: close Claude Code sessions and start "
+                    "a new one — the refresh retries once no running server "
+                    "locks the file",
+                ))
+    return rows
 
 
 def _print_plugin_health(db_path: str) -> None:
@@ -501,6 +706,14 @@ def _print_plugin_health(db_path: str) -> None:
         print(f"  [warn] last background install FAILED ({when})")
         print(f"        what to do: see {install_log} — usually no network "
               "access to PyPI, or a proxy blocking it.")
+    stale = data_dir / "shim.stale"
+    if stale.is_file():
+        when = stale.read_text(encoding="utf-8", errors="replace").strip()
+        print(f"  [warn] MCP shim refresh FAILED ({when}) — the memory server "
+              "may be running outdated code")
+        print("        what to do: close Claude Code sessions and start a new "
+              "one — the refresh retries at session start once no running "
+              "server locks the file.")
 
 
 # ---------------------------------------------------------------------------

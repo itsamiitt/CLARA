@@ -4,12 +4,36 @@
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# Kill switch: the proposals nudge is doc-curator behavior.
-$docsFlag = "$env:CLARA_DOCS_ENABLED".Trim().ToLower()
-if (@("0", "false", "no", "off") -contains $docsFlag) { exit 0 }
-
 if ($env:CLARA_HOME) { $base = $env:CLARA_HOME }
 else { $base = Join-Path $HOME ".clara" }
+
+# Stage 1: journal flush — one bounded indexing cycle when change-capture
+# left a journal-dirty flag. (The .cmd dispatcher normally runs this stage
+# itself; this covers hosts that invoke the ps1 body directly.)
+$memFlag = "$env:CLARA_MEMORY_ENABLED".Trim().ToLower()
+if (-not (@("0", "false", "no", "off") -contains $memFlag)) {
+    $dirtyDir = Join-Path $base "journal-dirty"
+    if ((Test-Path $dirtyDir) -and @(Get-ChildItem $dirtyDir -Force).Count -gt 0) {
+        if ($env:CLAUDE_PLUGIN_DATA) { $dataDir = $env:CLAUDE_PLUGIN_DATA }
+        else { $dataDir = Join-Path $base "plugin" }
+        $py = $null
+        $direct = Join-Path $dataDir "current\Scripts\python.exe"
+        if (Test-Path $direct -PathType Leaf) { $py = $direct }
+        if (-not $py) {
+            $pointer = Join-Path $dataDir "current.path"
+            if (Test-Path $pointer -PathType Leaf) {
+                $venv = (Get-Content $pointer -Raw).Trim()
+                $cand = Join-Path $venv "Scripts\python.exe"
+                if (Test-Path $cand -PathType Leaf) { $py = $cand }
+            }
+        }
+        if ($py) { & $py -m clara.fastpath.stop_flush 2>$null | Out-Null }
+    }
+}
+
+# Stage 2: the nudge. Kill switch: it is doc-curator behavior.
+$docsFlag = "$env:CLARA_DOCS_ENABLED".Trim().ToLower()
+if (@("0", "false", "no", "off") -contains $docsFlag) { exit 0 }
 $proposalsDir = Join-Path $base "proposals"
 if (-not (Test-Path $proposalsDir)) { exit 0 }
 

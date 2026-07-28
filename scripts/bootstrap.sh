@@ -44,16 +44,29 @@ DATA_DIR="${CLAUDE_PLUGIN_DATA:-${CLARA_HOME:-${HOME:-/tmp}/.clara}/plugin}"
 ensure_shim() {
   _venv=$1
   _data=$2
-  mkdir -p "$_data/shim" 2>/dev/null || return 1
+  if ! mkdir -p "$_data/shim" 2>/dev/null; then
+    date >"$_data/shim.stale" 2>/dev/null || true
+    return 1
+  fi
   # clara-mcp is required: the plugin's mcpServers entry spawns this exact
   # path. clara is best-effort but matters just as much in practice -- a
   # plugin-only install never puts the CLI on PATH, so `clara doctor`,
   # `clara sync` and the /clara:sync and /clara:docs slash commands (which
   # shell out to it) all failed with "command not found" for exactly the
   # users who installed the recommended way.
-  _shim_one "$_venv" "$_data" clara-mcp || return 1
-  _shim_one "$_venv" "$_data" clara || true
-  return 0
+  #
+  # The shim.stale marker makes a failed refresh loud and self-healing: a
+  # running clara-mcp.exe locks the copy target on Windows (copy AND rename
+  # are denied), so the refresh fails exactly when the server most needs
+  # replacing. The marker survives until a later refresh wins -- the fast
+  # path retries on it every session start, and doctor warns while it exists.
+  if _shim_one "$_venv" "$_data" clara-mcp; then
+    _shim_one "$_venv" "$_data" clara || true
+    rm -f "$_data/shim.stale" 2>/dev/null || true
+    return 0
+  fi
+  date >"$_data/shim.stale" 2>/dev/null || true
+  return 1
 }
 
 # Copy (Windows) or link (POSIX) one console script into the shim dir.
@@ -92,6 +105,64 @@ write_current_path() {
     _native=$(cygpath -w "$_venv" 2>/dev/null || printf '%s' "$_venv")
   fi
   printf '%s' "$_native" >"$_data/current.path" 2>/dev/null || true
+}
+
+# A path in the form the host OS names it, lowercased for comparison — MSYS
+# readlink returns /c/Users/... while $DATA may be C:\Users\..., and NTFS is
+# case-insensitive.
+_native_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    printf '%s' "$1"
+  fi | tr '[:upper:]' '[:lower:]'
+}
+
+# Point $DATA/current at a venv, replacing whatever is there now.
+#
+# On Windows this must NOT use ln. Measured against a junction left by
+# bootstrap.ps1: `ln -sfn` fails with "Not a directory" (as does sh rmdir),
+# and where MSYS ln does proceed it DEEP-COPIES the venv instead of linking
+# (four ~100 MB stray directories found on a real install). `cmd rmdir`
+# removes a junction or an empty directory but never a populated one, and
+# `mklink /J` recreates the pointer the same way bootstrap.ps1 does — no
+# admin rights needed. readlink is the discriminator: it resolves a junction
+# but fails on a real directory, so the rm -rf below can only ever hit a
+# stray deep-copy, never the venv behind a link.
+#
+# Failure is survivable everywhere: write_current_path keeps `current.path`
+# authoritative and every dispatcher falls back to it.
+set_current() {
+  _venv=$1
+  _data=$2
+  _cur="$_data/current"
+  if ! command -v cygpath >/dev/null 2>&1; then
+    if [ -e "$_cur" ] && [ ! -L "$_cur" ]; then
+      # Not a symlink on a POSIX system: a stray real directory. rmdir for
+      # an empty one, rm -rf otherwise — [ ! -L ] guarantees no link is
+      # being followed.
+      rmdir "$_cur" 2>/dev/null || rm -rf "$_cur" 2>/dev/null || return 1
+    fi
+    ln -sfn "$_venv" "$_cur" 2>/dev/null
+    return $?
+  fi
+  # cmd argument shape matters under MSYS: a whole-command quoted string
+  # ("mklink /J \"..\" \"..\"") reaches cmd mangled and fails with "syntax
+  # incorrect"; separate arguments with //J (path-conversion escape for the
+  # switch) arrive intact. Verified both ways on a live Git Bash.
+  _wc=$(cygpath -w "$_cur" 2>/dev/null || printf '%s' "$_cur")
+  _wv=$(cygpath -w "$_venv" 2>/dev/null || printf '%s' "$_venv")
+  if [ -e "$_cur" ]; then
+    cmd //c rmdir "$_wc" >/dev/null 2>&1 || true
+    if [ -e "$_cur" ] && ! readlink "$_cur" >/dev/null 2>&1; then
+      # Still there and not readable as a link: a populated real directory,
+      # i.e. the stray deep-copy MSYS ln leaves behind. Safe to delete.
+      rm -rf "$_cur" 2>/dev/null || true
+    fi
+    [ -e "$_cur" ] && return 1
+  fi
+  cmd //c mklink //J "$_wc" "$_wv" >/dev/null 2>&1 || return 1
+  return 0
 }
 
 # Hash the package sources with $1; empty output on failure.
@@ -170,7 +241,7 @@ if [ "${1:-}" = "--install-worker" ]; then
   fi
 
   if [ "$status" -eq 0 ] && find_bin "$VENV" clara-mcp >/dev/null; then
-    ln -sfn "$VENV" "$CURRENT"
+    set_current "$VENV" "$DATA" || echo "current pointer not replaced (current.path covers it)"
     # Before the GC below deletes the previous venv, so the Windows hooks are
     # never left reading a pointer to a directory that no longer exists.
     write_current_path "$VENV" "$DATA"
@@ -178,7 +249,7 @@ if [ "${1:-}" = "--install-worker" ]; then
     # package has fallen behind the checkout.
     _vpy_done=$(find_bin "$VENV" python) || _vpy_done=""
     [ -n "$_vpy_done" ] && hash_sources "$_vpy_done" >"$DATA/source.hash" 2>/dev/null
-    ensure_shim "$VENV" "$DATA" || echo "shim refresh failed (non-fatal)"
+    ensure_shim "$VENV" "$DATA" || echo "shim refresh failed (will retry at session start)"
     # GC: keep the two newest venvs (the one just installed + one fallback).
     # venv-* basenames are fixed-format hex, so parsing ls -dt is safe here.
     # shellcheck disable=SC2012
@@ -340,21 +411,28 @@ fi
 VENV="$DATA_DIR/venv-$HASH"
 
 # Fast path: the venv for the current hash is ready. Heal the `current`
-# pointer if it is missing or a symlink aimed elsewhere (a non-symlink
-# `current` — MSYS fallback copy — is left for the worker to replace).
+# pointer if it is missing, aimed elsewhere (readlink resolves junctions
+# too), or a stray MSYS deep-copy that only set_current knows how to replace.
 if find_bin "$VENV" clara-mcp >/dev/null; then
   current_target=$(readlink "$CURRENT" 2>/dev/null || true)
   if [ ! -e "$CURRENT" ]; then
-    ln -sfn "$VENV" "$CURRENT" 2>/dev/null || true
-  elif [ -n "$current_target" ] && [ "$current_target" != "$VENV" ]; then
-    ln -sfn "$VENV" "$CURRENT" 2>/dev/null || true
+    set_current "$VENV" "$DATA_DIR" || true
+  elif [ -n "$current_target" ] \
+      && [ "$(_native_path "$current_target")" != "$(_native_path "$VENV")" ]; then
+    set_current "$VENV" "$DATA_DIR" || true
+  elif [ -z "$current_target" ]; then
+    # Exists but not readable as a link: a stray deep-copy.
+    set_current "$VENV" "$DATA_DIR" || true
   fi
   write_current_path "$VENV" "$DATA_DIR"
   # The venv matches pyproject, but the package inside it may predate the
   # newest clara/*.py — refresh it before declaring the environment ready.
   ensure_current_sources "$VENV" "$DATA_DIR"
-  # Heal the MCP shim too (dangling after venv GC, missing on upgrade).
-  if [ ! -e "$DATA_DIR/shim/clara-mcp" ] && [ ! -e "$DATA_DIR/shim/clara-mcp.exe" ]; then
+  # Heal the MCP shim too: dangling after venv GC, missing on upgrade, or
+  # left stale by a refresh that failed against a running server (shim.stale).
+  if [ -f "$DATA_DIR/shim.stale" ]; then
+    ensure_shim "$VENV" "$DATA_DIR" || true
+  elif [ ! -e "$DATA_DIR/shim/clara-mcp" ] && [ ! -e "$DATA_DIR/shim/clara-mcp.exe" ]; then
     ensure_shim "$VENV" "$DATA_DIR" || true
   elif [ -L "$DATA_DIR/shim/clara-mcp" ] && [ ! -e "$DATA_DIR/shim/clara-mcp" ]; then
     ensure_shim "$VENV" "$DATA_DIR" || true

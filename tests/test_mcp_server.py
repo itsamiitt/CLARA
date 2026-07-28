@@ -67,6 +67,27 @@ def test_build_server_registers_all_tools():
     assert len(EXPECTED_TOOLS) == 22
 
 
+def test_save_tools_instruct_immediate_saving():
+    """The save-timing instruction lives in the tool descriptions themselves.
+
+    The SessionStart [MEMORY PROTOCOL] footer says "save in real time", but a
+    model that never saw that footer (suppressed store, trimmed context) still
+    sees the tool list — so the urgency must survive in the descriptions. A
+    real session lost half its facts to an end-of-session save burst against
+    a wedged server; this pins the wording that guards against a repeat.
+    """
+    pytest.importorskip("mcp")
+    from clara.integrations.mcp_server import build_server
+
+    server = build_server()
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    assert "the moment you learn it" in tools["memory_save"].description
+    assert "do not batch" in tools["memory_save"].description
+    assert "never queue facts for a session-end dump" in (
+        tools["memory_save_many"].description
+    )
+
+
 def test_docs_status_respects_kill_switch(monkeypatch):
     pytest.importorskip("mcp")
     from clara.flags import DOCS_DISABLED_HINT
